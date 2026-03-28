@@ -511,7 +511,7 @@ func (nm *NodeMonitor) collectMetrics() {
 }
 
 func (nm *NodeMonitor) getNicCounter(ctx context.Context) error {
-	sysInfo, err := nm.fastrgClient.GetFastrgSystemInfo(ctx, &emptypb.Empty{})
+	sysInfo, err := nm.fastrgClient.GetFastrgSystemStats(ctx, &emptypb.Empty{})
 	if err != nil {
 		return err
 	}
