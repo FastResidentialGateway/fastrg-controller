@@ -14,6 +14,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	_ "fastrg-controller/docs"
 	"fastrg-controller/internal/server"
 	"fastrg-controller/internal/storage"
 

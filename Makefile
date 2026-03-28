@@ -58,6 +58,8 @@ build-backend:
 	@echo "Building backend..."
 	@echo "Downloading and generating protobuf code..."
 	@cd proto && go generate ./... || true
+	@echo "Generating Swagger docs..."
+	swag init -g main.go --output docs
 	go build -o bin/controller .
 
 build-frontend:
