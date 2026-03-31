@@ -15,7 +15,7 @@ This is an SDN-enabled and open source Residential Gateway Controller, designed 
     - Support PPPoE Client
     - Support DHCP server for per-subscriber LAN users
     - Support VLAN tagging for subscriber traffic
-    - Support SNAT for subscriber traffic
+    - Support SNAT and port forwarding for subscriber traffic
 
 - Zero-touch provisioning – Automates subscriber onboarding with no manual intervention required.
 
@@ -116,7 +116,7 @@ make k8s-destroy-test-env
 Follow the instructions in the [FastRG Node repository](https://github.com/w180112/fastrg-node) to deploy the FastRG Node and register it with the FastRG Controller. Then you can manage the FastRG Node using the FastRG Controller's web UI or API.
 
 ## Road map
-- Support more dataplane features configuration(e.g., NAT port mapping)
+- Support more dataplane features configuration(e.g., DNS server configuration)
 - Improve web UI for better user experience
 - Support IPv6 dataplane configuration
 - Support IGMP traffic passthrough configuration for IPTV service
