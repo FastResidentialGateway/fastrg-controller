@@ -52,15 +52,24 @@ func getJWTSecret() string {
 	return base64.StdEncoding.EncodeToString(bytes)
 }
 
+// PortMapping represents a single SNAT port forwarding rule
+type PortMapping struct {
+	Index string `json:"index" example:"0"`
+	DIP   string `json:"dip" example:"192.168.3.2"`
+	DPort string `json:"dport" example:"8080"`
+	EPort string `json:"eport" example:"12345"`
+}
+
 // HSI config structure (Include PPPoE and DHCP settings)
 type HSIConfig struct {
-	UserID       string `json:"user_id" example:"2"`
-	VlanID       string `json:"vlan_id" example:"2"`
-	AccountName  string `json:"account_name" example:"admin"`
-	Password     string `json:"password" example:"admin"`
-	DHCPAddrPool string `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
-	DHCPSubnet   string `json:"dhcp_subnet" example:"255.255.255.0"`
-	DHCPGateway  string `json:"dhcp_gateway" example:"192.168.3.1"`
+	UserID       string        `json:"user_id" example:"2"`
+	VlanID       string        `json:"vlan_id" example:"2"`
+	AccountName  string        `json:"account_name" example:"admin"`
+	Password     string        `json:"password" example:"admin"`
+	DHCPAddrPool string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
+	DHCPSubnet   string        `json:"dhcp_subnet" example:"255.255.255.0"`
+	DHCPGateway  string        `json:"dhcp_gateway" example:"192.168.3.1"`
+	PortMappings []PortMapping `json:"port-mapping,omitempty"`
 }
 
 // HSIMetadata represents the metadata for HSI configuration

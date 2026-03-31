@@ -178,9 +178,27 @@ export const translations = {
     // Details headings
     'hsi.pppoeDetails': 'PPPoE 設定詳情：',
     'hsi.dhcpDetails': 'DHCP Server 設定詳情：',
+    'hsi.portMappingDetails': 'SNAT Port Forwarding 設定詳情：',
     'hsi.confirmDeleteAction': '確定刪除',
     'hsi.confirmDialAction': '確定撥號',
     'hsi.confirmHangupAction': '確定斷線',
+
+    // Port Mapping (SNAT)
+    'hsi.snatPortForwarding': 'SNAT Port Forwarding',
+    'hsi.portMappingHint': '選擇已有的 User ID，然後設定 SNAT port forwarding 規則。',
+    'hsi.portMapping.addRule': '新增規則',
+    'hsi.portMapping.noRules': '無 Port Forwarding 規則',
+    'hsi.portMapping.dip': '目的 IP (DIP)',
+    'hsi.portMapping.dport': '目的 Port (DPort)',
+    'hsi.portMapping.eport': '外部 Port (EPort)',
+    'hsi.portMapping.dipPlaceholder': '例如: 192.168.3.2',
+    'hsi.portMapping.dportPlaceholder': '例如: 8080',
+    'hsi.portMapping.eportPlaceholder': '例如: 12345',
+    'hsi.error.portMapping.missingDip': '第 {index} 筆規則缺少目的 IP',
+    'hsi.error.portMapping.invalidDip': '第 {index} 筆規則的目的 IP 格式不正確',
+    'hsi.error.portMapping.missingDport': '第 {index} 筆規則缺少目的 Port',
+    'hsi.error.portMapping.missingEport': '第 {index} 筆規則缺少外部 Port',
+    'hsi.error.portMapping.invalidPort': '第 {index} 筆規則的 Port 必須是 1 到 65535 之間的數字',
 
     // Failed Events Page
     'events.title': '失敗事件',
@@ -364,10 +382,28 @@ export const translations = {
     // Details headings
     'hsi.pppoeDetails': 'PPPoE Configuration Details:',
     'hsi.dhcpDetails': 'DHCP Server Configuration Details:',
+    'hsi.portMappingDetails': 'SNAT Port Forwarding Details:',
 
     'hsi.confirmDeleteAction': 'Confirm Delete',
     'hsi.confirmDialAction': 'Confirm Dial',
     'hsi.confirmHangupAction': 'Confirm Hang Up',
+
+    // Port Mapping (SNAT)
+    'hsi.snatPortForwarding': 'SNAT Port Forwarding',
+    'hsi.portMappingHint': 'Select an existing User ID, then configure SNAT port forwarding rules.',
+    'hsi.portMapping.addRule': 'Add Rule',
+    'hsi.portMapping.noRules': 'No port forwarding rules',
+    'hsi.portMapping.dip': 'Destination IP (DIP)',
+    'hsi.portMapping.dport': 'Destination Port (DPort)',
+    'hsi.portMapping.eport': 'External Port (EPort)',
+    'hsi.portMapping.dipPlaceholder': 'e.g.: 192.168.3.2',
+    'hsi.portMapping.dportPlaceholder': 'e.g.: 8080',
+    'hsi.portMapping.eportPlaceholder': 'e.g.: 12345',
+    'hsi.error.portMapping.missingDip': 'Rule #{index} is missing Destination IP',
+    'hsi.error.portMapping.invalidDip': 'Rule #{index} has an invalid Destination IP format',
+    'hsi.error.portMapping.missingDport': 'Rule #{index} is missing Destination Port',
+    'hsi.error.portMapping.missingEport': 'Rule #{index} is missing External Port',
+    'hsi.error.portMapping.invalidPort': 'Rule #{index} port must be between 1 and 65535',
 
     // Failed Events Page
     'events.title': 'Failed Events',

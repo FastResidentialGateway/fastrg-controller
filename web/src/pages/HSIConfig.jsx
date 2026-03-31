@@ -39,6 +39,9 @@ export default function HSIConfig() {
     dhcp_gateway: ''
   })
 
+  // Port mapping (SNAT) config
+  const [portMappings, setPortMappings] = useState([])
+
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -64,7 +67,7 @@ export default function HSIConfig() {
     }
   }
   useEffect(() => {
-    if (action === 'list' || action === 'delete' || action === 'dial' || action === 'hangup') {
+    if (action === 'list' || action === 'delete' || action === 'dial' || action === 'hangup' || action === 'snat') {
       loadUserIds()
     }
   }, [action])
@@ -124,6 +127,7 @@ export default function HSIConfig() {
         dhcp_subnet: configData.dhcp_subnet || '',
         dhcp_gateway: configData.dhcp_gateway || ''
       })
+      setPortMappings(Array.isArray(configData['port-mapping']) ? configData['port-mapping'] : [])
     } catch (err) {
   const msg = extractApiError(err) || t('hsi.loadConfigFailed')
   if (msg === 'User ID exceeds subscriber count') showToast(t('hsi.error.userIdExceeds') || msg, 3500, 'error')
@@ -148,6 +152,7 @@ export default function HSIConfig() {
       dhcp_subnet: '',
       dhcp_gateway: ''
     })
+    setPortMappings([])
     setSelectedUserId('')
     // Clear field validation states
     setTouchedFields({})
@@ -156,7 +161,7 @@ export default function HSIConfig() {
 
   const handleUserIdSelect = (userId) => {
     setSelectedUserId(userId)
-    if (action === 'list') {
+    if (action === 'list' || action === 'snat') {
       loadConfig(userId)
     }
   }
@@ -243,6 +248,9 @@ export default function HSIConfig() {
           dhcp_subnet: configData.dhcp_subnet || '',
           dhcp_gateway: configData.dhcp_gateway || ''
         })
+
+        // Auto-fill port mappings
+        setPortMappings(Array.isArray(configData['port-mapping']) ? configData['port-mapping'] : [])
 
         // Show success message (list filled fields)
         const filledFields = []
@@ -403,6 +411,49 @@ export default function HSIConfig() {
     return null
   }
 
+  // Port mapping validation
+  const validatePortMappings = () => {
+    for (let i = 0; i < portMappings.length; i++) {
+      const pm = portMappings[i]
+      if (!pm.dip || pm.dip.trim() === '') {
+        return t('hsi.error.portMapping.missingDip').replace('{index}', String(i + 1))
+      }
+      // Validate IP format
+      const ipParts = pm.dip.split('.').map(Number)
+      if (ipParts.length !== 4 || ipParts.some(p => isNaN(p) || p < 0 || p > 255)) {
+        return t('hsi.error.portMapping.invalidDip').replace('{index}', String(i + 1))
+      }
+      if (!pm.dport || pm.dport.trim() === '') {
+        return t('hsi.error.portMapping.missingDport').replace('{index}', String(i + 1))
+      }
+      const dportNum = parseInt(pm.dport)
+      if (isNaN(dportNum) || dportNum < 1 || dportNum > 65535) {
+        return t('hsi.error.portMapping.invalidPort').replace('{index}', String(i + 1))
+      }
+      if (!pm.eport || pm.eport.trim() === '') {
+        return t('hsi.error.portMapping.missingEport').replace('{index}', String(i + 1))
+      }
+      const eportNum = parseInt(pm.eport)
+      if (isNaN(eportNum) || eportNum < 1 || eportNum > 65535) {
+        return t('hsi.error.portMapping.invalidPort').replace('{index}', String(i + 1))
+      }
+    }
+    return null
+  }
+
+  // Port mapping helpers
+  const addPortMapping = () => {
+    setPortMappings(prev => [...prev, { dip: '', dport: '', eport: '' }])
+  }
+
+  const removePortMapping = (index) => {
+    setPortMappings(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const updatePortMapping = (index, field, value) => {
+    setPortMappings(prev => prev.map((pm, i) => i === index ? { ...pm, [field]: value } : pm))
+  }
+
   const handleNextStep = () => {
     const validationError = validatePPPoEConfig()
     if (validationError) {
@@ -474,6 +525,7 @@ export default function HSIConfig() {
         dhcp_subnet: '',
         dhcp_gateway: ''
       })
+      setPortMappings([])
     } catch (err) {
   const msg = extractApiError(err) || t('hsi.saveFailed')
   if (msg === 'User ID exceeds subscriber count') showToast(t('hsi.error.userIdExceeds') || msg, 3500, 'error')
@@ -554,6 +606,56 @@ export default function HSIConfig() {
     }
   }
 
+  const handleSaveSnat = async () => {
+    if (!selectedUserId) {
+      alert(t('hsi.selectUserId'))
+      return
+    }
+
+    const portMappingError = validatePortMappings()
+    if (portMappingError) {
+      alert(portMappingError)
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    try {
+      // Load existing config to preserve all fields
+      const response = await getHSIConfig(nodeId, selectedUserId)
+      const configData = response.config || response
+
+      // Build payload with existing fields + updated port-mapping
+      const fullConfig = {
+        user_id: configData.user_id || selectedUserId,
+        vlan_id: configData.vlan_id || '',
+        account_name: configData.account_name || '',
+        password: configData.password || '',
+        dhcp_addr_pool: configData.dhcp_addr_pool || '',
+        dhcp_subnet: configData.dhcp_subnet || '',
+        dhcp_gateway: configData.dhcp_gateway || ''
+      }
+
+      if (portMappings.length > 0) {
+        fullConfig['port-mapping'] = portMappings.map((pm, idx) => ({
+          index: String(idx),
+          dip: pm.dip,
+          dport: pm.dport,
+          eport: pm.eport
+        }))
+      }
+
+      await updateHSIConfig(nodeId, selectedUserId, fullConfig)
+      alert(t('hsi.saveSuccess'))
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.saveFailed')
+      if (msg === 'User ID exceeds subscriber count') showToast(t('hsi.error.userIdExceeds') || msg, 3500, 'error')
+      else setError(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div style={{ padding: '20px' }}>
       <div style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -595,7 +697,8 @@ export default function HSIConfig() {
             { key: 'list', labelKey: 'hsi.listPppoe' },
             { key: 'delete', labelKey: 'hsi.deletePppoe' },
             { key: 'dial', labelKey: 'hsi.dial' },
-            { key: 'hangup', labelKey: 'hsi.hangup' }
+            { key: 'hangup', labelKey: 'hsi.hangup' },
+            { key: 'snat', labelKey: 'hsi.snatPortForwarding' }
           ].map(({ key, labelKey }) => (
             <button
               key={key}
@@ -854,7 +957,7 @@ export default function HSIConfig() {
                     onClick={handleCreateOrUpdate}
                     disabled={loading}
                     style={{
-                      backgroundColor: '#28a745',
+                      backgroundColor: '#007bff',
                       color: 'white',
                       border: 'none',
                       borderRadius: '4px',
@@ -865,6 +968,135 @@ export default function HSIConfig() {
                     {loading ? t('common.processing') : t('hsi.confirm')}
                   </button>
                 </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {action === 'snat' && (
+        <div>
+          <h3>{t('hsi.snatPortForwarding')}</h3>
+          <p style={{ color: '#6c757d', marginBottom: '15px', fontSize: '14px' }}>
+            {t('hsi.portMappingHint')}
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{
+                padding: '8px',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                minWidth: '200px'
+              }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(userId => (
+                <option key={userId} value={userId}>{userId}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div style={{ maxWidth: '700px' }}>
+              {portMappings.map((pm, idx) => (
+                <div key={idx} style={{ 
+                  display: 'flex', 
+                  gap: '10px', 
+                  marginBottom: '10px', 
+                  alignItems: 'center',
+                  padding: '10px',
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: '4px',
+                  border: '1px solid #dee2e6'
+                }}>
+                  <span style={{ fontWeight: 'bold', minWidth: '25px', color: '#495057' }}>#{idx + 1}</span>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '2px' }}>
+                      {t('hsi.portMapping.dip')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={t('hsi.portMapping.dipPlaceholder')}
+                      value={pm.dip}
+                      onChange={(e) => updatePortMapping(idx, 'dip', e.target.value)}
+                      style={{ width: '100%', padding: '6px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '2px' }}>
+                      {t('hsi.portMapping.dport')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={t('hsi.portMapping.dportPlaceholder')}
+                      value={pm.dport}
+                      onChange={(e) => updatePortMapping(idx, 'dport', e.target.value)}
+                      style={{ width: '100%', padding: '6px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '2px' }}>
+                      {t('hsi.portMapping.eport')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={t('hsi.portMapping.eportPlaceholder')}
+                      value={pm.eport}
+                      onChange={(e) => updatePortMapping(idx, 'eport', e.target.value)}
+                      style={{ width: '100%', padding: '6px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <button
+                    onClick={() => removePortMapping(idx)}
+                    style={{
+                      backgroundColor: '#dc3545',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '6px 10px',
+                      cursor: 'pointer',
+                      alignSelf: 'flex-end',
+                      marginBottom: '2px'
+                    }}
+                    title={t('common.delete')}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={addPortMapping}
+                style={{
+                  backgroundColor: '#17a2b8',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '8px 16px',
+                  cursor: 'pointer',
+                  marginBottom: '20px'
+                }}
+              >
+                + {t('hsi.portMapping.addRule')}
+              </button>
+              <div>
+                <button
+                  onClick={handleSaveSnat}
+                  disabled={loading}
+                  style={{
+                    backgroundColor: '#28a745',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '10px 20px',
+                    cursor: loading ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {loading ? t('common.processing') : t('hsi.confirm')}
+                </button>
               </div>
             </div>
           )}
@@ -942,6 +1174,34 @@ export default function HSIConfig() {
               <div style={{ marginBottom: '10px' }}>
                 <strong>{t('hsi.gatewayLabel')}:</strong> {dhcpConfig.dhcp_gateway || t('common.notSet')}
               </div>
+
+              <h4>{t('hsi.portMappingDetails')}</h4>
+              {portMappings.length === 0 ? (
+                <div style={{ marginBottom: '10px', color: '#6c757d' }}>
+                  {t('hsi.portMapping.noRules')}
+                </div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '10px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f8f9fa' }}>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>#</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.portMapping.dip')}</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.portMapping.dport')}</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.portMapping.eport')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portMappings.map((pm, idx) => (
+                      <tr key={idx}>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{pm.index || idx}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{pm.dip}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{pm.dport}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{pm.eport}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
 
