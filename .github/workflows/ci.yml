@@ -68,7 +68,7 @@ jobs:
         docker load < fastrg-controller.tar.gz
         docker images
     - name: Set up kubectl
-      uses: azure/setup-kubectl@v4
+      uses: azure/setup-kubectl@v5
       with:
         version: 'latest'
     - name: Set up Helm
@@ -115,7 +115,7 @@ jobs:
         docker load < fastrg-controller.tar.gz
         docker images
     - name: Set up kubectl
-      uses: azure/setup-kubectl@v4
+      uses: azure/setup-kubectl@v5
       with:
         version: 'latest'
     - name: Install kind and cilium cli
