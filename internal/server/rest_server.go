@@ -98,6 +98,13 @@ type UpdateSubscriberCount struct {
 	SubscriberCount int `json:"subscriber_count" example:"100"`
 }
 
+// DnsRecord represents a static DNS record stored in etcd
+type DnsRecord struct {
+	Domain string `json:"domain" example:"www.fastrg.org"`
+	IP     string `json:"ip" example:"192.168.201.10"`
+	TTL    uint32 `json:"ttl" example:"30"`
+}
+
 // SubscriberCountMetadata represents metadata for subscriber count
 type SubscriberCountMetadata struct {
 	Node            string `json:"node"`
@@ -1566,6 +1573,164 @@ func (r *RestServer) GetAllFailedEvents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
+// ===== Static DNS Record Management =====
+
+// GetDnsRecords returns all static DNS records for a user on a node
+func (r *RestServer) GetDnsRecords(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	if nodeId == "" || userId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	prefix := fmt.Sprintf("configs/%s/%s/dns/", nodeId, userId)
+	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
+		return
+	}
+
+	records := []DnsRecord{}
+	for _, kv := range resp.Kvs {
+		var record DnsRecord
+		if err := json.Unmarshal(kv.Value, &record); err != nil {
+			logrus.WithError(err).Errorf("Failed to parse DNS record: %s", string(kv.Key))
+			continue
+		}
+		records = append(records, record)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"records": records})
+}
+
+// GetDnsRecord returns a single static DNS record by domain
+func (r *RestServer) GetDnsRecord(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	domain := c.Param("domain")
+	if nodeId == "" || userId == "" || domain == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID, User ID and Domain are required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, domain)
+	resp, err := r.etcd.Client().Get(ctx, key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS record"})
+		return
+	}
+
+	if len(resp.Kvs) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
+		return
+	}
+
+	var record DnsRecord
+	if err := json.Unmarshal(resp.Kvs[0].Value, &record); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS record"})
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+// AddOrUpdateDnsRecord creates or updates a static DNS record
+func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	if nodeId == "" || userId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+		return
+	}
+
+	var record DnsRecord
+	if err := c.ShouldBindJSON(&record); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if record.Domain == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
+		return
+	}
+	if record.IP == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "IP is required"})
+		return
+	}
+	if record.TTL == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "TTL must be greater than 0"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, record.Domain)
+
+	// Check if record already exists to determine add vs update
+	existingResp, err := r.etcd.Client().Get(ctx, key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing DNS record"})
+		return
+	}
+	isUpdate := len(existingResp.Kvs) > 0
+
+	recordJSON, err := json.Marshal(record)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS record"})
+		return
+	}
+
+	_, err = r.etcd.Client().Put(ctx, key, string(recordJSON))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS record"})
+		return
+	}
+
+	if isUpdate {
+		logrus.Infof("DNS record updated for node %s user %s domain %s", nodeId, userId, record.Domain)
+		c.JSON(http.StatusOK, gin.H{"message": "DNS record updated successfully", "action": "updated"})
+	} else {
+		logrus.Infof("DNS record added for node %s user %s domain %s", nodeId, userId, record.Domain)
+		c.JSON(http.StatusOK, gin.H{"message": "DNS record added successfully", "action": "added"})
+	}
+}
+
+// DeleteDnsRecord removes a static DNS record
+func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	domain := c.Param("domain")
+	if nodeId == "" || userId == "" || domain == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID, User ID and Domain are required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, domain)
+
+	// Check if record exists
+	resp, err := r.etcd.Client().Get(ctx, key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check DNS record"})
+		return
+	}
+	if len(resp.Kvs) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
+		return
+	}
+
+	_, err = r.etcd.Client().Delete(ctx, key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete DNS record"})
+		return
+	}
+
+	logrus.Infof("DNS record deleted for node %s user %s domain %s", nodeId, userId, domain)
+	c.JSON(http.StatusOK, gin.H{"message": "DNS record deleted successfully"})
+}
+
 func (r *RestServer) StartRestServer(addr string) error {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -1606,6 +1771,12 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.DELETE("/config/:nodeId/hsi/:userId", r.AuthMiddlewareWithBlacklist(), r.DeleteHSIConfig)
 		api.POST("/pppoe/dial", r.AuthMiddlewareWithBlacklist(), r.DialPPPoE)
 		api.POST("/pppoe/hangup", r.AuthMiddlewareWithBlacklist(), r.HangupPPPoE)
+
+		// Static DNS record management
+		api.GET("/config/:nodeId/dns/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsRecords)
+		api.GET("/config/:nodeId/dns/:userId/:domain", r.AuthMiddlewareWithBlacklist(), r.GetDnsRecord)
+		api.POST("/config/:nodeId/dns/:userId", r.AuthMiddlewareWithBlacklist(), r.AddOrUpdateDnsRecord)
+		api.DELETE("/config/:nodeId/dns/:userId/:domain", r.AuthMiddlewareWithBlacklist(), r.DeleteDnsRecord)
 
 		// Failed events endpoints
 		api.GET("/failed-events", r.AuthMiddlewareWithBlacklist(), r.GetAllFailedEvents)
