@@ -120,12 +120,13 @@ type SubscriberCountData struct {
 }
 
 type RestServer struct {
-	etcd      *storage.EtcdClient
-	jwtSecret []byte
+	etcd           *storage.EtcdClient
+	jwtSecret      []byte
+	nodeMonitorMgr *NodeMonitorManager
 }
 
-func NewRestServer(etcd *storage.EtcdClient) *RestServer {
-	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret())}
+func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *RestServer {
+	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm}
 }
 
 // EtcdHealthCheck returns the health status of the service
@@ -1347,6 +1348,48 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "PPPoE hangup command sent successfully"})
 }
 
+// GetDhcpLeaseCount returns current DHCP lease count for a user on a node
+// @Summary      Get DHCP Lease Count
+// @Description  Get the current number of allocated DHCP IPs for a specific user on a node
+// @Tags         DHCP
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  map[string]interface{}
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /config/{nodeId}/dhcp/lease/{userId} [get]
+func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+
+	if r.nodeMonitorMgr == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node monitor not available"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	result, found, err := r.nodeMonitorMgr.GetNodeDhcpLease(ctx, nodeId, userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DHCP lease info: %v", err)})
+		return
+	}
+
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cur_lease_count": result.CurLeaseCount,
+		"max_lease_count": result.MaxLeaseCount,
+		"inuse_ips":       result.InuseIps,
+		"status":          result.Status,
+	})
+}
+
 // UpdateNodeSubscriberCount updates the subscriber count for a node
 // @Summary      Update Node Subscriber Count
 // @Description  Update the subscriber count for a specific node
@@ -1771,6 +1814,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.DELETE("/config/:nodeId/hsi/:userId", r.AuthMiddlewareWithBlacklist(), r.DeleteHSIConfig)
 		api.POST("/pppoe/dial", r.AuthMiddlewareWithBlacklist(), r.DialPPPoE)
 		api.POST("/pppoe/hangup", r.AuthMiddlewareWithBlacklist(), r.HangupPPPoE)
+		api.GET("/config/:nodeId/dhcp/lease/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpLeaseCount)
 
 		// Static DNS record management
 		api.GET("/config/:nodeId/dns/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsRecords)

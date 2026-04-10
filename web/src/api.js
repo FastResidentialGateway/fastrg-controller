@@ -242,3 +242,11 @@ export async function deleteDnsRecord(nodeId, userId, domain){
   if(resp.status !== 200) throw new Error('failed to delete DNS record')
   return resp.data
 }
+
+export async function getDhcpLeaseCount(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/dhcp/lease/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get DHCP lease count')
+  return resp.data
+}

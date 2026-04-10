@@ -33,13 +33,13 @@ type GrpcServer struct {
 	nodeMonitorMgr *NodeMonitorManager
 }
 
-func NewGrpcServer(etcd *storage.EtcdClient) *GrpcServer {
+func NewGrpcServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *GrpcServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &GrpcServer{
 		etcd:           etcd,
 		ctx:            ctx,
 		cancelCtx:      cancel,
-		nodeMonitorMgr: NewNodeMonitorManager(),
+		nodeMonitorMgr: nmm,
 	}
 
 	// Start the stale node monitor in a background goroutine
