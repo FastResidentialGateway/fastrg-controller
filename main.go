@@ -108,11 +108,14 @@ func main() {
 		logrus.WithError(err).Error("failed to start Prometheus metrics server")
 	}
 
+	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
+	nmm := server.NewNodeMonitorManager()
+
 	var wg sync.WaitGroup
 
 	// start gRPC server
 	wg.Go(func() {
-		grpcSrv := server.NewGrpcServer(etcd)
+		grpcSrv := server.NewGrpcServer(etcd, nmm)
 		logrus.Infof("Starting gRPC server on :%s", grpcPort)
 		grpcSrv.Start(":" + grpcPort)
 	})
@@ -128,7 +131,7 @@ func main() {
 	}
 
 	// start REST API (HTTPS)
-	rest := server.NewRestServer(etcd)
+	rest := server.NewRestServer(etcd, nmm)
 	logrus.Infof("Starting HTTPS server on :%s", httpsPort)
 	if err := rest.StartRestServer(":" + httpsPort); err != nil {
 		logrus.WithError(err).Fatal("failed to start HTTPS server")

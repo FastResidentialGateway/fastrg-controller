@@ -666,3 +666,54 @@ func (nm *NodeMonitor) getDhcpLeaseStats(ctx context.Context) error {
 
 	return nil
 }
+
+// DhcpLeaseResult holds DHCP lease information for one user
+type DhcpLeaseResult struct {
+	CurLeaseCount int
+	MaxLeaseCount int
+	InuseIps      []string
+	Status        string
+}
+
+// GetNodeDhcpLease fetches real-time DHCP lease info for a given node and user via gRPC.
+// Returns (result, found, err). found is false when the node is not actively monitored or
+// the user has no DHCP info on the node.
+func (nmm *NodeMonitorManager) GetNodeDhcpLease(ctx context.Context, nodeUUID, userID string) (*DhcpLeaseResult, bool, error) {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		return nil, false, nil
+	}
+
+	dhcpInfo, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &emptypb.Empty{})
+	if err != nil {
+		return nil, false, err
+	}
+
+	for _, info := range dhcpInfo.DhcpInfos {
+		if fmt.Sprint(info.UserId) == userID {
+			curCount := len(info.InuseIps)
+			maxCount := 0
+			if info.IpRange != "" && info.IpRange != "Not configured" {
+				ipStart, ipEnd, perr := utils.ParseIPRange(info.IpRange)
+				if perr == nil {
+					startUint, serr := utils.IPv4toInt(ipStart)
+					endUint, eerr := utils.IPv4toInt(ipEnd)
+					if serr == nil && eerr == nil {
+						maxCount = int(endUint-startUint) + 1
+					}
+				}
+			}
+			return &DhcpLeaseResult{
+				CurLeaseCount: curCount,
+				MaxLeaseCount: maxCount,
+				InuseIps:      info.InuseIps,
+				Status:        info.Status,
+			}, true, nil
+		}
+	}
+
+	// user not found in DHCP info — return zero counts
+	return &DhcpLeaseResult{CurLeaseCount: 0, MaxLeaseCount: 0, InuseIps: nil, Status: ""}, true, nil
+}
