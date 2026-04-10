@@ -209,3 +209,36 @@ export async function updateNodeSubscriberCount(nodeId, subscriberCount){
   if(resp.status !== 200) throw new Error('failed to update subscriber count')
   return resp.data
 }
+
+// Static DNS Record API
+export async function getDnsRecords(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/dns/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get DNS records')
+  return resp.data.records || []
+}
+
+export async function getDnsRecord(nodeId, userId, domain){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/dns/${userId}/${encodeURIComponent(domain)}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get DNS record')
+  return resp.data
+}
+
+export async function addOrUpdateDnsRecord(nodeId, userId, record){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.post(`/api/config/${nodeId}/dns/${userId}`, record, { headers })
+  if(resp.status !== 200) throw new Error('failed to add/update DNS record')
+  return resp.data
+}
+
+export async function deleteDnsRecord(nodeId, userId, domain){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.delete(`/api/config/${nodeId}/dns/${userId}/${encodeURIComponent(domain)}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to delete DNS record')
+  return resp.data
+}

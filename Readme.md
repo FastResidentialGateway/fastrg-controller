@@ -116,7 +116,6 @@ make k8s-destroy-test-env
 Follow the instructions in the [FastRG Node repository](https://github.com/w180112/fastrg-node) to deploy the FastRG Node and register it with the FastRG Controller. Then you can manage the FastRG Node using the FastRG Controller's web UI or API.
 
 ## Road map
-- Support more dataplane features configuration(e.g., DNS server configuration)
 - Improve web UI for better user experience
 - Support IPv6 dataplane configuration
-- Support IGMP traffic passthrough configuration for IPTV service
+- Support IGMP/IPTV traffic passthrough configuration for IPTV service

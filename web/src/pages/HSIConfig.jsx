@@ -7,7 +7,11 @@ import {
   updateHSIConfig, 
   deleteHSIConfig,
   dialPPPoE,
-  hangupPPPoE
+  hangupPPPoE,
+  getDnsRecords,
+  getDnsRecord,
+  addOrUpdateDnsRecord,
+  deleteDnsRecord
 } from '../api'
 import { useI18n } from '../i18n/I18nContext'
 import useToast from '../components/ToastBridge'
@@ -42,6 +46,14 @@ export default function HSIConfig() {
   // Port mapping (SNAT) config
   const [portMappings, setPortMappings] = useState([])
 
+  // DNS record state
+  const [dnsRecords, setDnsRecords] = useState([])
+  const [dnsForm, setDnsForm] = useState({ domain: '', ip: '', ttl: '' })
+  const [dnsIsUpdate, setDnsIsUpdate] = useState(false)
+  const [dnsAutoFillTimeout, setDnsAutoFillTimeout] = useState(null)
+  const [dnsCheckingDomain, setDnsCheckingDomain] = useState(false)
+  const [dnsLoading, setDnsLoading] = useState(false)
+
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -67,7 +79,7 @@ export default function HSIConfig() {
     }
   }
   useEffect(() => {
-    if (action === 'list' || action === 'delete' || action === 'dial' || action === 'hangup' || action === 'snat') {
+    if (action === 'list' || action === 'delete' || action === 'dial' || action === 'hangup' || action === 'snat' || action === 'dns') {
       loadUserIds()
     }
   }, [action])
@@ -86,6 +98,9 @@ export default function HSIConfig() {
     return () => {
       if (autoFillTimeout) {
         clearTimeout(autoFillTimeout)
+      }
+      if (dnsAutoFillTimeout) {
+        clearTimeout(dnsAutoFillTimeout)
       }
     }
   }, [])
@@ -154,6 +169,11 @@ export default function HSIConfig() {
     })
     setPortMappings([])
     setSelectedUserId('')
+    // Reset DNS state
+    setDnsRecords([])
+    setDnsForm({ domain: '', ip: '', ttl: '' })
+    setDnsIsUpdate(false)
+    setDnsCheckingDomain(false)
     // Clear field validation states
     setTouchedFields({})
     setFieldErrors({})
@@ -163,6 +183,10 @@ export default function HSIConfig() {
     setSelectedUserId(userId)
     if (action === 'list' || action === 'snat') {
       loadConfig(userId)
+    }
+    if (action === 'dns') {
+      // Load DNS records for this user
+      loadDnsRecords(userId)
     }
   }
 
@@ -606,6 +630,126 @@ export default function HSIConfig() {
     }
   }
 
+  // ===== DNS Record Functions =====
+  const loadDnsRecords = async (userId) => {
+    setDnsLoading(true)
+    setDnsRecords([])
+    setDnsForm({ domain: '', ip: '', ttl: '' })
+    setDnsIsUpdate(false)
+    try {
+      const records = await getDnsRecords(nodeId, userId)
+      setDnsRecords(records)
+    } catch (err) {
+      // 404 is normal (no records yet)
+      if (!err.response || err.response.status !== 404) {
+        const msg = extractApiError(err) || t('dns.loadFailed')
+        showToast(msg, 3500, 'error')
+      }
+      setDnsRecords([])
+    } finally {
+      setDnsLoading(false)
+    }
+  }
+
+  const handleDnsDomainChange = (value) => {
+    setDnsForm(prev => ({ ...prev, domain: value }))
+    setDnsIsUpdate(false)
+
+    // Clear previous timeout
+    if (dnsAutoFillTimeout) {
+      clearTimeout(dnsAutoFillTimeout)
+    }
+
+    if (value.trim() === '' || !selectedUserId) {
+      setDnsCheckingDomain(false)
+      return
+    }
+
+    // Debounced domain lookup
+    const timeoutId = setTimeout(async () => {
+      setDnsCheckingDomain(true)
+      try {
+        const record = await getDnsRecord(nodeId, selectedUserId, value.trim())
+        // Record exists — auto-fill IP + TTL for update
+        setDnsForm(prev => ({
+          ...prev,
+          ip: record.ip || '',
+          ttl: record.ttl !== undefined ? String(record.ttl) : ''
+        }))
+        setDnsIsUpdate(true)
+      } catch (_) {
+        // Not found — new record mode
+        setDnsIsUpdate(false)
+      } finally {
+        setDnsCheckingDomain(false)
+      }
+    }, 500)
+    setDnsAutoFillTimeout(timeoutId)
+  }
+
+  const handleAddOrUpdateDns = async () => {
+    const { domain, ip, ttl } = dnsForm
+    if (!domain.trim()) {
+      alert(t('dns.error.missingDomain'))
+      return
+    }
+    if (!ip.trim()) {
+      alert(t('dns.error.missingIp'))
+      return
+    }
+    const ttlNum = parseInt(ttl, 10)
+    if (isNaN(ttlNum) || ttlNum <= 0) {
+      alert(t('dns.error.invalidTtl'))
+      return
+    }
+
+    // Validate IP format
+    const ipParts = ip.split('.').map(Number)
+    if (ipParts.length !== 4 || ipParts.some(p => isNaN(p) || p < 0 || p > 255)) {
+      alert(t('dns.error.invalidIp'))
+      return
+    }
+
+    setLoading(true)
+    try {
+      const result = await addOrUpdateDnsRecord(nodeId, selectedUserId, {
+        domain: domain.trim(),
+        ip: ip.trim(),
+        ttl: ttlNum
+      })
+      showToast(
+        result.action === 'updated' ? t('dns.updateSuccess') : t('dns.addSuccess'),
+        3500,
+        'info'
+      )
+      setDnsForm({ domain: '', ip: '', ttl: '' })
+      setDnsIsUpdate(false)
+      await loadDnsRecords(selectedUserId)
+    } catch (err) {
+      const msg = extractApiError(err) || t('dns.saveFailed')
+      showToast(msg, 4500, 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDeleteDns = async (domain) => {
+    if (!window.confirm(t('dns.confirmDelete').replace('{domain}', domain))) {
+      return
+    }
+    setLoading(true)
+    try {
+      await deleteDnsRecord(nodeId, selectedUserId, domain)
+      showToast(t('dns.deleteSuccess'), 3500, 'info')
+      await loadDnsRecords(selectedUserId)
+    } catch (err) {
+      const msg = extractApiError(err) || t('dns.deleteFailed')
+      showToast(msg, 4500, 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleSaveSnat = async () => {
     if (!selectedUserId) {
       alert(t('hsi.selectUserId'))
@@ -698,7 +842,8 @@ export default function HSIConfig() {
             { key: 'delete', labelKey: 'hsi.deletePppoe' },
             { key: 'dial', labelKey: 'hsi.dial' },
             { key: 'hangup', labelKey: 'hsi.hangup' },
-            { key: 'snat', labelKey: 'hsi.snatPortForwarding' }
+            { key: 'snat', labelKey: 'hsi.snatPortForwarding' },
+            { key: 'dns', labelKey: 'dns.staticDnsRecord' }
           ].map(({ key, labelKey }) => (
             <button
               key={key}
@@ -1098,6 +1243,170 @@ export default function HSIConfig() {
                   {loading ? t('common.processing') : t('hsi.confirm')}
                 </button>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== Static DNS Record Section ===== */}
+      {action === 'dns' && (
+        <div>
+          <h3>{t('dns.staticDnsRecord')}</h3>
+          <p style={{ color: '#6c757d', marginBottom: '15px', fontSize: '14px' }}>
+            {t('dns.hint')}
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{
+                padding: '8px',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                minWidth: '200px'
+              }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(uid => (
+                <option key={uid} value={uid}>{uid}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div style={{ maxWidth: '700px' }}>
+              {/* Add / Update DNS record form */}
+              <div style={{
+                padding: '15px',
+                backgroundColor: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #dee2e6',
+                marginBottom: '20px'
+              }}>
+                <h4 style={{ marginTop: 0 }}>
+                  {dnsIsUpdate ? t('dns.updateRecord') : t('dns.addRecord')}
+                  {dnsCheckingDomain && (
+                    <span style={{ marginLeft: '10px', color: '#007bff', fontSize: '12px' }}>
+                      {t('dns.checkingDomain')}
+                    </span>
+                  )}
+                </h4>
+                {dnsIsUpdate && (
+                  <div style={{
+                    padding: '8px 12px',
+                    backgroundColor: '#fff3cd',
+                    borderRadius: '4px',
+                    border: '1px solid #ffc107',
+                    marginBottom: '12px',
+                    fontSize: '13px',
+                    color: '#856404'
+                  }}>
+                    {t('dns.updateNotice')}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                  <div style={{ flex: 2, minWidth: '180px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '4px' }}>
+                      {t('dns.domain')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={t('dns.domainPlaceholder')}
+                      value={dnsForm.domain}
+                      onChange={(e) => handleDnsDomainChange(e.target.value)}
+                      style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1, minWidth: '140px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '4px' }}>
+                      {t('dns.ip')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={t('dns.ipPlaceholder')}
+                      value={dnsForm.ip}
+                      onChange={(e) => setDnsForm(prev => ({ ...prev, ip: e.target.value }))}
+                      style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1, minWidth: '80px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: '#6c757d', marginBottom: '4px' }}>
+                      {t('dns.ttl')}
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder={t('dns.ttlPlaceholder')}
+                      value={dnsForm.ttl}
+                      onChange={(e) => setDnsForm(prev => ({ ...prev, ttl: e.target.value }))}
+                      style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+                    />
+                  </div>
+                  <button
+                    onClick={handleAddOrUpdateDns}
+                    disabled={loading || dnsCheckingDomain}
+                    style={{
+                      backgroundColor: dnsIsUpdate ? '#ffc107' : '#28a745',
+                      color: dnsIsUpdate ? '#000' : 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '8px 16px',
+                      cursor: (loading || dnsCheckingDomain) ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
+                      alignSelf: 'flex-end'
+                    }}
+                  >
+                    {loading ? t('common.processing') : (dnsIsUpdate ? t('dns.update') : t('dns.add'))}
+                  </button>
+                </div>
+              </div>
+
+              {/* DNS records table */}
+              <h4>{t('dns.currentRecords')}</h4>
+              {dnsLoading ? (
+                <div style={{ textAlign: 'center', padding: '15px' }}>{t('common.loading')}</div>
+              ) : dnsRecords.length === 0 ? (
+                <div style={{ color: '#6c757d', marginBottom: '10px' }}>{t('dns.noRecords')}</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '10px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f8f9fa' }}>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('dns.domain')}</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('dns.ip')}</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('dns.ttl')}</th>
+                      <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'center' }}>{t('hsi.actions')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dnsRecords.map((rec, idx) => (
+                      <tr key={idx}>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{rec.domain}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{rec.ip}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{rec.ttl}</td>
+                        <td style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'center' }}>
+                          <button
+                            onClick={() => handleDeleteDns(rec.domain)}
+                            disabled={loading}
+                            style={{
+                              backgroundColor: '#dc3545',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '4px 10px',
+                              cursor: loading ? 'not-allowed' : 'pointer',
+                              fontSize: '12px'
+                            }}
+                          >
+                            {t('common.delete')}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
         </div>
