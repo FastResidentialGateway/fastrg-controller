@@ -1,9 +1,9 @@
 # FastRG(Fast Residential Gateway) Controller
 
-[![FastRG Controller CI](https://github.com/w180112/fastrg-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/w180112/fastrg-controller/actions/workflows/ci.yml)
+[![FastRG Controller CI](https://github.com/FastResidentialGateway/fastrg-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/FastResidentialGateway/fastrg-controller/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
-This is an SDN-enabled and open source Residential Gateway Controller, designed to work together with the [Fast Residential Gateway Node](https://github.com/w180112/fastrg-node) dataplane deployed at the Central Office. Its purpose is to enable more efficient and centralized management of residential broadband networks ranging from 1 Gbps up to 25 Gbps, while achieving zero-touch deployment of new broadband subscribers.
+This is an SDN-enabled and open source Residential Gateway Controller, designed to work together with the [Fast Residential Gateway Node](https://github.com/FastResidentialGateway/fastrg-node) dataplane deployed at the Central Office. Its purpose is to enable more efficient and centralized management of residential broadband networks ranging from 1 Gbps up to 25 Gbps, while achieving zero-touch deployment of new broadband subscribers.
 
 ## Features / Key Capabilities
 
@@ -113,7 +113,7 @@ make k8s-deploy
 make k8s-destroy-test-env
 ```
 ### Register the FastRG Node with the Controller
-Follow the instructions in the [FastRG Node repository](https://github.com/w180112/fastrg-node) to deploy the FastRG Node and register it with the FastRG Controller. Then you can manage the FastRG Node using the FastRG Controller's web UI or API.
+Follow the instructions in the [FastRG Node repository](https://github.com/FastResidentialGateway/fastrg-node) to deploy the FastRG Node and register it with the FastRG Controller. Then you can manage the FastRG Node using the FastRG Controller's web UI or API.
 
 ## Road map
 - Improve web UI for better user experience
