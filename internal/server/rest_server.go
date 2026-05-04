@@ -1719,6 +1719,20 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 	}
 	isUpdate := len(existingResp.Kvs) > 0
 
+	// Enforce 64-record limit for new records only
+	if !isUpdate {
+		countPrefix := fmt.Sprintf("configs/%s/%s/dns/", nodeId, userId)
+		countResp, err := r.etcd.Client().Get(ctx, countPrefix, clientv3.WithPrefix(), clientv3.WithCountOnly())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count DNS records"})
+			return
+		}
+		if countResp.Count >= 64 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "DNS record limit reached: maximum 64 records allowed"})
+			return
+		}
+	}
+
 	recordJSON, err := json.Marshal(record)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS record"})
