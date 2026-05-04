@@ -880,7 +880,8 @@ export default function HSIConfig() {
       setDnsIsUpdate(false)
       await loadDnsRecords(selectedUserId)
     } catch (err) {
-      const msg = extractApiError(err) || t('dns.saveFailed')
+      const isMaxRecordsError = err.response && err.response.status === 422
+      const msg = isMaxRecordsError ? t('dns.error.maxRecords') : (extractApiError(err) || t('dns.saveFailed'))
       showToast(msg, 4500, 'error')
     } finally {
       setLoading(false)
@@ -1594,6 +1595,11 @@ export default function HSIConfig() {
               }}>
                 <h4 style={{ marginTop: 0 }}>
                   {dnsIsUpdate ? t('dns.updateRecord') : t('dns.addRecord')}
+                  {!dnsIsUpdate && (
+                    <span style={{ marginLeft: '10px', color: '#6c757d', fontSize: '12px', fontWeight: 'normal' }}>
+                      ({t('dns.maxRecordsHint')})
+                    </span>
+                  )}
                   {dnsCheckingDomain && (
                     <span style={{ marginLeft: '10px', color: '#007bff', fontSize: '12px' }}>
                       {t('dns.checkingDomain')}

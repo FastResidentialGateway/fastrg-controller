@@ -154,7 +154,7 @@ test-help:
 # Build Docker image
 docker-build:
 	@echo "Building Docker image..."
-	docker build -t fastrg-controller:latest .
+	docker build --no-cache -t fastrg-controller:latest .
 
 # Run with Docker Compose (includes etcd)
 docker-run:

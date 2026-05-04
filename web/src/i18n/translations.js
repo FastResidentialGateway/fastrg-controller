@@ -223,6 +223,7 @@ export const translations = {
     'dns.staticDnsRecord': 'Static DNS Record',
     'dns.hint': '選擇已有的 User ID，然後管理該用戶的 Static DNS 紀錄。輸入已存在的 domain 時，會自動帶出現有的 IP 和 TTL 供更新。',
     'dns.addRecord': '新增 DNS 紀錄',
+    'dns.maxRecordsHint': 'DNS Static Record 最多為 64 個',
     'dns.updateRecord': '更新 DNS 紀錄',
     'dns.updateNotice': '此 Domain 已存在，IP 與 TTL 已自動帶入，修改後按「更新」即可覆蓋。',
     'dns.domain': 'Domain',
@@ -247,6 +248,7 @@ export const translations = {
     'dns.error.missingIp': '請輸入 IP',
     'dns.error.invalidTtl': 'TTL 必須為大於 0 的整數',
     'dns.error.invalidIp': 'IP 格式不正確',
+    'dns.error.maxRecords': 'DNS 紀錄已達上限（最多 64 個）',
 
     // Failed Events Page
     'events.title': '失敗事件',
@@ -476,6 +478,7 @@ export const translations = {
     'dns.staticDnsRecord': 'Static DNS Record',
     'dns.hint': 'Select an existing User ID, then manage static DNS records for that user. When you enter a domain that already exists, the IP and TTL will be auto-filled for updating.',
     'dns.addRecord': 'Add DNS Record',
+    'dns.maxRecordsHint': 'Max 64 DNS Static Records',
     'dns.updateRecord': 'Update DNS Record',
     'dns.updateNotice': 'This domain already exists. The IP and TTL have been auto-filled. Modify and click "Update" to overwrite.',
     'dns.domain': 'Domain',
@@ -500,6 +503,7 @@ export const translations = {
     'dns.error.missingIp': 'Please enter an IP address',
     'dns.error.invalidTtl': 'TTL must be an integer greater than 0',
     'dns.error.invalidIp': 'Invalid IP address format',
+    'dns.error.maxRecords': 'DNS record limit reached (max 64 records)',
 
     // Failed Events Page
     'events.title': 'Failed Events',
