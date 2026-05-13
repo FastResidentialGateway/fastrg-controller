@@ -28,4 +28,5 @@ message NodeHeartbeat {
   string node_uuid = 1;
   int64 uptime_timestamp = 2;
   string ip = 3;
+  string host_os = 4;
 }

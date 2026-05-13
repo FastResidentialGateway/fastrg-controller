@@ -183,6 +183,9 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 	nodeData["uptime"] = req.GetUptimeTimestamp()
 	nodeData["node_ip"] = req.GetIp()
 	nodeData["status"] = "active"
+	if req.GetHostOs() != "" {
+		nodeData["host_os"] = req.GetHostOs()
+	}
 
 	// Serialize updated node data to JSON
 	updatedNodeDataJSON, err := json.Marshal(nodeData)
