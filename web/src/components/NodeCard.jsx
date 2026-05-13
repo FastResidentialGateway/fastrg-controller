@@ -175,7 +175,13 @@ export default function NodeCard({node, onNodeUnregistered}){
         {nodeData.node_ip && <li><strong>{t('nodes.nodeIp')}:</strong> {nodeData.node_ip}</li>}
         {nodeData.ip && <li><strong>{t('nodes.ip')}:</strong> {nodeData.ip}</li>}
         {nodeData.version && <li><strong>{t('nodes.version')}:</strong> {nodeData.version}</li>}
-        {nodeData.uptime && <li><strong>{t('nodes.uptime')}:</strong> {nodeData.uptime} {t('nodes.seconds')}</li>}
+        {nodeData.host_os && <li><strong>{t('nodes.hostOs')}:</strong> {nodeData.host_os}</li>}
+        {nodeData.uptime != null && nodeData.last_seen_time && (() => {
+          const bootTime = new Date((Number(nodeData.last_seen_time) - Number(nodeData.uptime)) * 1000)
+          const pad = n => String(n).padStart(2, '0')
+          const formatted = `${bootTime.getFullYear()}/${pad(bootTime.getMonth()+1)}/${pad(bootTime.getDate())} ${pad(bootTime.getHours())}:${pad(bootTime.getMinutes())}:${pad(bootTime.getSeconds())}`
+          return <li><strong>{t('nodes.hostUptime')}:</strong> Since {formatted}</li>
+        })()}
         {nodeData.last_seen_time && (
           <li><strong>{t('nodes.lastSeen')}:</strong> {new Date(Number(nodeData.last_seen_time) * 1000).toLocaleString()}</li>
         )}
