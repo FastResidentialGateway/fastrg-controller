@@ -240,15 +240,29 @@ wait_for_cilium_crds() {
             sleep 2
         done
     done
-    
+
     log_success "All required Cilium CRDs are established"
+
+    log_info "Verifying CRD API endpoints are accessible..."
+    local api_retry=20
+    while [ $api_retry -gt 0 ]; do
+        if kubectl get ciliuml2announcementpolicies.cilium.io 2>/dev/null; then
+            log_success "CRD API endpoints are accessible"
+            return 0
+        fi
+        if [ $api_retry -eq 1 ]; then
+            log_warning "CRD API endpoint probe timed out, continuing anyway..."
+        fi
+        sleep 3
+        api_retry=$((api_retry - 1))
+    done
 }
 
 # Retry kubectl apply with exponential backoff
 retry_kubectl_apply() {
     local file=$1
     local description=$2
-    local max_attempts=5
+    local max_attempts=10
     local attempt=1
     local wait_time=2
     
@@ -531,7 +545,11 @@ install_cilium() {
             }
         }
     ]'
-    
+
+    # Wait for the patched operator deployment to roll out
+    log_info "Waiting for Cilium operator to restart and be ready..."
+    kubectl rollout status deployment/cilium-operator -n kube-system --timeout=180s || true
+
     # Wait for Cilium to restart and become ready
     log_info "Waiting for Cilium to restart and be ready..."
     sleep 10
