@@ -250,3 +250,19 @@ export async function getDhcpLeaseCount(nodeId, userId){
   if(resp.status !== 200) throw new Error('failed to get DHCP lease count')
   return resp.data
 }
+
+export async function getArpTable(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/arp/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get ARP table')
+  return resp.data
+}
+
+export async function getDnsCache(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/dns-cache/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get DNS cache')
+  return resp.data
+}

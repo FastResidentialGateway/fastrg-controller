@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -716,4 +717,119 @@ func (nmm *NodeMonitorManager) GetNodeDhcpLease(ctx context.Context, nodeUUID, u
 
 	// user not found in DHCP info — return zero counts
 	return &DhcpLeaseResult{CurLeaseCount: 0, MaxLeaseCount: 0, InuseIps: nil, Status: ""}, true, nil
+}
+
+// ArpTableEntry holds a single ARP table entry
+type ArpTableEntry struct {
+	EntryID uint32 `json:"entry_id"`
+	IP      string `json:"ip"`
+	MAC     string `json:"mac"`
+}
+
+// ArpTableResult holds ARP table information for a user
+type ArpTableResult struct {
+	UserID     uint32           `json:"user_id"`
+	TotalCount uint32           `json:"total_count"`
+	Entries    []ArpTableEntry  `json:"entries"`
+}
+
+// GetNodeArpTable fetches real-time ARP table info for a given node and user via gRPC.
+func (nmm *NodeMonitorManager) GetNodeArpTable(ctx context.Context, nodeUUID, userID string) (*ArpTableResult, bool, error) {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		return nil, false, nil
+	}
+
+	// Parse user ID as uint32
+	uid64, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid user ID: %v", err)
+	}
+	uid := uint32(uid64)
+
+	arpReply, err := monitor.fastrgClient.GetArpTable(ctx, &fastrgnodepb.ArpTableRequest{
+		UserId:   uid,
+		MaxCount: 0,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	entries := make([]ArpTableEntry, 0)
+	if arpReply.Entries != nil {
+		for _, entry := range arpReply.Entries {
+			entries = append(entries, ArpTableEntry{
+				EntryID: entry.EntryId,
+				IP:      entry.Ip,
+				MAC:     entry.Mac,
+			})
+		}
+	}
+
+	return &ArpTableResult{
+		UserID:     arpReply.UserId,
+		TotalCount: arpReply.TotalCount,
+		Entries:    entries,
+	}, true, nil
+}
+
+// DnsCacheEntry holds a single DNS cache entry
+type DnsCacheEntry struct {
+	Domain       string `json:"domain"`
+	Qtype        uint32 `json:"qtype"`
+	TTL          uint32 `json:"ttl"`
+	RemainingTTL uint32 `json:"remaining_ttl"`
+	HitCount     uint32 `json:"hit_count"`
+}
+
+// DnsCacheResult holds DNS cache information for a user
+type DnsCacheResult struct {
+	UserID      uint32          `json:"user_id"`
+	TotalEntries uint32         `json:"total_entries"`
+	Entries     []DnsCacheEntry `json:"entries"`
+}
+
+// GetNodeDnsCache fetches real-time DNS cache info for a given node and user via gRPC.
+func (nmm *NodeMonitorManager) GetNodeDnsCache(ctx context.Context, nodeUUID, userID string) (*DnsCacheResult, bool, error) {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		return nil, false, nil
+	}
+
+	// Parse user ID as uint32
+	uid64, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid user ID: %v", err)
+	}
+	uid := uint32(uid64)
+
+	dnsReply, err := monitor.fastrgClient.GetDnsCache(ctx, &fastrgnodepb.DnsCacheRequest{
+		UserId: uid,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	entries := make([]DnsCacheEntry, 0)
+	if dnsReply.Entries != nil {
+		for _, entry := range dnsReply.Entries {
+			entries = append(entries, DnsCacheEntry{
+				Domain:       entry.Domain,
+				Qtype:        entry.Qtype,
+				TTL:          entry.Ttl,
+				RemainingTTL: entry.RemainingTtl,
+				HitCount:     entry.HitCount,
+			})
+		}
+	}
+
+	return &DnsCacheResult{
+		UserID:       dnsReply.UserId,
+		TotalEntries: dnsReply.TotalEntries,
+		Entries:      entries,
+	}, true, nil
 }
