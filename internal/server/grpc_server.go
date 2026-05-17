@@ -203,6 +203,20 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 
 	logrus.Infof("Heartbeat received from node %s: Uptime=%d, IP=%s", req.GetNodeUuid(), req.GetUptimeTimestamp(), req.GetIp())
 
+	// Ensure monitoring is started for this node
+	nodeIP := req.GetIp()
+	if nodeIP == "" {
+		// Try to get IP from existing node data
+		if ip, ok := nodeData["ip"].(string); ok && ip != "" {
+			nodeIP = ip
+		}
+	}
+	if nodeIP != "" {
+		if err := s.nodeMonitorMgr.StartMonitoring(req.GetNodeUuid(), nodeIP); err != nil {
+			logrus.WithError(err).Warnf("Failed to start monitoring for node %s", req.GetNodeUuid())
+		}
+	}
+
 	return &emptypb.Empty{}, nil
 }
 

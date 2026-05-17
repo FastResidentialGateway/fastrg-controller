@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { 
-  getHSIUserIds, 
-  getHSIConfig, 
-  createHSIConfig, 
-  updateHSIConfig, 
+import {
+  getHSIUserIds,
+  getHSIConfig,
+  createHSIConfig,
+  updateHSIConfig,
   deleteHSIConfig,
   dialPPPoE,
   hangupPPPoE,
   getDhcpLeaseCount,
+  getArpTable,
+  getDnsCache,
   getDnsRecords,
   getDnsRecord,
   addOrUpdateDnsRecord,
@@ -61,6 +63,14 @@ export default function HSIConfig() {
   const [pppoePanelLoading, setPppoePanelLoading] = useState(false)
   // DHCP lease count state: { [userId]: { loading, data, error } }
   const [dhcpLeaseMap, setDhcpLeaseMap] = useState({})
+  // ARP table state for single user
+  const [arpTableLoading, setArpTableLoading] = useState(false)
+  const [arpTableData, setArpTableData] = useState(null)
+  const [arpTableError, setArpTableError] = useState(null)
+  // DNS cache state for single user
+  const [dnsCacheLoading, setDnsCacheLoading] = useState(false)
+  const [dnsCacheData, setDnsCacheData] = useState(null)
+  const [dnsCacheError, setDnsCacheError] = useState(null)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -89,7 +99,7 @@ export default function HSIConfig() {
   useEffect(() => {
     if (action === 'pppoe') {
       loadAllPppoeConfigs()
-    } else if (action === 'snat' || action === 'dns') {
+    } else if (action === 'snat' || action === 'dns' || action === 'arp' || action === 'dns-cache') {
       loadUserIds()
     }
   }, [action])
@@ -292,6 +302,36 @@ export default function HSIConfig() {
     }
   }
 
+  const loadArpTable = async (userId) => {
+    setArpTableLoading(true)
+    setArpTableData(null)
+    setArpTableError(null)
+    try {
+      const data = await getArpTable(nodeId, userId)
+      setArpTableData(data)
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.arpTableNotAvailable')
+      setArpTableError(msg)
+    } finally {
+      setArpTableLoading(false)
+    }
+  }
+
+  const loadDnsCache = async (userId) => {
+    setDnsCacheLoading(true)
+    setDnsCacheData(null)
+    setDnsCacheError(null)
+    try {
+      const data = await getDnsCache(nodeId, userId)
+      setDnsCacheData(data)
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.dnsCacheNotAvailable')
+      setDnsCacheError(msg)
+    } finally {
+      setDnsCacheLoading(false)
+    }
+  }
+
   const handleActionChange = (selectedAction) => {
     setAction(selectedAction)
     setError(null)
@@ -318,6 +358,14 @@ export default function HSIConfig() {
     setAllPppoeConfigs([])
     setPppoeIsUpdate(false)
     setDhcpLeaseMap({})
+    // Reset ARP table state
+    setArpTableLoading(false)
+    setArpTableData(null)
+    setArpTableError(null)
+    // Reset DNS cache state
+    setDnsCacheLoading(false)
+    setDnsCacheData(null)
+    setDnsCacheError(null)
     // Clear field validation states
     setTouchedFields({})
     setFieldErrors({})
@@ -331,6 +379,14 @@ export default function HSIConfig() {
     if (action === 'dns') {
       // Load DNS records for this user
       loadDnsRecords(userId)
+    }
+    if (action === 'arp') {
+      // Load ARP table for this user
+      loadArpTable(userId)
+    }
+    if (action === 'dns-cache') {
+      // Load DNS cache for this user
+      loadDnsCache(userId)
     }
   }
 
@@ -994,7 +1050,9 @@ export default function HSIConfig() {
           {[
             { key: 'pppoe', labelKey: 'hsi.pppoeConfig' },
             { key: 'snat', labelKey: 'hsi.snatPortForwarding' },
-            { key: 'dns', labelKey: 'dns.staticDnsRecord' }
+            { key: 'dns', labelKey: 'dns.staticDnsRecord' },
+            { key: 'arp', labelKey: 'hsi.arpTable' },
+            { key: 'dns-cache', labelKey: 'hsi.dnsCache' }
           ].map(({ key, labelKey }) => (
             <button
               key={key}
@@ -1719,6 +1777,216 @@ export default function HSIConfig() {
                     ))}
                   </tbody>
                 </table>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== ARP Table Section ===== */}
+      {action === 'arp' && (
+        <div>
+          <h3>{t('hsi.arpTable')}</h3>
+          <p style={{ color: '#6c757d', marginBottom: '15px', fontSize: '14px' }}>
+            {t('hsi.arpTableHint') || 'View ARP table entries for the selected user'}
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{
+                padding: '8px',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                minWidth: '200px'
+              }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(uid => (
+                <option key={uid} value={uid}>{uid}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div>
+              <div style={{ marginBottom: '20px' }}>
+                <button
+                  onClick={() => loadArpTable(selectedUserId)}
+                  disabled={arpTableLoading}
+                  style={{
+                    backgroundColor: '#007bff',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '10px 20px',
+                    cursor: arpTableLoading ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {arpTableLoading ? t('common.loading') : t('hsi.refreshArpTable') || 'Refresh ARP Table'}
+                </button>
+              </div>
+
+              {arpTableLoading && (
+                <div style={{ textAlign: 'center', padding: '15px' }}>{t('common.loading')}</div>
+              )}
+
+              {arpTableError && (
+                <div style={{
+                  backgroundColor: '#f8d7da',
+                  color: '#721c24',
+                  padding: '12px',
+                  borderRadius: '4px',
+                  marginBottom: '20px'
+                }}>
+                  {arpTableError}
+                </div>
+              )}
+
+              {!arpTableLoading && arpTableData && !arpTableError && (
+                <div>
+                  <h4>{t('hsi.arpTableInfo')} — {t('hsi.user')} {selectedUserId} ({arpTableData.total_count} {t('hsi.entries')})</h4>
+                  {arpTableData.entries && arpTableData.entries.length > 0 ? (
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '10px' }}>
+                        <thead>
+                          <tr style={{ backgroundColor: '#f8f9fa' }}>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>Table ID</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>IP</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>MAC</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {arpTableData.entries.slice(0, 50).map((entry, i) => (
+                            <tr key={i}>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.entry_id}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.ip}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.mac}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {arpTableData.entries.length > 50 && (
+                        <div style={{ color: '#6c757d', fontSize: '13px' }}>
+                          {t('hsi.showing')} 50 {t('hsi.of')} {arpTableData.total_count}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ color: '#6c757d', marginTop: '10px' }}>
+                      {t('hsi.arpTableEmpty')}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== DNS Cache Section ===== */}
+      {action === 'dns-cache' && (
+        <div>
+          <h3>{t('hsi.dnsCache')}</h3>
+          <p style={{ color: '#6c757d', marginBottom: '15px', fontSize: '14px' }}>
+            {t('hsi.dnsCacheHint') || 'View DNS cache entries for the selected user'}
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{
+                padding: '8px',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                minWidth: '200px'
+              }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(uid => (
+                <option key={uid} value={uid}>{uid}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div>
+              <div style={{ marginBottom: '20px' }}>
+                <button
+                  onClick={() => loadDnsCache(selectedUserId)}
+                  disabled={dnsCacheLoading}
+                  style={{
+                    backgroundColor: '#007bff',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '10px 20px',
+                    cursor: dnsCacheLoading ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {dnsCacheLoading ? t('common.loading') : t('hsi.refreshDnsCache') || 'Refresh DNS Cache'}
+                </button>
+              </div>
+
+              {dnsCacheLoading && (
+                <div style={{ textAlign: 'center', padding: '15px' }}>{t('common.loading')}</div>
+              )}
+
+              {dnsCacheError && (
+                <div style={{
+                  backgroundColor: '#f8d7da',
+                  color: '#721c24',
+                  padding: '12px',
+                  borderRadius: '4px',
+                  marginBottom: '20px'
+                }}>
+                  {dnsCacheError}
+                </div>
+              )}
+
+              {!dnsCacheLoading && dnsCacheData && !dnsCacheError && (
+                <div>
+                  <h4>{t('hsi.dnsCacheInfo')} — {t('hsi.user')} {selectedUserId} ({dnsCacheData.total_count} {t('hsi.entries')})</h4>
+                  {dnsCacheData.entries && dnsCacheData.entries.length > 0 ? (
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '10px' }}>
+                        <thead>
+                          <tr style={{ backgroundColor: '#f8f9fa' }}>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.dnsDomain')}</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>QType</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>TTL</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.dnsRemaining')}</th>
+                            <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.dnsHitCount')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dnsCacheData.entries.slice(0, 50).map((entry, i) => (
+                            <tr key={i}>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.domain}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.qtype}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.ttl}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.remaining_ttl}</td>
+                              <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{entry.hit_count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {dnsCacheData.entries.length > 50 && (
+                        <div style={{ color: '#6c757d', fontSize: '13px' }}>
+                          {t('hsi.showing')} 50 {t('hsi.of')} {dnsCacheData.total_count}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ color: '#6c757d', marginTop: '10px' }}>
+                      {t('hsi.dnsCacheEmpty')}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}

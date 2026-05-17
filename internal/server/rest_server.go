@@ -1390,6 +1390,92 @@ func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
 	})
 }
 
+// GetArpTable returns ARP table for a user on a node
+// @Summary      Get ARP Table
+// @Description  Get the current ARP table entries for a specific user on a node
+// @Tags         ARP
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  ArpTableResult
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /config/{nodeId}/arp/{userId} [get]
+func (r *RestServer) GetArpTable(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+
+	logrus.Infof("GetArpTable called for nodeId=%s, userId=%s", nodeId, userId)
+
+	if r.nodeMonitorMgr == nil {
+		logrus.Errorf("Node monitor manager is nil")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node monitor not available"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	result, found, err := r.nodeMonitorMgr.GetNodeArpTable(ctx, nodeId, userId)
+	if err != nil {
+		logrus.Errorf("GetNodeArpTable error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get ARP table: %v", err)})
+		return
+	}
+
+	if !found {
+		logrus.Warnf("GetNodeArpTable: Node not found or not connected for nodeId=%s", nodeId)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+
+	logrus.Infof("GetArpTable success: returned %d entries", len(result.Entries))
+	c.JSON(http.StatusOK, result)
+}
+
+// GetDnsCache returns DNS cache for a user on a node
+// @Summary      Get DNS Cache
+// @Description  Get the current DNS cache entries for a specific user on a node
+// @Tags         DNS
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  DnsCacheResult
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /config/{nodeId}/dns-cache/{userId} [get]
+func (r *RestServer) GetDnsCache(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+
+	logrus.Infof("GetDnsCache called for nodeId=%s, userId=%s", nodeId, userId)
+
+	if r.nodeMonitorMgr == nil {
+		logrus.Errorf("Node monitor manager is nil")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node monitor not available"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	result, found, err := r.nodeMonitorMgr.GetNodeDnsCache(ctx, nodeId, userId)
+	if err != nil {
+		logrus.Errorf("GetNodeDnsCache error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DNS cache: %v", err)})
+		return
+	}
+
+	if !found {
+		logrus.Warnf("GetNodeDnsCache: Node not found or not connected for nodeId=%s", nodeId)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+
+	logrus.Infof("GetDnsCache success: returned %d entries", len(result.Entries))
+	c.JSON(http.StatusOK, result)
+}
+
 // UpdateNodeSubscriberCount updates the subscriber count for a node
 // @Summary      Update Node Subscriber Count
 // @Description  Update the subscriber count for a specific node
@@ -1829,6 +1915,8 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.POST("/pppoe/dial", r.AuthMiddlewareWithBlacklist(), r.DialPPPoE)
 		api.POST("/pppoe/hangup", r.AuthMiddlewareWithBlacklist(), r.HangupPPPoE)
 		api.GET("/config/:nodeId/dhcp/lease/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpLeaseCount)
+		api.GET("/config/:nodeId/arp/:userId", r.AuthMiddlewareWithBlacklist(), r.GetArpTable)
+		api.GET("/config/:nodeId/dns-cache/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsCache)
 
 		// Static DNS record management
 		api.GET("/config/:nodeId/dns/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsRecords)
