@@ -11,6 +11,8 @@ import {
   getDhcpLeaseCount,
   getArpTable,
   getDnsCache,
+  getPPPoEInfo,
+  getDhcpConfig,
   getDnsRecords,
   getDnsRecord,
   addOrUpdateDnsRecord,
@@ -71,6 +73,12 @@ export default function HSIConfig() {
   const [dnsCacheLoading, setDnsCacheLoading] = useState(false)
   const [dnsCacheData, setDnsCacheData] = useState(null)
   const [dnsCacheError, setDnsCacheError] = useState(null)
+  // DHCP server config state for single user
+  const [dhcpConfigLoading, setDhcpConfigLoading] = useState(false)
+  const [dhcpConfigData, setDhcpConfigData] = useState(null)
+  const [dhcpConfigError, setDhcpConfigError] = useState(null)
+  // PPPoE info state for each user in PPPoE panel: { [userId]: { loading, data, error } }
+  const [pppoeInfoMap, setPppoeInfoMap] = useState({})
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -99,7 +107,7 @@ export default function HSIConfig() {
   useEffect(() => {
     if (action === 'pppoe') {
       loadAllPppoeConfigs()
-    } else if (action === 'snat' || action === 'dns' || action === 'arp' || action === 'dns-cache') {
+    } else if (action === 'snat' || action === 'dns' || action === 'arp' || action === 'dns-cache' || action === 'dhcp-server') {
       loadUserIds()
     }
   }, [action])
@@ -332,6 +340,44 @@ export default function HSIConfig() {
     }
   }
 
+  const handleShowPPPoEInfo = async (userId) => {
+    const current = pppoeInfoMap[userId]
+    // If already expanded, collapse it
+    if (current && current.expanded) {
+      setPppoeInfoMap(prev => ({ ...prev, [userId]: { ...prev[userId], expanded: false } }))
+      return
+    }
+    // If not expanded, expand and load if needed
+    if (!current || !current.data) {
+      setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: true, data: null, error: null, expanded: true } }))
+      try {
+        const data = await getPPPoEInfo(nodeId, userId)
+        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data, error: null, expanded: true } }))
+      } catch (err) {
+        const msg = extractApiError(err) || t('hsi.pppoeInfoNotAvailable')
+        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data: null, error: msg, expanded: true } }))
+      }
+    } else {
+      // Data already loaded, just expand
+      setPppoeInfoMap(prev => ({ ...prev, [userId]: { ...prev[userId], expanded: true } }))
+    }
+  }
+
+  const loadDhcpConfig = async (userId) => {
+    setDhcpConfigLoading(true)
+    setDhcpConfigData(null)
+    setDhcpConfigError(null)
+    try {
+      const data = await getDhcpConfig(nodeId, userId)
+      setDhcpConfigData(data)
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.dhcpConfigNotAvailable')
+      setDhcpConfigError(msg)
+    } finally {
+      setDhcpConfigLoading(false)
+    }
+  }
+
   const handleActionChange = (selectedAction) => {
     setAction(selectedAction)
     setError(null)
@@ -366,6 +412,12 @@ export default function HSIConfig() {
     setDnsCacheLoading(false)
     setDnsCacheData(null)
     setDnsCacheError(null)
+    // Reset PPPoE info map
+    setPppoeInfoMap({})
+    // Reset DHCP config state
+    setDhcpConfigLoading(false)
+    setDhcpConfigData(null)
+    setDhcpConfigError(null)
     // Clear field validation states
     setTouchedFields({})
     setFieldErrors({})
@@ -387,6 +439,10 @@ export default function HSIConfig() {
     if (action === 'dns-cache') {
       // Load DNS cache for this user
       loadDnsCache(userId)
+    }
+    if (action === 'dhcp-server') {
+      // Load DHCP config for this user
+      loadDhcpConfig(userId)
     }
   }
 
@@ -1049,6 +1105,7 @@ export default function HSIConfig() {
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
           {[
             { key: 'pppoe', labelKey: 'hsi.pppoeConfig' },
+            { key: 'dhcp-server', labelKey: 'hsi.dhcpServer' },
             { key: 'snat', labelKey: 'hsi.snatPortForwarding' },
             { key: 'dns', labelKey: 'dns.staticDnsRecord' },
             { key: 'arp', labelKey: 'hsi.arpTable' },
@@ -1334,16 +1391,12 @@ export default function HSIConfig() {
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.vlanLabel')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.accountNameLabel')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.status')}</th>
-                    <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.dhcpAddrPoolLabel')}</th>
-                    <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.subnetLabel')}</th>
-                    <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.gatewayLabel')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'center' }}>{t('hsi.actions')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {allPppoeConfigs.map((cfg, idx) => {
                     const statusInfo = getStatusInfo(cfg.enableStatus)
-                    const leaseState = dhcpLeaseMap[cfg.user_id]
                     return (
                       <React.Fragment key={idx}>
                         <tr>
@@ -1362,9 +1415,6 @@ export default function HSIConfig() {
                               {statusInfo.label}
                             </span>
                           </td>
-                          <td style={{ border: '1px solid #dee2e6', padding: '8px', fontSize: '12px' }}>{cfg.dhcp_addr_pool || t('common.notSet')}</td>
-                          <td style={{ border: '1px solid #dee2e6', padding: '8px', fontSize: '12px' }}>{cfg.dhcp_subnet || t('common.notSet')}</td>
-                          <td style={{ border: '1px solid #dee2e6', padding: '8px', fontSize: '12px' }}>{cfg.dhcp_gateway || t('common.notSet')}</td>
                           <td style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'center' }}>
                             <div style={{ display: 'flex', gap: '4px', justifyContent: 'center', flexWrap: 'wrap' }}>
                               <button
@@ -1413,62 +1463,65 @@ export default function HSIConfig() {
                                 {t('hsi.hangupAction')}
                               </button>
                               <button
-                                onClick={() => handleShowDhcpLease(cfg.user_id)}
-                                disabled={leaseState && leaseState.loading}
+                                onClick={() => handleShowPPPoEInfo(cfg.user_id)}
+                                disabled={pppoeInfoMap[cfg.user_id] && pppoeInfoMap[cfg.user_id].loading}
                                 style={{
-                                  backgroundColor: '#17a2b8',
+                                  backgroundColor: '#6f42c1',
                                   color: 'white',
                                   border: 'none',
                                   borderRadius: '4px',
                                   padding: '4px 10px',
-                                  cursor: (leaseState && leaseState.loading) ? 'not-allowed' : 'pointer',
+                                  cursor: (pppoeInfoMap[cfg.user_id] && pppoeInfoMap[cfg.user_id].loading) ? 'not-allowed' : 'pointer',
                                   fontSize: '12px'
                                 }}
                               >
-                                {leaseState && leaseState.loading
-                                  ? t('hsi.dhcpLeaseLoading')
-                                  : t('hsi.dhcpLeaseCount')}
+                                {pppoeInfoMap[cfg.user_id] && pppoeInfoMap[cfg.user_id].loading
+                                  ? t('hsi.pppoeInfoLoading')
+                                  : (pppoeInfoMap[cfg.user_id] && pppoeInfoMap[cfg.user_id].expanded ? t('hsi.hidePPPoEInfo') : t('hsi.showPPPoEInfo'))}
                               </button>
                             </div>
                           </td>
                         </tr>
-                        {leaseState && !leaseState.loading && (
+                        {pppoeInfoMap[cfg.user_id] && !pppoeInfoMap[cfg.user_id].loading && pppoeInfoMap[cfg.user_id].expanded && (
                           <tr>
-                            <td colSpan={8} style={{ border: '1px solid #dee2e6', padding: '0' }}>
+                            <td colSpan={5} style={{ border: '1px solid #dee2e6', padding: '0' }}>
                               <div style={{
-                                padding: '10px 16px',
-                                backgroundColor: leaseState.error ? '#f8d7da' : '#e8f4f8',
+                                padding: '12px 16px',
+                                backgroundColor: pppoeInfoMap[cfg.user_id].error ? '#f8d7da' : '#f0f7ff',
                                 borderTop: '1px solid #dee2e6'
                               }}>
-                                {leaseState.error ? (
-                                  <span style={{ color: '#721c24', fontSize: '13px' }}>{leaseState.error}</span>
+                                {pppoeInfoMap[cfg.user_id].error ? (
+                                  <span style={{ color: '#721c24', fontSize: '13px' }}>{pppoeInfoMap[cfg.user_id].error}</span>
                                 ) : (
-                                  <div style={{ fontSize: '13px' }}>
-                                    <strong>{t('hsi.dhcpLeaseInfo')} — User {cfg.user_id}</strong>
-                                    <div style={{ display: 'flex', gap: '24px', marginTop: '6px', flexWrap: 'wrap' }}>
-                                      <span>
-                                        <strong>{t('hsi.dhcpLeaseStatus')}:</strong>{' '}
-                                        {leaseState.data.status || t('common.notSet')}
-                                      </span>
-                                      <span>
-                                        <strong>{t('hsi.dhcpLeaseCountLabel')}:</strong>{' '}
-                                        {leaseState.data.cur_lease_count}
-                                      </span>
-                                      <span>
-                                        <strong>{t('hsi.dhcpMaxLeaseLabel')}:</strong>{' '}
-                                        {leaseState.data.max_lease_count}
-                                      </span>
+                                  <div>
+                                    <strong>{t('hsi.pppoeInfo')} — {t('hsi.user')} {cfg.user_id}</strong>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '10px' }}>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeSessionId')}:</strong> {pppoeInfoMap[cfg.user_id].data?.session_id || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeStatus')}:</strong> {pppoeInfoMap[cfg.user_id].data?.status || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeClientIp')}:</strong> {pppoeInfoMap[cfg.user_id].data?.client_ip || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeServerIp')}:</strong> {pppoeInfoMap[cfg.user_id].data?.server_ip || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div style={{ gridColumn: '1 / -1' }}>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeDnsServers')}:</strong> {pppoeInfoMap[cfg.user_id].data?.dns_servers && pppoeInfoMap[cfg.user_id].data.dns_servers.length > 0 ? pppoeInfoMap[cfg.user_id].data.dns_servers.join(', ') : t('common.notSet')}
+                                        </span>
+                                      </div>
                                     </div>
-                                    {leaseState.data.inuse_ips && leaseState.data.inuse_ips.length > 0 ? (
-                                      <div style={{ marginTop: '6px' }}>
-                                        <strong>{t('hsi.dhcpInuseIpsLabel')}:</strong>{' '}
-                                        {leaseState.data.inuse_ips.join(', ')}
-                                      </div>
-                                    ) : (
-                                      <div style={{ marginTop: '6px', color: '#6c757d' }}>
-                                        {t('hsi.dhcpLeaseNone')}
-                                      </div>
-                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1986,6 +2039,116 @@ export default function HSIConfig() {
                       {t('hsi.dnsCacheEmpty')}
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== DHCP Server Section ===== */}
+      {action === 'dhcp-server' && (
+        <div>
+          <h3>{t('hsi.dhcpServer')}</h3>
+          <p style={{ color: '#6c757d', marginBottom: '15px', fontSize: '14px' }}>
+            {t('hsi.dhcpServerHint') || 'View DHCP server configuration for the selected user'}
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{
+                padding: '8px',
+                border: '1px solid #ccc',
+                borderRadius: '4px',
+                minWidth: '200px'
+              }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(uid => (
+                <option key={uid} value={uid}>{uid}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div>
+              <div style={{ marginBottom: '20px' }}>
+                <button
+                  onClick={() => loadDhcpConfig(selectedUserId)}
+                  disabled={dhcpConfigLoading}
+                  style={{
+                    backgroundColor: '#007bff',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '10px 20px',
+                    cursor: dhcpConfigLoading ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {dhcpConfigLoading ? t('common.loading') : t('hsi.refreshDhcpConfig') || 'Refresh DHCP Config'}
+                </button>
+              </div>
+
+              {dhcpConfigLoading && (
+                <div style={{ textAlign: 'center', padding: '15px' }}>{t('common.loading')}</div>
+              )}
+
+              {dhcpConfigError && (
+                <div style={{
+                  backgroundColor: '#f8d7da',
+                  color: '#721c24',
+                  padding: '12px',
+                  borderRadius: '4px',
+                  marginBottom: '20px'
+                }}>
+                  {dhcpConfigError}
+                </div>
+              )}
+
+              {!dhcpConfigLoading && dhcpConfigData && !dhcpConfigError && (
+                <div style={{
+                  padding: '15px',
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: '8px',
+                  border: '1px solid #dee2e6'
+                }}>
+                  <h4 style={{ marginTop: 0 }}>{t('hsi.dhcpConfig')} — {t('hsi.user')} {selectedUserId}</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginBottom: '20px' }}>
+                    <div>
+                      <strong>{t('hsi.dhcpStatus')}:</strong><br/>
+                      <span style={{ color: '#6c757d' }}>{dhcpConfigData.status || t('common.notSet')}</span>
+                    </div>
+                    <div>
+                      <strong>{t('hsi.dhcpAddrPoolLabel')}:</strong><br/>
+                      <span style={{ color: '#6c757d' }}>{dhcpConfigData.ip_range || t('common.notSet')}</span>
+                    </div>
+                    <div>
+                      <strong>{t('hsi.subnetLabel')}:</strong><br/>
+                      <span style={{ color: '#6c757d' }}>{dhcpConfigData.subnet_mask || t('common.notSet')}</span>
+                    </div>
+                    <div>
+                      <strong>{t('hsi.gatewayLabel')}:</strong><br/>
+                      <span style={{ color: '#6c757d' }}>{dhcpConfigData.gateway || t('common.notSet')}</span>
+                    </div>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                      <strong>{t('hsi.dhcpLeaseUsage')}:</strong><br/>
+                      <span style={{ color: '#6c757d' }}>
+                        {dhcpConfigData.cur_lease_count} / {dhcpConfigData.max_lease_count}
+                        {dhcpConfigData.max_lease_count > 0 && ` (${Math.round((dhcpConfigData.cur_lease_count / dhcpConfigData.max_lease_count) * 100)}%)`}
+                      </span>
+                    </div>
+                    {dhcpConfigData.inuse_ips && dhcpConfigData.inuse_ips.length > 0 && (
+                      <div style={{ gridColumn: '1 / -1' }}>
+                        <strong>{t('hsi.dhcpInuseIpsLabel')}:</strong><br/>
+                        <span style={{ color: '#6c757d', fontSize: '12px' }}>
+                          {dhcpConfigData.inuse_ips.join(', ')}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
