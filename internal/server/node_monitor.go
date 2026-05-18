@@ -833,3 +833,118 @@ func (nmm *NodeMonitorManager) GetNodeDnsCache(ctx context.Context, nodeUUID, us
 		Entries:      entries,
 	}, true, nil
 }
+
+// PPPoEInfo holds PPPoE session information for a user
+type PPPoEInfo struct {
+	UserID    uint32   `json:"user_id"`
+	SessionID uint32   `json:"session_id"`
+	ClientIP  string   `json:"client_ip"`
+	ServerIP  string   `json:"server_ip"`
+	DnsServers []string `json:"dns_servers"`
+	Status    string   `json:"status"`
+}
+
+// GetNodePPPoEInfo fetches real-time PPPoE info for a given node and user via gRPC.
+func (nmm *NodeMonitorManager) GetNodePPPoEInfo(ctx context.Context, nodeUUID, userID string) (*PPPoEInfo, bool, error) {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		return nil, false, nil
+	}
+
+	// Parse user ID as uint32
+	uid64, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid user ID: %v", err)
+	}
+	uid := uint32(uid64)
+
+	hsiReply, err := monitor.fastrgClient.GetFastrgHsiInfo(ctx, &emptypb.Empty{})
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Find the HSI info for this user
+	for _, hsiInfo := range hsiReply.HsiInfos {
+		if hsiInfo.UserId == uid {
+			return &PPPoEInfo{
+				UserID:     hsiInfo.UserId,
+				SessionID:  hsiInfo.SessionId,
+				ClientIP:   hsiInfo.IpAddr,
+				ServerIP:   hsiInfo.Gateway,
+				DnsServers: hsiInfo.Dnss,
+				Status:     hsiInfo.Status,
+			}, true, nil
+		}
+	}
+
+	// User not found
+	return nil, true, nil
+}
+
+// DhcpConfig holds DHCP server configuration for a user
+type DhcpConfig struct {
+	UserID     uint32   `json:"user_id"`
+	Status     string   `json:"status"`
+	IpRange    string   `json:"ip_range"`
+	SubnetMask string   `json:"subnet_mask"`
+	Gateway    string   `json:"gateway"`
+	InuseIps   []string `json:"inuse_ips"`
+	CurLeaseCount int    `json:"cur_lease_count"`
+	MaxLeaseCount int    `json:"max_lease_count"`
+}
+
+// GetNodeDhcpConfig fetches real-time DHCP config for a given node and user via gRPC.
+func (nmm *NodeMonitorManager) GetNodeDhcpConfig(ctx context.Context, nodeUUID, userID string) (*DhcpConfig, bool, error) {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		return nil, false, nil
+	}
+
+	// Parse user ID as uint32
+	uid64, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid user ID: %v", err)
+	}
+	uid := uint32(uid64)
+
+	dhcpReply, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &emptypb.Empty{})
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Find the DHCP info for this user
+	for _, dhcpInfo := range dhcpReply.DhcpInfos {
+		if dhcpInfo.UserId == uid {
+			curCount := len(dhcpInfo.InuseIps)
+			maxCount := 0
+			if dhcpInfo.IpRange != "" && dhcpInfo.IpRange != "Not configured" {
+				ipStart, ipEnd, perr := utils.ParseIPRange(dhcpInfo.IpRange)
+				if perr == nil {
+					startUint, serr := utils.IPv4toInt(ipStart)
+					endUint, eerr := utils.IPv4toInt(ipEnd)
+					if serr == nil && eerr == nil {
+						maxCount = int(endUint-startUint) + 1
+					}
+				}
+			}
+
+			return &DhcpConfig{
+				UserID:        dhcpInfo.UserId,
+				Status:        dhcpInfo.Status,
+				IpRange:       dhcpInfo.IpRange,
+				SubnetMask:    dhcpInfo.SubnetMask,
+				Gateway:       dhcpInfo.Gateway,
+				InuseIps:      dhcpInfo.InuseIps,
+				CurLeaseCount: curCount,
+				MaxLeaseCount: maxCount,
+			}, true, nil
+		}
+	}
+
+	// User not found
+	return nil, true, nil
+}

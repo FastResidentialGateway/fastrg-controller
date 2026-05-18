@@ -1476,6 +1476,92 @@ func (r *RestServer) GetDnsCache(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// GetPPPoEInfo returns PPPoE session information for a user on a node
+// @Summary      Get PPPoE Info
+// @Description  Get the current PPPoE session info for a specific user on a node
+// @Tags         PPPoE
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  PPPoEInfo
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /config/{nodeId}/pppoe/{userId} [get]
+func (r *RestServer) GetPPPoEInfo(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+
+	logrus.Infof("GetPPPoEInfo called for nodeId=%s, userId=%s", nodeId, userId)
+
+	if r.nodeMonitorMgr == nil {
+		logrus.Errorf("Node monitor manager is nil")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node monitor not available"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	result, found, err := r.nodeMonitorMgr.GetNodePPPoEInfo(ctx, nodeId, userId)
+	if err != nil {
+		logrus.Errorf("GetNodePPPoEInfo error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get PPPoE info: %v", err)})
+		return
+	}
+
+	if !found {
+		logrus.Warnf("GetNodePPPoEInfo: Node not found or not connected for nodeId=%s", nodeId)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+
+	logrus.Infof("GetPPPoEInfo success")
+	c.JSON(http.StatusOK, result)
+}
+
+// GetDhcpConfig returns DHCP server configuration for a user on a node
+// @Summary      Get DHCP Config
+// @Description  Get the current DHCP server configuration for a specific user on a node
+// @Tags         DHCP
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  DhcpConfig
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /config/{nodeId}/dhcp/{userId} [get]
+func (r *RestServer) GetDhcpConfig(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+
+	logrus.Infof("GetDhcpConfig called for nodeId=%s, userId=%s", nodeId, userId)
+
+	if r.nodeMonitorMgr == nil {
+		logrus.Errorf("Node monitor manager is nil")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node monitor not available"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	result, found, err := r.nodeMonitorMgr.GetNodeDhcpConfig(ctx, nodeId, userId)
+	if err != nil {
+		logrus.Errorf("GetNodeDhcpConfig error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DHCP config: %v", err)})
+		return
+	}
+
+	if !found {
+		logrus.Warnf("GetNodeDhcpConfig: Node not found or not connected for nodeId=%s", nodeId)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+
+	logrus.Infof("GetDhcpConfig success")
+	c.JSON(http.StatusOK, result)
+}
+
 // UpdateNodeSubscriberCount updates the subscriber count for a node
 // @Summary      Update Node Subscriber Count
 // @Description  Update the subscriber count for a specific node
@@ -1917,6 +2003,8 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.GET("/config/:nodeId/dhcp/lease/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpLeaseCount)
 		api.GET("/config/:nodeId/arp/:userId", r.AuthMiddlewareWithBlacklist(), r.GetArpTable)
 		api.GET("/config/:nodeId/dns-cache/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsCache)
+		api.GET("/config/:nodeId/pppoe/:userId", r.AuthMiddlewareWithBlacklist(), r.GetPPPoEInfo)
+		api.GET("/config/:nodeId/dhcp/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpConfig)
 
 		// Static DNS record management
 		api.GET("/config/:nodeId/dns/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsRecords)

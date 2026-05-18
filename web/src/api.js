@@ -266,3 +266,19 @@ export async function getDnsCache(nodeId, userId){
   if(resp.status !== 200) throw new Error('failed to get DNS cache')
   return resp.data
 }
+
+export async function getPPPoEInfo(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/pppoe/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get PPPoE info')
+  return resp.data
+}
+
+export async function getDhcpConfig(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/config/${nodeId}/dhcp/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get DHCP config')
+  return resp.data
+}
