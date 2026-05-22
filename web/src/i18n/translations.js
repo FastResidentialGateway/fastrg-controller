@@ -300,6 +300,11 @@ export const translations = {
     'events.reason': '原因',
     'events.filterByType': '依類型篩選',
     'events.allTypes': '所有類型',
+    'events.deleteSelected': '刪除勾選項目',
+    'events.confirmDelete': '確定要刪除選取的 {count} 筆失敗事件嗎？',
+    'events.deleteSuccess': '成功刪除 {count} 筆失敗事件',
+    'events.deleteFailed': '刪除失敗事件失敗',
+    'events.selectAll': '全選',
   },
 
   'en': {
@@ -594,6 +599,11 @@ export const translations = {
     'events.reason': 'Reason',
     'events.filterByType': 'Filter by Type',
     'events.allTypes': 'All Types',
+    'events.deleteSelected': 'Delete Selected',
+    'events.confirmDelete': 'Are you sure you want to delete {count} selected failed event(s)?',
+    'events.deleteSuccess': 'Successfully deleted {count} failed event(s)',
+    'events.deleteFailed': 'Failed to delete failed events',
+    'events.selectAll': 'Select All',
   }
 }
 

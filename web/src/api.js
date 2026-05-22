@@ -190,6 +190,14 @@ export async function getAllFailedEvents(eventType = null){
   return resp.data.events || []
 }
 
+export async function deleteFailedEvents(keys){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.delete(`/api/failed-events`, { headers, data: { keys } })
+  if(resp.status !== 200) throw new Error('failed to delete failed events')
+  return resp.data
+}
+
 // Node Subscriber Count API
 export async function getNodeSubscriberCount(nodeId){
   const token = localStorage.getItem('token')
