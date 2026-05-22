@@ -45,9 +45,10 @@ export default function FailedEvents() {
     }
   }
 
-  const formatTimestamp = (timestamp) => {
+  const formatTimestamp = (timestamp, timezone) => {
     const date = new Date(timestamp * 1000)
-    return date.toLocaleString()
+    const timeStr = date.toLocaleString()
+    return timezone ? `${timeStr} ${timezone}` : timeStr
   }
 
   const getErrorColor = (errorCode) => {
@@ -271,7 +272,7 @@ export default function FailedEvents() {
                         )}
                       </td>
                       <td style={tableCellStyle}>
-                        {formatTimestamp(event.timestamp)}
+                        {formatTimestamp(event.timestamp, event.timezone)}
                       </td>
                       <td style={tableCellStyle}>
                         <span style={{

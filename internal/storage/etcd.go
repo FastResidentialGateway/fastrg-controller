@@ -26,6 +26,7 @@ type FailedEvent struct {
 	ErrorReasonName string `json:"error_reason_name"`
 	ErrorDetail     string `json:"error_detail"`
 	Timestamp       int64  `json:"timestamp"`
+	Timezone        string `json:"timezone,omitempty"`
 	OriginalValue   string `json:"original_value,omitempty"`
 }
 
