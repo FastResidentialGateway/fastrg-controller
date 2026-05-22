@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"fastrg-controller/internal/storage"
@@ -1737,6 +1738,7 @@ func (r *RestServer) GetFailedEvents(c *gin.Context) {
 			logrus.WithError(err).Error("Failed to parse failed event")
 			continue
 		}
+		event["_etcd_key"] = string(kv.Key)
 		events = append(events, event)
 	}
 
@@ -1782,10 +1784,60 @@ func (r *RestServer) GetAllFailedEvents(c *gin.Context) {
 			}
 		}
 
+		event["_etcd_key"] = string(kv.Key)
 		events = append(events, event)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"events": events})
+}
+
+// DeleteFailedEventsRequest represents the request body for deleting failed events
+type DeleteFailedEventsRequest struct {
+	Keys []string `json:"keys" binding:"required"`
+}
+
+// DeleteFailedEvents deletes specified failed events by their etcd keys
+// @Summary      Delete failed events
+// @Description  Delete one or more failed events by their etcd keys
+// @Tags         Failed Events
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request  body      DeleteFailedEventsRequest  true  "Keys to delete"
+// @Success      200      {object}  map[string]interface{}
+// @Failure      400      {object}  ErrorResponse
+// @Failure      500      {object}  ErrorResponse
+// @Router       /failed-events [delete]
+func (r *RestServer) DeleteFailedEvents(c *gin.Context) {
+	var req DeleteFailedEventsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if len(req.Keys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No keys provided"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	deleted := 0
+	for _, key := range req.Keys {
+		// Only allow deleting keys under the failed_events_history/ prefix for safety
+		if !strings.HasPrefix(key, "failed_events_history/") {
+			logrus.WithField("key", key).Warn("Rejected delete attempt for key outside failed_events_history/")
+			continue
+		}
+		_, err := r.etcd.Client().Delete(ctx, key)
+		if err != nil {
+			logrus.WithError(err).WithField("key", key).Error("Failed to delete failed event")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete event: " + key})
+			return
+		}
+		deleted++
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
 }
 
 // ===== Static DNS Record Management =====
@@ -2014,6 +2066,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 
 		// Failed events endpoints
 		api.GET("/failed-events", r.AuthMiddlewareWithBlacklist(), r.GetAllFailedEvents)
+		api.DELETE("/failed-events", r.AuthMiddlewareWithBlacklist(), r.DeleteFailedEvents)
 		api.GET("/failed-events/:nodeId", r.AuthMiddlewareWithBlacklist(), r.GetFailedEvents)
 	}
 
