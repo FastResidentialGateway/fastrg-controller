@@ -1852,21 +1852,20 @@ func (r *RestServer) GetDnsRecords(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	prefix := fmt.Sprintf("configs/%s/%s/dns/", nodeId, userId)
-	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix())
+	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
 		return
 	}
 
 	records := []DnsRecord{}
-	for _, kv := range resp.Kvs {
-		var record DnsRecord
-		if err := json.Unmarshal(kv.Value, &record); err != nil {
-			logrus.WithError(err).Errorf("Failed to parse DNS record: %s", string(kv.Key))
-			continue
+	if len(resp.Kvs) > 0 {
+		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
+			logrus.WithError(err).Errorf("Failed to parse DNS records")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
+			return
 		}
-		records = append(records, record)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"records": records})
@@ -1883,10 +1882,10 @@ func (r *RestServer) GetDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, domain)
+	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS record"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
 		return
 	}
 
@@ -1895,13 +1894,20 @@ func (r *RestServer) GetDnsRecord(c *gin.Context) {
 		return
 	}
 
-	var record DnsRecord
-	if err := json.Unmarshal(resp.Kvs[0].Value, &record); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS record"})
+	var records []DnsRecord
+	if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
 		return
 	}
 
-	c.JSON(http.StatusOK, record)
+	for _, r := range records {
+		if r.Domain == domain {
+			c.JSON(http.StatusOK, r)
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
 }
 
 // AddOrUpdateDnsRecord creates or updates a static DNS record
@@ -1913,67 +1919,75 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 		return
 	}
 
-	var record DnsRecord
-	if err := c.ShouldBindJSON(&record); err != nil {
+	var newRecord DnsRecord
+	if err := c.ShouldBindJSON(&newRecord); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
 
-	if record.Domain == "" {
+	if newRecord.Domain == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
 		return
 	}
-	if record.IP == "" {
+	if newRecord.IP == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "IP is required"})
 		return
 	}
-	if record.TTL == 0 {
+	if newRecord.TTL == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "TTL must be greater than 0"})
 		return
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, record.Domain)
+	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
 
-	// Check if record already exists to determine add vs update
-	existingResp, err := r.etcd.Client().Get(ctx, key)
+	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing DNS record"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing DNS records"})
 		return
 	}
-	isUpdate := len(existingResp.Kvs) > 0
 
-	// Enforce 64-record limit for new records only
-	if !isUpdate {
-		countPrefix := fmt.Sprintf("configs/%s/%s/dns/", nodeId, userId)
-		countResp, err := r.etcd.Client().Get(ctx, countPrefix, clientv3.WithPrefix(), clientv3.WithCountOnly())
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count DNS records"})
+	var records []DnsRecord
+	if len(resp.Kvs) > 0 {
+		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse existing DNS records"})
 			return
 		}
-		if countResp.Count >= 64 {
+	}
+
+	isUpdate := false
+	for i, rec := range records {
+		if rec.Domain == newRecord.Domain {
+			records[i] = newRecord
+			isUpdate = true
+			break
+		}
+	}
+
+	if !isUpdate {
+		if len(records) >= 64 {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "DNS record limit reached: maximum 64 records allowed"})
 			return
 		}
+		records = append(records, newRecord)
 	}
 
-	recordJSON, err := json.Marshal(record)
+	data, err := json.Marshal(records)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS record"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
 		return
 	}
 
-	_, err = r.etcd.Client().Put(ctx, key, string(recordJSON))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS record"})
+	if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
 		return
 	}
 
 	if isUpdate {
-		logrus.Infof("DNS record updated for node %s user %s domain %s", nodeId, userId, record.Domain)
+		logrus.Infof("DNS record updated for node %s user %s domain %s", nodeId, userId, newRecord.Domain)
 		c.JSON(http.StatusOK, gin.H{"message": "DNS record updated successfully", "action": "updated"})
 	} else {
-		logrus.Infof("DNS record added for node %s user %s domain %s", nodeId, userId, record.Domain)
+		logrus.Infof("DNS record added for node %s user %s domain %s", nodeId, userId, newRecord.Domain)
 		c.JSON(http.StatusOK, gin.H{"message": "DNS record added successfully", "action": "added"})
 	}
 }
@@ -1989,23 +2003,55 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns/%s", nodeId, userId, domain)
+	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
 
-	// Check if record exists
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check DNS record"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check DNS records"})
 		return
 	}
+
 	if len(resp.Kvs) == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
 		return
 	}
 
-	_, err = r.etcd.Client().Delete(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete DNS record"})
+	var records []DnsRecord
+	if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
 		return
+	}
+
+	found := false
+	newRecords := records[:0]
+	for _, rec := range records {
+		if rec.Domain == domain {
+			found = true
+		} else {
+			newRecords = append(newRecords, rec)
+		}
+	}
+
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
+		return
+	}
+
+	if len(newRecords) == 0 {
+		if _, err := r.etcd.Client().Delete(ctx, key); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete DNS records"})
+			return
+		}
+	} else {
+		data, err := json.Marshal(newRecords)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
+			return
+		}
+		if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
+			return
+		}
 	}
 
 	logrus.Infof("DNS record deleted for node %s user %s domain %s", nodeId, userId, domain)
