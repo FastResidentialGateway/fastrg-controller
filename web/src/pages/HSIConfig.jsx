@@ -39,6 +39,7 @@ export default function HSIConfig() {
     account_name: '',
     password: '',
     dns_proxy_enable: true,
+    tcp_conntrack_enable: true,
     // enableStatus is returned from backend metadata as a string: "enabled", "enabling", "disabling", "disabled"
     enableStatus: ''
   })
@@ -82,6 +83,9 @@ export default function HSIConfig() {
   // DNS proxy enable state for DNS tab
   const [dnsTabProxyEnable, setDnsTabProxyEnable] = useState(null)
   const [dnsTabProxyLoading, setDnsTabProxyLoading] = useState(false)
+  // Other switches tab state
+  const [tcpConntrackEnable, setTcpConntrackEnable] = useState(null)
+  const [switchesLoading, setSwitchesLoading] = useState(false)
   // PPPoE info state for each user in PPPoE panel: { [userId]: { loading, data, error } }
   const [pppoeInfoMap, setPppoeInfoMap] = useState({})
 
@@ -123,7 +127,7 @@ export default function HSIConfig() {
   useEffect(() => {
     if (action === 'pppoe') {
       loadAllPppoeConfigs()
-    } else if (action === 'snat' || action === 'dns' || action === 'arp' || action === 'dns-cache' || action === 'dhcp-server') {
+    } else if (action === 'snat' || action === 'dns' || action === 'arp' || action === 'dns-cache' || action === 'dhcp-server' || action === 'switches') {
       loadUserIds()
     }
   }, [action])
@@ -179,6 +183,7 @@ export default function HSIConfig() {
         account_name: configData.account_name || '',
         password: configData.password || '',
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+        tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         // store backend string state (enabled/enabling/disabling/disabled)
         enableStatus: metadata.enableStatus || ''
       })
@@ -217,12 +222,13 @@ export default function HSIConfig() {
               password: configData.password || '',
               enableStatus: metadata.enableStatus || '',
               dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+              tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
               dhcp_addr_pool: configData.dhcp_addr_pool || '',
               dhcp_subnet: configData.dhcp_subnet || '',
               dhcp_gateway: configData.dhcp_gateway || ''
             }
           } catch (_) {
-            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, enableStatus: '' }
+            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, tcp_conntrack_enable: true, enableStatus: '' }
           }
         })
       )
@@ -250,6 +256,7 @@ export default function HSIConfig() {
         account_name: configData.account_name || '',
         password: configData.password || '',
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+        tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         enableStatus: metadata.enableStatus || ''
       }))
       setDhcpConfig({
@@ -438,7 +445,8 @@ export default function HSIConfig() {
       vlan_id: '',
       account_name: '',
       password: '',
-      dns_proxy_enable: true
+      dns_proxy_enable: true,
+      tcp_conntrack_enable: true
     })
     setDhcpConfig({
       dhcp_addr_pool: '',
@@ -474,6 +482,9 @@ export default function HSIConfig() {
     // Reset DNS tab proxy state
     setDnsTabProxyEnable(null)
     setDnsTabProxyLoading(false)
+    // Reset other switches tab state
+    setTcpConntrackEnable(null)
+    setSwitchesLoading(false)
     // Clear field validation states
     setTouchedFields({})
     setFieldErrors({})
@@ -488,6 +499,9 @@ export default function HSIConfig() {
       // Load DNS records and dns_proxy_enable for this user
       loadDnsRecords(userId)
       loadDnsTabProxyEnable(userId)
+    }
+    if (action === 'switches') {
+      loadSwitchesConfig(userId)
     }
     if (action === 'arp') {
       // Load ARP table for this user
@@ -842,6 +856,7 @@ export default function HSIConfig() {
         account_name: pppoeConfig.account_name,
         password: pppoeConfig.password,
         dns_proxy_enable: pppoeConfig.dns_proxy_enable,
+        tcp_conntrack_enable: pppoeConfig.tcp_conntrack_enable,
         dhcp_addr_pool: dhcpConfig.dhcp_addr_pool,
         dhcp_subnet: dhcpConfig.dhcp_subnet,
         dhcp_gateway: dhcpConfig.dhcp_gateway
@@ -862,7 +877,8 @@ export default function HSIConfig() {
         vlan_id: '',
         account_name: '',
         password: '',
-        dns_proxy_enable: true
+        dns_proxy_enable: true,
+        tcp_conntrack_enable: true
       })
       setDhcpConfig({
         dhcp_addr_pool: '',
@@ -1102,6 +1118,7 @@ export default function HSIConfig() {
         account_name: configData.account_name || '',
         password: configData.password || '',
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+        tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
         dhcp_subnet: configData.dhcp_subnet || '',
         dhcp_gateway: configData.dhcp_gateway || ''
@@ -1154,6 +1171,7 @@ export default function HSIConfig() {
         account_name: configData.account_name || '',
         password: configData.password || '',
         dns_proxy_enable: newValue,
+        tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
         dhcp_subnet: configData.dhcp_subnet || '',
         dhcp_gateway: configData.dhcp_gateway || ''
@@ -1169,6 +1187,52 @@ export default function HSIConfig() {
       showToast(msg, 3500, 'error')
     } finally {
       setDnsTabProxyLoading(false)
+    }
+  }
+
+  const loadSwitchesConfig = async (userId) => {
+    setSwitchesLoading(true)
+    setTcpConntrackEnable(null)
+    try {
+      const response = await getHSIConfig(nodeId, userId)
+      const configData = response.config || response
+      setTcpConntrackEnable(configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true)
+    } catch (_) {
+      setTcpConntrackEnable(true)
+    } finally {
+      setSwitchesLoading(false)
+    }
+  }
+
+  const handleToggleTcpConntrack = async () => {
+    if (!selectedUserId || tcpConntrackEnable === null) return
+    setSwitchesLoading(true)
+    try {
+      const response = await getHSIConfig(nodeId, selectedUserId)
+      const configData = response.config || response
+      const newValue = !tcpConntrackEnable
+      const fullConfig = {
+        user_id: configData.user_id || selectedUserId,
+        vlan_id: configData.vlan_id || '',
+        account_name: configData.account_name || '',
+        password: configData.password || '',
+        dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+        tcp_conntrack_enable: newValue,
+        dhcp_addr_pool: configData.dhcp_addr_pool || '',
+        dhcp_subnet: configData.dhcp_subnet || '',
+        dhcp_gateway: configData.dhcp_gateway || ''
+      }
+      if (Array.isArray(configData['port-mapping']) && configData['port-mapping'].length > 0) {
+        fullConfig['port-mapping'] = configData['port-mapping']
+      }
+      await updateHSIConfig(nodeId, selectedUserId, fullConfig)
+      setTcpConntrackEnable(newValue)
+      showToast(t('hsi.saveSuccess'), 3500, 'info')
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.saveFailed')
+      showToast(msg, 3500, 'error')
+    } finally {
+      setSwitchesLoading(false)
     }
   }
 
@@ -1214,7 +1278,8 @@ export default function HSIConfig() {
             { key: 'snat', labelKey: 'hsi.snatPortForwarding' },
             { key: 'dns', labelKey: 'dns.staticDnsRecord' },
             { key: 'arp', labelKey: 'hsi.arpTable' },
-            { key: 'dns-cache', labelKey: 'hsi.dnsCache' }
+            { key: 'dns-cache', labelKey: 'hsi.dnsCache' },
+            { key: 'switches', labelKey: 'hsi.otherSwitches' }
           ].map(({ key, labelKey }) => (
             <button
               key={key}
@@ -2234,6 +2299,83 @@ export default function HSIConfig() {
                   )}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== Other Switches Section ===== */}
+      {action === 'switches' && (
+        <div>
+          <h3>{t('hsi.otherSwitches')}</h3>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '5px' }}>{t('hsi.selectUserId')}:</label>
+            <select
+              value={selectedUserId}
+              onChange={(e) => handleUserIdSelect(e.target.value)}
+              style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '4px', minWidth: '200px' }}
+            >
+              <option value="">{t('hsi.selectUserId')}</option>
+              {userIds.map(uid => (
+                <option key={uid} value={uid}>{uid}</option>
+              ))}
+            </select>
+          </div>
+
+          {selectedUserId && (
+            <div style={{ maxWidth: '500px' }}>
+              <div style={{
+                padding: '16px',
+                backgroundColor: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #dee2e6'
+              }}>
+                {/* TCP Conntrack toggle row */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 0' }}>
+                  <span style={{ flex: 1, fontWeight: '500', fontSize: '14px' }}>{t('hsi.tcpConntrack')}</span>
+                  {switchesLoading ? (
+                    <span style={{ fontSize: '13px', color: '#6c757d' }}>{t('common.loading')}</span>
+                  ) : tcpConntrackEnable !== null ? (
+                    <>
+                      <button
+                        onClick={handleToggleTcpConntrack}
+                        disabled={switchesLoading}
+                        title={tcpConntrackEnable ? t('hsi.tcpConntrackEnabled') : t('hsi.tcpConntrackDisabled')}
+                        style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '44px',
+                          height: '24px',
+                          borderRadius: '12px',
+                          border: 'none',
+                          cursor: 'pointer',
+                          backgroundColor: tcpConntrackEnable ? '#28a745' : '#6c757d',
+                          transition: 'background-color 0.2s',
+                          padding: 0,
+                          verticalAlign: 'middle',
+                          flexShrink: 0
+                        }}
+                      >
+                        <span style={{
+                          position: 'absolute',
+                          top: '3px',
+                          left: tcpConntrackEnable ? '23px' : '3px',
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          backgroundColor: 'white',
+                          transition: 'left 0.2s',
+                          display: 'block'
+                        }} />
+                      </button>
+                      <span style={{ fontSize: '13px', color: tcpConntrackEnable ? '#28a745' : '#6c757d', fontWeight: '500', minWidth: '30px' }}>
+                        {tcpConntrackEnable ? t('hsi.tcpConntrackEnabled') : t('hsi.tcpConntrackDisabled')}
+                      </span>
+                    </>
+                  ) : null}
+                </div>
+              </div>
             </div>
           )}
         </div>
