@@ -16,7 +16,8 @@ import {
   getDnsRecords,
   getDnsRecord,
   addOrUpdateDnsRecord,
-  deleteDnsRecord
+  deleteDnsRecord,
+  verifyAdminPassword
 } from '../api'
 import { useI18n } from '../i18n/I18nContext'
 import useToast from '../components/ToastBridge'
@@ -79,6 +80,17 @@ export default function HSIConfig() {
   const [dhcpConfigError, setDhcpConfigError] = useState(null)
   // PPPoE info state for each user in PPPoE panel: { [userId]: { loading, data, error } }
   const [pppoeInfoMap, setPppoeInfoMap] = useState({})
+
+  // Reveal password modal state
+  const [revealModal, setRevealModal] = useState({
+    open: false,
+    userId: null,
+    adminPassword: '',
+    loading: false,
+    error: ''
+  })
+  // Track which rows have had their password revealed in the table
+  const [revealedPasswords, setRevealedPasswords] = useState({})
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -299,6 +311,38 @@ export default function HSIConfig() {
     }
   }
 
+  const handleOpenRevealModal = (cfg) => {
+    setRevealModal({
+      open: true,
+      userId: cfg.user_id,
+      adminPassword: '',
+      loading: false,
+      error: ''
+    })
+  }
+
+  const handleCloseRevealModal = () => {
+    setRevealModal({
+      open: false,
+      userId: null,
+      adminPassword: '',
+      loading: false,
+      error: ''
+    })
+  }
+
+  const handleVerifyAdminPassword = async () => {
+    if (!revealModal.adminPassword) return
+    setRevealModal(prev => ({ ...prev, loading: true, error: '' }))
+    try {
+      await verifyAdminPassword(revealModal.adminPassword)
+      setRevealedPasswords(prev => ({ ...prev, [revealModal.userId]: true }))
+      handleCloseRevealModal()
+    } catch (err) {
+      setRevealModal(prev => ({ ...prev, loading: false, error: t('hsi.revealPasswordModal.wrongPassword') }))
+    }
+  }
+
   const handleShowDhcpLease = async (userId) => {
     setDhcpLeaseMap(prev => ({ ...prev, [userId]: { loading: true, data: null, error: null } }))
     try {
@@ -404,6 +448,7 @@ export default function HSIConfig() {
     setAllPppoeConfigs([])
     setPppoeIsUpdate(false)
     setDhcpLeaseMap({})
+    setRevealedPasswords({})
     // Reset ARP table state
     setArpTableLoading(false)
     setArpTableData(null)
@@ -1390,6 +1435,7 @@ export default function HSIConfig() {
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.userId')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.vlanLabel')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.accountNameLabel')}</th>
+                    <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.password')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'left' }}>{t('hsi.status')}</th>
                     <th style={{ border: '1px solid #dee2e6', padding: '8px', textAlign: 'center' }}>{t('hsi.actions')}</th>
                   </tr>
@@ -1403,6 +1449,39 @@ export default function HSIConfig() {
                           <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{cfg.user_id}</td>
                           <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{cfg.vlan_id}</td>
                           <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>{cfg.account_name}</td>
+                          <td style={{ border: '1px solid #dee2e6', padding: '8px', whiteSpace: 'nowrap' }}>
+                            {revealedPasswords[cfg.user_id] ? (
+                              <>
+                                <span style={{ fontFamily: 'monospace', marginRight: '6px' }}>{cfg.password}</span>
+                                <button
+                                  onClick={() => setRevealedPasswords(prev => { const n = { ...prev }; delete n[cfg.user_id]; return n })}
+                                  title={t('hsi.hidePassword')}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px', color: '#6c757d', verticalAlign: 'middle' }}
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/>
+                                    <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/>
+                                    <path d="M14.12 14.12a3 3 0 11-4.24-4.24"/>
+                                    <line x1="1" y1="1" x2="23" y2="23"/>
+                                  </svg>
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ letterSpacing: '2px', marginRight: '6px' }}>••••</span>
+                                <button
+                                  onClick={() => handleOpenRevealModal(cfg)}
+                                  title={t('hsi.revealPassword')}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px', color: '#007bff', verticalAlign: 'middle' }}
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                  </svg>
+                                </button>
+                              </>
+                            )}
+                          </td>
                           <td style={{ border: '1px solid #dee2e6', padding: '8px' }}>
                             <span style={{
                               padding: '2px 8px',
@@ -2159,6 +2238,94 @@ export default function HSIConfig() {
       {loading && !action && (
         <div style={{ textAlign: 'center', padding: '20px' }}>
           {t('common.loading')}
+        </div>
+      )}
+
+      {/* ===== Reveal Password Modal ===== */}
+      {revealModal.open && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '8px',
+            padding: '24px',
+            minWidth: '340px',
+            maxWidth: '420px',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
+          }}>
+            <h3 style={{ marginTop: 0, marginBottom: '8px' }}>
+              {t('hsi.revealPasswordModal.title')}
+            </h3>
+            <p style={{ color: '#6c757d', fontSize: '14px', marginBottom: '16px' }}>
+              {t('hsi.revealPasswordModal.hint')}
+              {revealModal.userId && (
+                <span style={{ fontWeight: 'bold' }}> (User ID: {revealModal.userId})</span>
+              )}
+            </p>
+
+            <div>
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', marginBottom: '5px', fontSize: '14px' }}>
+                  {t('hsi.revealPasswordModal.adminPasswordLabel')}
+                </label>
+                <input
+                  type="password"
+                  value={revealModal.adminPassword}
+                  onChange={(e) => setRevealModal(prev => ({ ...prev, adminPassword: e.target.value, error: '' }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyAdminPassword() }}
+                  autoFocus
+                  style={{
+                    width: '100%',
+                    padding: '8px',
+                    border: revealModal.error ? '2px solid #dc3545' : '1px solid #ccc',
+                    borderRadius: '4px',
+                    boxSizing: 'border-box'
+                  }}
+                />
+                {revealModal.error && (
+                  <div style={{ color: '#dc3545', fontSize: '13px', marginTop: '4px' }}>
+                    {revealModal.error}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  onClick={handleCloseRevealModal}
+                  style={{
+                    backgroundColor: '#6c757d',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '8px 16px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {t('hsi.revealPasswordModal.cancel')}
+                </button>
+                <button
+                  onClick={handleVerifyAdminPassword}
+                  disabled={revealModal.loading || !revealModal.adminPassword}
+                  style={{
+                    backgroundColor: '#007bff',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '8px 16px',
+                    cursor: (revealModal.loading || !revealModal.adminPassword) ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {revealModal.loading ? t('common.processing') : t('hsi.revealPasswordModal.submit')}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
