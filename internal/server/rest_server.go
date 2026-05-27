@@ -70,8 +70,9 @@ type HSIConfig struct {
 	DHCPAddrPool   string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
 	DHCPSubnet     string        `json:"dhcp_subnet" example:"255.255.255.0"`
 	DHCPGateway    string        `json:"dhcp_gateway" example:"192.168.3.1"`
-	DNSProxyEnable *bool         `json:"dns_proxy_enable,omitempty"`
-	PortMappings   []PortMapping `json:"port-mapping,omitempty"`
+	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
+	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
+	PortMappings       []PortMapping `json:"port-mapping,omitempty"`
 }
 
 // HSIMetadata represents the metadata for HSI configuration
@@ -963,9 +964,10 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Default dns_proxy_enable to true for new configs
+	// Default boolean toggle fields to true for new configs
 	trueVal := true
 	config.DNSProxyEnable = &trueVal
+	config.TCPConntrackEnable = &trueVal
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
@@ -1126,10 +1128,14 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Default dns_proxy_enable to true if not provided
+	// Default boolean toggle fields to true if not provided
 	if config.DNSProxyEnable == nil {
 		trueVal := true
 		config.DNSProxyEnable = &trueVal
+	}
+	if config.TCPConntrackEnable == nil {
+		trueVal := true
+		config.TCPConntrackEnable = &trueVal
 	}
 
 	// Create config with metadata
