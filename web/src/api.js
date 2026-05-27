@@ -283,6 +283,14 @@ export async function getPPPoEInfo(nodeId, userId){
   return resp.data
 }
 
+export async function verifyAdminPassword(password) {
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.post('/api/verify-password', { password }, { headers })
+  if (resp.status !== 200) throw new Error('verification failed')
+  return resp.data
+}
+
 export async function getDhcpConfig(nodeId, userId){
   const token = localStorage.getItem('token')
   const headers = token ? { Authorization: token } : {}

@@ -399,6 +399,55 @@ func (r *RestServer) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }
 
+// VerifyPassword verifies the current authenticated user's password
+// @Summary      Verify admin password
+// @Description  Verify the currently logged-in user's password without changing the session
+// @Tags         Authentication
+// @Accept       json
+// @Produce      json
+// @Param        request  body      object  true  "Password to verify"
+// @Success      200      {object}  MessageResponse
+// @Failure      400      {object}  ErrorResponse
+// @Failure      401      {object}  ErrorResponse
+// @Router       /verify-password [post]
+func (r *RestServer) VerifyPassword(c *gin.Context) {
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if req.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		return
+	}
+
+	authHeader := c.GetHeader("Authorization")
+	username, err := r.getUserFromToken(authHeader)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	hashedPassword, err := r.getUserPassword(username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read from etcd"})
+		return
+	}
+	if hashedPassword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User not found"})
+		return
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.Password)) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password verified"})
+}
+
 // Register creates a new user account
 // @Summary      Register new user
 // @Description  Create a new user account with username and password
@@ -2082,6 +2131,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.POST("/login", r.Login)
 		api.POST("/register", r.Register) // Public registration endpoint
 		api.POST("/logout", r.AuthMiddlewareWithBlacklist(), r.Logout)
+		api.POST("/verify-password", r.AuthMiddlewareWithBlacklist(), r.VerifyPassword)
 		api.GET("/nodes", r.AuthMiddlewareWithBlacklist(), r.ListNodes)
 		api.DELETE("/nodes/:uuid", r.AuthMiddlewareWithBlacklist(), r.UnregisterNode)
 		api.GET("/nodes/:nodeId/subscriber-count", r.AuthMiddlewareWithBlacklist(), r.GetNodeSubscriberCount)
