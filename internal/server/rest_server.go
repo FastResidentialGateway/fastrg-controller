@@ -63,14 +63,15 @@ type PortMapping struct {
 
 // HSI config structure (Include PPPoE and DHCP settings)
 type HSIConfig struct {
-	UserID       string        `json:"user_id" example:"2"`
-	VlanID       string        `json:"vlan_id" example:"2"`
-	AccountName  string        `json:"account_name" example:"admin"`
-	Password     string        `json:"password" example:"admin"`
-	DHCPAddrPool string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
-	DHCPSubnet   string        `json:"dhcp_subnet" example:"255.255.255.0"`
-	DHCPGateway  string        `json:"dhcp_gateway" example:"192.168.3.1"`
-	PortMappings []PortMapping `json:"port-mapping,omitempty"`
+	UserID         string        `json:"user_id" example:"2"`
+	VlanID         string        `json:"vlan_id" example:"2"`
+	AccountName    string        `json:"account_name" example:"admin"`
+	Password       string        `json:"password" example:"admin"`
+	DHCPAddrPool   string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
+	DHCPSubnet     string        `json:"dhcp_subnet" example:"255.255.255.0"`
+	DHCPGateway    string        `json:"dhcp_gateway" example:"192.168.3.1"`
+	DNSProxyEnable *bool         `json:"dns_proxy_enable,omitempty"`
+	PortMappings   []PortMapping `json:"port-mapping,omitempty"`
 }
 
 // HSIMetadata represents the metadata for HSI configuration
@@ -962,6 +963,10 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		return
 	}
 
+	// Default dns_proxy_enable to true for new configs
+	trueVal := true
+	config.DNSProxyEnable = &trueVal
+
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
 	username, err := r.getUserFromToken(authHeader)
@@ -1119,6 +1124,12 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current config status"})
 		return
+	}
+
+	// Default dns_proxy_enable to true if not provided
+	if config.DNSProxyEnable == nil {
+		trueVal := true
+		config.DNSProxyEnable = &trueVal
 	}
 
 	// Create config with metadata

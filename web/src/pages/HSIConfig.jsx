@@ -38,6 +38,7 @@ export default function HSIConfig() {
     vlan_id: '',
     account_name: '',
     password: '',
+    dns_proxy_enable: true,
     // enableStatus is returned from backend metadata as a string: "enabled", "enabling", "disabling", "disabled"
     enableStatus: ''
   })
@@ -78,6 +79,9 @@ export default function HSIConfig() {
   const [dhcpConfigLoading, setDhcpConfigLoading] = useState(false)
   const [dhcpConfigData, setDhcpConfigData] = useState(null)
   const [dhcpConfigError, setDhcpConfigError] = useState(null)
+  // DNS proxy enable state for DNS tab
+  const [dnsTabProxyEnable, setDnsTabProxyEnable] = useState(null)
+  const [dnsTabProxyLoading, setDnsTabProxyLoading] = useState(false)
   // PPPoE info state for each user in PPPoE panel: { [userId]: { loading, data, error } }
   const [pppoeInfoMap, setPppoeInfoMap] = useState({})
 
@@ -174,6 +178,7 @@ export default function HSIConfig() {
         vlan_id: configData.vlan_id || '',
         account_name: configData.account_name || '',
         password: configData.password || '',
+        dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         // store backend string state (enabled/enabling/disabling/disabled)
         enableStatus: metadata.enableStatus || ''
       })
@@ -211,12 +216,13 @@ export default function HSIConfig() {
               account_name: configData.account_name || '',
               password: configData.password || '',
               enableStatus: metadata.enableStatus || '',
+              dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
               dhcp_addr_pool: configData.dhcp_addr_pool || '',
               dhcp_subnet: configData.dhcp_subnet || '',
               dhcp_gateway: configData.dhcp_gateway || ''
             }
           } catch (_) {
-            return { user_id: uid, vlan_id: '', account_name: '', password: '', enableStatus: '' }
+            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, enableStatus: '' }
           }
         })
       )
@@ -243,6 +249,7 @@ export default function HSIConfig() {
         vlan_id: configData.vlan_id || '',
         account_name: configData.account_name || '',
         password: configData.password || '',
+        dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         enableStatus: metadata.enableStatus || ''
       }))
       setDhcpConfig({
@@ -430,7 +437,8 @@ export default function HSIConfig() {
       user_id: '',
       vlan_id: '',
       account_name: '',
-      password: ''
+      password: '',
+      dns_proxy_enable: true
     })
     setDhcpConfig({
       dhcp_addr_pool: '',
@@ -463,6 +471,9 @@ export default function HSIConfig() {
     setDhcpConfigLoading(false)
     setDhcpConfigData(null)
     setDhcpConfigError(null)
+    // Reset DNS tab proxy state
+    setDnsTabProxyEnable(null)
+    setDnsTabProxyLoading(false)
     // Clear field validation states
     setTouchedFields({})
     setFieldErrors({})
@@ -474,8 +485,9 @@ export default function HSIConfig() {
       loadConfig(userId)
     }
     if (action === 'dns') {
-      // Load DNS records for this user
+      // Load DNS records and dns_proxy_enable for this user
       loadDnsRecords(userId)
+      loadDnsTabProxyEnable(userId)
     }
     if (action === 'arp') {
       // Load ARP table for this user
@@ -829,6 +841,7 @@ export default function HSIConfig() {
         vlan_id: pppoeConfig.vlan_id,
         account_name: pppoeConfig.account_name,
         password: pppoeConfig.password,
+        dns_proxy_enable: pppoeConfig.dns_proxy_enable,
         dhcp_addr_pool: dhcpConfig.dhcp_addr_pool,
         dhcp_subnet: dhcpConfig.dhcp_subnet,
         dhcp_gateway: dhcpConfig.dhcp_gateway
@@ -848,7 +861,8 @@ export default function HSIConfig() {
         user_id: '',
         vlan_id: '',
         account_name: '',
-        password: ''
+        password: '',
+        dns_proxy_enable: true
       })
       setDhcpConfig({
         dhcp_addr_pool: '',
@@ -1087,6 +1101,7 @@ export default function HSIConfig() {
         vlan_id: configData.vlan_id || '',
         account_name: configData.account_name || '',
         password: configData.password || '',
+        dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
         dhcp_subnet: configData.dhcp_subnet || '',
         dhcp_gateway: configData.dhcp_gateway || ''
@@ -1109,6 +1124,51 @@ export default function HSIConfig() {
       else setError(msg)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadDnsTabProxyEnable = async (userId) => {
+    setDnsTabProxyLoading(true)
+    setDnsTabProxyEnable(null)
+    try {
+      const response = await getHSIConfig(nodeId, userId)
+      const configData = response.config || response
+      setDnsTabProxyEnable(configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true)
+    } catch (_) {
+      setDnsTabProxyEnable(true)
+    } finally {
+      setDnsTabProxyLoading(false)
+    }
+  }
+
+  const handleDnsTabToggleProxy = async () => {
+    if (!selectedUserId || dnsTabProxyEnable === null) return
+    setDnsTabProxyLoading(true)
+    try {
+      const response = await getHSIConfig(nodeId, selectedUserId)
+      const configData = response.config || response
+      const newValue = !dnsTabProxyEnable
+      const fullConfig = {
+        user_id: configData.user_id || selectedUserId,
+        vlan_id: configData.vlan_id || '',
+        account_name: configData.account_name || '',
+        password: configData.password || '',
+        dns_proxy_enable: newValue,
+        dhcp_addr_pool: configData.dhcp_addr_pool || '',
+        dhcp_subnet: configData.dhcp_subnet || '',
+        dhcp_gateway: configData.dhcp_gateway || ''
+      }
+      if (Array.isArray(configData['port-mapping']) && configData['port-mapping'].length > 0) {
+        fullConfig['port-mapping'] = configData['port-mapping']
+      }
+      await updateHSIConfig(nodeId, selectedUserId, fullConfig)
+      setDnsTabProxyEnable(newValue)
+      showToast(t('hsi.saveSuccess'), 3500, 'info')
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.saveFailed')
+      showToast(msg, 3500, 'error')
+    } finally {
+      setDnsTabProxyLoading(false)
     }
   }
 
@@ -1775,6 +1835,60 @@ export default function HSIConfig() {
 
           {selectedUserId && (
             <div style={{ maxWidth: '700px' }}>
+              {/* DNS Proxy toggle */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '12px 16px',
+                backgroundColor: '#f8f9fa',
+                borderRadius: '8px',
+                border: '1px solid #dee2e6',
+                marginBottom: '20px'
+              }}>
+                <span style={{ fontWeight: '500', fontSize: '14px' }}>{t('hsi.dnsProxy')}</span>
+                {dnsTabProxyLoading ? (
+                  <span style={{ fontSize: '13px', color: '#6c757d' }}>{t('common.loading')}</span>
+                ) : dnsTabProxyEnable !== null ? (
+                  <>
+                    <button
+                      onClick={handleDnsTabToggleProxy}
+                      disabled={dnsTabProxyLoading}
+                      title={dnsTabProxyEnable ? t('hsi.dnsProxyEnabled') : t('hsi.dnsProxyDisabled')}
+                      style={{
+                        position: 'relative',
+                        display: 'inline-block',
+                        width: '44px',
+                        height: '24px',
+                        borderRadius: '12px',
+                        border: 'none',
+                        cursor: 'pointer',
+                        backgroundColor: dnsTabProxyEnable ? '#28a745' : '#6c757d',
+                        transition: 'background-color 0.2s',
+                        padding: 0,
+                        verticalAlign: 'middle',
+                        flexShrink: 0
+                      }}
+                    >
+                      <span style={{
+                        position: 'absolute',
+                        top: '3px',
+                        left: dnsTabProxyEnable ? '23px' : '3px',
+                        width: '18px',
+                        height: '18px',
+                        borderRadius: '50%',
+                        backgroundColor: 'white',
+                        transition: 'left 0.2s',
+                        display: 'block'
+                      }} />
+                    </button>
+                    <span style={{ fontSize: '13px', color: dnsTabProxyEnable ? '#28a745' : '#6c757d', fontWeight: '500' }}>
+                      {dnsTabProxyEnable ? t('hsi.dnsProxyEnabled') : t('hsi.dnsProxyDisabled')}
+                    </span>
+                  </>
+                ) : null}
+              </div>
+
               {/* Add / Update DNS record form */}
               <div style={{
                 padding: '15px',
