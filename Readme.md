@@ -99,6 +99,10 @@ make test
 ```bash
 make docker-build
 ```
+### To pull Docker image from registry, run:
+```bash
+docker pull ghcr.io/fastresidentialgateway/fastrg-controller:latest
+```
 ### To show all available make options, run:
 ```bash
 make help
