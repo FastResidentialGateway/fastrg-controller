@@ -75,6 +75,9 @@ type HSIConfig struct {
 	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
 	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
 	PortMappings       []PortMapping `json:"port-mapping,omitempty"`
+	// DesireStatus is the PPPoE expected state ("connect" | "disconnect").
+	// Only DialPPPoE/HangupPPPoE change it; ordinary config edits preserve it.
+	DesireStatus string `json:"desire_status" example:"disconnect"`
 }
 
 // HSIMetadata represents the metadata for HSI configuration
@@ -83,7 +86,6 @@ type HSIMetadata struct {
 	ResourceVersion string `json:"resourceVersion" example:"1"`
 	UpdatedBy       string `json:"updatedBy" example:"admin"`
 	UpdatedAt       string `json:"updatedAt" example:"2024-01-01T00:00:00Z"`
-	EnableStatus    string `json:"enableStatus" example:"disabled"`
 }
 
 // HSI config with metadata structure for etcd storage
@@ -231,6 +233,13 @@ var (
 	errHSIConfigNotFound = errors.New("HSI config not found")
 	errDNSRecordNotFound = errors.New("DNS record not found")
 	errDNSRecordLimit    = errors.New("DNS record limit reached: maximum 64 records allowed")
+)
+
+// PPPoE expected-state values for HSIConfig.DesireStatus. node watches this
+// field and reconciles the link; controller never drives PPPoE directly.
+const (
+	desireStatusConnect    = "connect"
+	desireStatusDisconnect = "disconnect"
 )
 
 // listVlanOwners returns the (user, vlan) pairs of every HSI config on a node,
@@ -943,6 +952,8 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	trueVal := true
 	config.DNSProxyEnable = &trueVal
 	config.TCPConntrackEnable = &trueVal
+	// New configs start disconnected; PPPoE is driven later via desire_status.
+	config.DesireStatus = desireStatusDisconnect
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
@@ -967,7 +978,6 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		configWithMetadata.Metadata.ResourceVersion = resourceVersion
 		configWithMetadata.Metadata.UpdatedBy = username
 		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		configWithMetadata.Metadata.EnableStatus = "disabled"
 
 		configJSON, err := json.Marshal(configWithMetadata)
 		if err != nil {
@@ -1074,18 +1084,20 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	}
 
 	// CAS-update (upsert): read the current value inside the mutate so the
-	// existing enableStatus is preserved atomically rather than via a separate
-	// racy Get.
+	// existing desire_status is preserved atomically. An ordinary config edit
+	// must never change desire_status — only DialPPPoE/HangupPPPoE do — so any
+	// desire_status sent in the request body is ignored.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
 	var resourceVersion string
 	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
-		enableStatus := "unknown"
+		desire := desireStatusDisconnect
 		if current != nil {
 			var existing HSIConfigWithMetadata
-			if err := json.Unmarshal(current, &existing); err == nil {
-				enableStatus = existing.Metadata.EnableStatus
+			if err := json.Unmarshal(current, &existing); err == nil && existing.Config.DesireStatus != "" {
+				desire = existing.Config.DesireStatus
 			}
 		}
+		config.DesireStatus = desire
 		resourceVersion = nextResourceVersion(current)
 
 		configWithMetadata := HSIConfigWithMetadata{Config: config}
@@ -1093,7 +1105,6 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		configWithMetadata.Metadata.ResourceVersion = resourceVersion
 		configWithMetadata.Metadata.UpdatedBy = username
 		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		configWithMetadata.Metadata.EnableStatus = enableStatus
 
 		configJSON, err := json.Marshal(configWithMetadata)
 		if err != nil {
@@ -1173,9 +1184,52 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "HSI config deleted successfully"})
 }
 
-// DialPPPoE sends a PPPoE dial command to a node
+// setDesireStatus CAS-updates the user's HSI config so its desire_status is the
+// requested value, preserving every other config field. node watches this
+// field and reconciles the PPPoE link. Returns errHSIConfigNotFound when the
+// config is absent and storage.ErrCASConflict on retry exhaustion.
+func (r *RestServer) setDesireStatus(ctx context.Context, nodeId, userId, username, desire string) error {
+	key := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
+	return r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errHSIConfigNotFound
+		}
+
+		var cwm HSIConfigWithMetadata
+		// Guard against wiping a malformed/legacy value: require a real config.
+		if err := json.Unmarshal(current, &cwm); err != nil || cwm.Config.UserID == "" {
+			return storage.CASResult{}, fmt.Errorf("parse HSI config: %w", err)
+		}
+
+		cwm.Config.DesireStatus = desire
+		cwm.Metadata.ResourceVersion = nextResourceVersion(current)
+		cwm.Metadata.UpdatedBy = username
+		cwm.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+		b, err := json.Marshal(cwm)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: b}, nil
+	})
+}
+
+// respondDesireStatusError maps a setDesireStatus failure to an HTTP response.
+func respondDesireStatusError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, errHSIConfigNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": errHSIConfigNotFound.Error()})
+	case errors.Is(err, storage.ErrCASConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update PPPoE desire status"})
+	}
+}
+
+// DialPPPoE requests a PPPoE connection by setting the config's desire_status
+// to "connect"; the node reconciles the actual link.
 // @Summary      Dial PPPoE
-// @Description  Send a PPPoE dial command to establish connection on a node
+// @Description  Set desire_status=connect on the HSI config so the node establishes the PPPoE link
 // @Tags         PPPoE
 // @Accept       json
 // @Produce      json
@@ -1209,65 +1263,25 @@ func (r *RestServer) DialPPPoE(c *gin.Context) {
 		return
 	}
 
-	// Check if HSI config exists
-	configKey := fmt.Sprintf("configs/%s/hsi/%s", req.NodeID, req.UserID)
-	resp, err := r.etcd.Client().Get(ctx, configKey)
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check PPPoE config"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
 	}
 
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "PPPoE config not found"})
+	if err := r.setDesireStatus(ctx, req.NodeID, req.UserID, username, desireStatusConnect); err != nil {
+		respondDesireStatusError(c, err)
 		return
 	}
 
-	// Parse HSI config to get PPPoE related parameters
-	var hsiConfig HSIConfig
-
-	// Try to parse new format (with metadata)
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err == nil {
-		// New format
-		hsiConfig = configWithMetadata.Config
-	} else {
-		// Try to parse old format
-		if err := json.Unmarshal(resp.Kvs[0].Value, &hsiConfig); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse HSI config"})
-			return
-		}
-	}
-
-	// Create dial command and store it in etcd for the node to execute
-	commandKey := fmt.Sprintf("commands/%s/pppoe_dial_%s", req.NodeID, req.UserID)
-	commandData := map[string]interface{}{
-		"action":    "dial",
-		"user_id":   req.UserID,
-		"vlan":      hsiConfig.VlanID,
-		"account":   hsiConfig.AccountName,
-		"password":  hsiConfig.Password,
-		"timestamp": time.Now().Unix(),
-	}
-
-	commandJSON, err := json.Marshal(commandData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create command"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, commandKey, string(commandJSON))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send dial command"})
-		return
-	}
-
-	logrus.Infof("PPPoE dial command sent to node %s for user %s", req.NodeID, req.UserID)
-	c.JSON(http.StatusOK, gin.H{"message": "PPPoE dial command sent successfully"})
+	logrus.Infof("PPPoE desire_status set to connect for node %s user %s by %s", req.NodeID, req.UserID, username)
+	c.JSON(http.StatusOK, gin.H{"message": "PPPoE dial request accepted"})
 }
 
-// HangupPPPoE sends a PPPoE hangup command to a node
+// HangupPPPoE requests a PPPoE disconnect by setting the config's desire_status
+// to "disconnect"; the node reconciles the actual link.
 // @Summary      Hangup PPPoE
-// @Description  Send a PPPoE hangup command to disconnect on a node
+// @Description  Set desire_status=disconnect on the HSI config so the node tears down the PPPoE link
 // @Tags         PPPoE
 // @Accept       json
 // @Produce      json
@@ -1301,60 +1315,19 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 		return
 	}
 
-	// Check if HSI config exists
-	configKey := fmt.Sprintf("configs/%s/hsi/%s", req.NodeID, req.UserID)
-	resp, err := r.etcd.Client().Get(ctx, configKey)
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check HSI config"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
 	}
 
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "HSI config not found"})
+	if err := r.setDesireStatus(ctx, req.NodeID, req.UserID, username, desireStatusDisconnect); err != nil {
+		respondDesireStatusError(c, err)
 		return
 	}
 
-	// Parse HSI config to get PPPoE related parameters
-	var hsiConfig HSIConfig
-
-	// Try to parse new format (with metadata)
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err == nil {
-		// New format
-		hsiConfig = configWithMetadata.Config
-	} else {
-		// Try to parse old format
-		if err := json.Unmarshal(resp.Kvs[0].Value, &hsiConfig); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse HSI config"})
-			return
-		}
-	}
-
-	// Create hangup command and store it in etcd for the node to execute
-	commandKey := fmt.Sprintf("commands/%s/pppoe_hangup_%s", req.NodeID, req.UserID)
-	commandData := map[string]interface{}{
-		"action":    "hangup",
-		"user_id":   req.UserID,
-		"vlan":      hsiConfig.VlanID,
-		"account":   hsiConfig.AccountName,
-		"password":  hsiConfig.Password,
-		"timestamp": time.Now().Unix(),
-	}
-
-	commandJSON, err := json.Marshal(commandData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create command"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, commandKey, string(commandJSON))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send hangup command"})
-		return
-	}
-
-	logrus.Infof("PPPoE hangup command sent to node %s for user %s", req.NodeID, req.UserID)
-	c.JSON(http.StatusOK, gin.H{"message": "PPPoE hangup command sent successfully"})
+	logrus.Infof("PPPoE desire_status set to disconnect for node %s user %s by %s", req.NodeID, req.UserID, username)
+	c.JSON(http.StatusOK, gin.H{"message": "PPPoE hangup request accepted"})
 }
 
 // GetDhcpLeaseCount returns current DHCP lease count for a user on a node
