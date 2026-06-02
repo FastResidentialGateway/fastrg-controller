@@ -148,6 +148,11 @@ spec:
           value: {{ .Values.controller.tls.keyFile | quote }}
         - name: PROMETHEUS_LISTEN_IP
           value: {{ .Values.controller.config.prometheusListenIP | quote }}
+        {{- if .Values.controller.database.url }}
+        # Optional PostgreSQL projection (CQRS read/history model).
+        - name: DATABASE_URL
+          value: {{ .Values.controller.database.url | quote }}
+        {{- end }}
         readinessProbe:
           {{- toYaml .Values.controller.readinessProbe | nindent 10 }}
         livenessProbe:

@@ -44,6 +44,11 @@ spec:
           value: "/app/certs/server.key"
         - name: PROMETHEUS_LISTEN_IP
           value: "0.0.0.0"
+        # Optional PostgreSQL projection (CQRS read/history model). When set,
+        # the controller watches configs/ and projects changes into Postgres.
+        # Leave unset to run from etcd only.
+        # - name: DATABASE_URL
+        #   value: "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
         # or use IP directly (if DNS resolution is problematic)
         # - name: ETCD_ENDPOINTS
         #   value: "<ETCD_HOST_IP>:2379"

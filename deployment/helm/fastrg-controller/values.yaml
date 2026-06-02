@@ -41,7 +41,12 @@ controller:
     ginMode: "release"
     # Prometheus metrics server IP (defaults to 127.0.0.1 if not set)
     prometheusListenIP: "0.0.0.0"
-  
+
+  # Optional PostgreSQL projection (CQRS read/history model). Leave url empty to
+  # run from etcd only; set it to enable the config-watch projection.
+  database:
+    url: ""  # e.g. "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
+
   # SSL Certificate configuration
   tls:
     enabled: true

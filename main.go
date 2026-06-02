@@ -15,6 +15,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	_ "fastrg-controller/docs"
+	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/projection"
 	"fastrg-controller/internal/server"
 	"fastrg-controller/internal/storage"
 
@@ -102,6 +104,23 @@ func main() {
 	// Start failed events watcher
 	cancelWatcher := storage.StartFailedEventsWatcher(etcd)
 	defer cancelWatcher()
+
+	// Optional PostgreSQL projection (CQRS): when a database is configured,
+	// watch configs/ and project changes into the current/history tables. The
+	// controller still serves entirely from etcd if the DB is absent or down.
+	if dsn := db.DSN(); dsn != "" {
+		database, dbErr := db.New(ctx, dsn)
+		if dbErr != nil {
+			logrus.WithError(dbErr).Error("failed to connect PostgreSQL; config projection disabled")
+		} else {
+			defer database.Close()
+			proj := projection.New(etcd, database)
+			go proj.Run(ctx)
+			logrus.Info("Started config projection (etcd -> PostgreSQL)")
+		}
+	} else {
+		logrus.Info("DATABASE_URL/POSTGRES_HOST not set; running without PostgreSQL projection")
+	}
 
 	// Start Prometheus metrics server
 	if err := server.StartPrometheusServer(); err != nil {

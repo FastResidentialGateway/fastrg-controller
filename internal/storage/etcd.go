@@ -28,6 +28,80 @@ const (
 // maximum number of retries.
 var ErrCASConflict = errors.New("cas: exceeded max retries")
 
+// ErrCompacted indicates the requested watch start revision has been compacted
+// away by etcd. The caller should re-list the prefix and resume from the
+// current store revision.
+var ErrCompacted = errors.New("etcd watch revision compacted")
+
+// ConfigEvent is one observed change under the configs/ prefix.
+type ConfigEvent struct {
+	Key         string
+	Value       []byte // nil for a delete
+	ModRevision int64
+	IsDelete    bool
+}
+
+// ConfigEventHandler processes a single config event. Returning an error aborts
+// the watch so the caller can back off and resume.
+type ConfigEventHandler func(ctx context.Context, ev ConfigEvent) error
+
+// ListConfigs returns every key under the configs/ prefix as put-events, plus
+// the store revision the snapshot was taken at. Use that revision as the watch
+// start point so no change is missed between the list and the watch.
+func (e *EtcdClient) ListConfigs(ctx context.Context) ([]ConfigEvent, int64, error) {
+	resp, err := e.client.Get(ctx, "configs/", clientv3.WithPrefix())
+	if err != nil {
+		return nil, 0, err
+	}
+	events := make([]ConfigEvent, 0, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		events = append(events, ConfigEvent{
+			Key:         string(kv.Key),
+			Value:       kv.Value,
+			ModRevision: kv.ModRevision,
+		})
+	}
+	return events, resp.Header.Revision, nil
+}
+
+// WatchConfigs watches the configs/ prefix, calling handler for each event. It
+// starts just after fromRev (or at the current revision when fromRev == 0).
+// Returns ErrCompacted when the start revision was compacted, nil on ctx
+// cancellation, or the first handler/watch error.
+func (e *EtcdClient) WatchConfigs(ctx context.Context, fromRev int64, handler ConfigEventHandler) error {
+	opts := []clientv3.OpOption{clientv3.WithPrefix()}
+	if fromRev > 0 {
+		opts = append(opts, clientv3.WithRev(fromRev+1))
+	}
+
+	watchChan := e.client.Watch(ctx, "configs/", opts...)
+	logrus.Infof("Started watching configs/ from revision %d", fromRev)
+
+	for watchResp := range watchChan {
+		if watchResp.CompactRevision != 0 {
+			return ErrCompacted
+		}
+		if err := watchResp.Err(); err != nil {
+			return err
+		}
+
+		for _, event := range watchResp.Events {
+			ev := ConfigEvent{
+				Key:         string(event.Kv.Key),
+				ModRevision: event.Kv.ModRevision,
+				IsDelete:    event.Type == clientv3.EventTypeDelete,
+			}
+			if !ev.IsDelete {
+				ev.Value = event.Kv.Value
+			}
+			if err := handler(ctx, ev); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+
 // CASResult is what a CASMutateFunc asks CAS to commit for a key.
 type CASResult struct {
 	Value  []byte // value to put when Delete is false
