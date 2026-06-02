@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"fastrg-controller/internal/storage"
+	"fastrg-controller/internal/validation"
 
 	"github.com/sirupsen/logrus"
 
@@ -63,13 +65,13 @@ type PortMapping struct {
 
 // HSI config structure (Include PPPoE and DHCP settings)
 type HSIConfig struct {
-	UserID         string        `json:"user_id" example:"2"`
-	VlanID         string        `json:"vlan_id" example:"2"`
-	AccountName    string        `json:"account_name" example:"admin"`
-	Password       string        `json:"password" example:"admin"`
-	DHCPAddrPool   string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
-	DHCPSubnet     string        `json:"dhcp_subnet" example:"255.255.255.0"`
-	DHCPGateway    string        `json:"dhcp_gateway" example:"192.168.3.1"`
+	UserID             string        `json:"user_id" example:"2"`
+	VlanID             string        `json:"vlan_id" example:"2"`
+	AccountName        string        `json:"account_name" example:"admin"`
+	Password           string        `json:"password" example:"admin"`
+	DHCPAddrPool       string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
+	DHCPSubnet         string        `json:"dhcp_subnet" example:"255.255.255.0"`
+	DHCPGateway        string        `json:"dhcp_gateway" example:"192.168.3.1"`
 	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
 	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
 	PortMappings       []PortMapping `json:"port-mapping,omitempty"`
@@ -228,31 +230,52 @@ func (r *RestServer) getNextResourceVersion(ctx context.Context, etcdKey string)
 	return fmt.Sprintf("%d", nextVersion), nil
 }
 
-// Check if VLAN is already in use by another user on the same node
-func (r *RestServer) isVlanInUse(ctx context.Context, nodeId, vlanId, currentUserId string) (bool, string, error) {
+// listVlanOwners returns the (user, vlan) pairs of every HSI config on a node,
+// for the validation layer to detect VLAN conflicts.
+func (r *RestServer) listVlanOwners(ctx context.Context, nodeId string) ([]validation.VlanOwner, error) {
 	etcdHSIConfigKey := fmt.Sprintf("configs/%s/hsi/", nodeId)
 	resp, err := r.etcd.Client().Get(ctx, etcdHSIConfigKey, clientv3.WithPrefix())
 	if err != nil {
-		return false, "", err
+		return nil, err
 	}
 
+	owners := make([]validation.VlanOwner, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
 		var configWithMetadata HSIConfigWithMetadata
-		var config HSIConfig
-
-		if err := json.Unmarshal(kv.Value, &configWithMetadata); err == nil {
-			config = configWithMetadata.Config
-		} else {
+		if err := json.Unmarshal(kv.Value, &configWithMetadata); err != nil {
 			continue
 		}
-
-		// Check if this VLAN is used by a different user
-		if config.VlanID == vlanId && config.UserID != currentUserId {
-			return true, config.UserID, nil
-		}
+		owners = append(owners, validation.VlanOwner{
+			UserID: configWithMetadata.Config.UserID,
+			VlanID: configWithMetadata.Config.VlanID,
+		})
 	}
+	return owners, nil
+}
 
-	return false, "", nil
+// respondValidationError maps a validation error to the matching HTTP status:
+// a uniqueness conflict becomes 409, any other validation failure 400.
+func respondValidationError(c *gin.Context, err error) {
+	var ve *validation.Error
+	if errors.As(err, &ve) && ve.Conflict {
+		c.JSON(http.StatusConflict, gin.H{"error": ve.Error()})
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+}
+
+// hsiConfigInput maps the REST HSIConfig into the transport-neutral validation
+// input.
+func hsiConfigInput(config HSIConfig) validation.HSIConfigInput {
+	return validation.HSIConfigInput{
+		UserID:       config.UserID,
+		VlanID:       config.VlanID,
+		AccountName:  config.AccountName,
+		Password:     config.Password,
+		DHCPAddrPool: config.DHCPAddrPool,
+		DHCPSubnet:   config.DHCPSubnet,
+		DHCPGateway:  config.DHCPGateway,
+	}
 }
 
 func (r *RestServer) isHSIConfigEnabled(ctx context.Context, nodeId, userId string) (string, error) {
@@ -848,13 +871,10 @@ func (r *RestServer) GetHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(c.Request.Context(), nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(userId); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(userId, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	ctx := c.Request.Context()
@@ -908,32 +928,8 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	}
 
 	// Validate required fields
-	if config.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
-		return
-	}
-	if config.VlanID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "VLAN ID is required"})
-		return
-	}
-	if config.AccountName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Account Name is required"})
-		return
-	}
-	if config.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
-		return
-	}
-	if config.DHCPAddrPool == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Address Pool is required"})
-		return
-	}
-	if config.DHCPSubnet == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Subnet is required"})
-		return
-	}
-	if config.DHCPGateway == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Gateway is required"})
+	if err := validation.ValidateHSIConfig(hsiConfigInput(config)); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -942,25 +938,20 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(config.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(config.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if VLAN is already in use by another user
-	inUse, existingUserId, err := r.isVlanInUse(ctx, nodeId, config.VlanID, config.UserID)
+	owners, err := r.listVlanOwners(ctx, nodeId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check VLAN availability"})
 		return
 	}
-	if inUse {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": fmt.Sprintf("Input VLAN has been already used by other user: %s", existingUserId),
-		})
+	if err := validation.CheckVlanUnique(config.VlanID, config.UserID, owners); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1044,38 +1035,14 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	}
 
 	// Validate required fields
-	if config.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
-		return
-	}
-	if config.VlanID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "VLAN ID is required"})
-		return
-	}
-	if config.AccountName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Account Name is required"})
-		return
-	}
-	if config.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
-		return
-	}
-	if config.DHCPAddrPool == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Address Pool is required"})
-		return
-	}
-	if config.DHCPSubnet == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Subnet is required"})
-		return
-	}
-	if config.DHCPGateway == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Gateway is required"})
+	if err := validation.ValidateHSIConfig(hsiConfigInput(config)); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
 	// Ensure userId in URL params matches UserID in request body
-	if config.UserID != userId {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID mismatch"})
+	if err := validation.ValidateUserIDMatch(userId, config.UserID); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1084,25 +1051,20 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(config.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(config.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if VLAN is already in use by another user
-	inUse, existingUserId, err := r.isVlanInUse(ctx, nodeId, config.VlanID, userId)
+	owners, err := r.listVlanOwners(ctx, nodeId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check VLAN availability"})
 		return
 	}
-	if inUse {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": fmt.Sprintf("Input VLAN has been already used by other user: %s", existingUserId),
-		})
+	if err := validation.CheckVlanUnique(config.VlanID, userId, owners); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1192,13 +1154,10 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(userId); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(userId, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
@@ -1255,13 +1214,10 @@ func (r *RestServer) DialPPPoE(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, req.NodeID)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", req.NodeID)
-	} else {
-		if uidNum, err := strconv.Atoi(req.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(req.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if HSI config exists
@@ -1350,13 +1306,10 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, req.NodeID)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", req.NodeID)
-	} else {
-		if uidNum, err := strconv.Atoi(req.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(req.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if HSI config exists
@@ -1655,8 +1608,8 @@ func (r *RestServer) UpdateNodeSubscriberCount(c *gin.Context) {
 		return
 	}
 
-	if req.SubscriberCount < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Subscriber count must be non-negative"})
+	if err := validation.ValidateSubscriberCount(req.SubscriberCount); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1991,16 +1944,8 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 		return
 	}
 
-	if newRecord.Domain == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
-		return
-	}
-	if newRecord.IP == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "IP is required"})
-		return
-	}
-	if newRecord.TTL == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "TTL must be greater than 0"})
+	if err := validation.ValidateDnsRecord(newRecord.Domain, newRecord.IP, newRecord.TTL); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
