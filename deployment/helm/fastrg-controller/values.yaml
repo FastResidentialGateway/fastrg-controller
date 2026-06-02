@@ -47,6 +47,13 @@ controller:
   database:
     url: ""  # e.g. "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
 
+  # Optional Kafka consumer for node events (requires database.url). Leave
+  # brokers empty to run without it.
+  kafka:
+    brokers: ""  # e.g. "kafka:9092"
+    topic: "fastrg.node.events"
+    group: "fastrg-controller"
+
   # SSL Certificate configuration
   tls:
     enabled: true

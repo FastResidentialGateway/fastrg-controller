@@ -49,6 +49,14 @@ spec:
         # Leave unset to run from etcd only.
         # - name: DATABASE_URL
         #   value: "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
+        # Optional Kafka consumer for node events (requires DATABASE_URL).
+        # Feeds pppoe_status / node_events from the node event stream.
+        # - name: KAFKA_BROKERS
+        #   value: "kafka:9092"
+        # - name: KAFKA_TOPIC
+        #   value: "fastrg.node.events"
+        # - name: KAFKA_GROUP
+        #   value: "fastrg-controller"
         # or use IP directly (if DNS resolution is problematic)
         # - name: ETCD_ENDPOINTS
         #   value: "<ETCD_HOST_IP>:2379"

@@ -153,6 +153,15 @@ spec:
         - name: DATABASE_URL
           value: {{ .Values.controller.database.url | quote }}
         {{- end }}
+        {{- if .Values.controller.kafka.brokers }}
+        # Optional Kafka consumer for node events (requires database.url).
+        - name: KAFKA_BROKERS
+          value: {{ .Values.controller.kafka.brokers | quote }}
+        - name: KAFKA_TOPIC
+          value: {{ .Values.controller.kafka.topic | quote }}
+        - name: KAFKA_GROUP
+          value: {{ .Values.controller.kafka.group | quote }}
+        {{- end }}
         readinessProbe:
           {{- toYaml .Values.controller.readinessProbe | nindent 10 }}
         livenessProbe:

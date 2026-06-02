@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
+	"fastrg-controller/internal/db"
 	"fastrg-controller/internal/storage"
 	"fastrg-controller/internal/validation"
 
@@ -130,10 +130,13 @@ type RestServer struct {
 	etcd           *storage.EtcdClient
 	jwtSecret      []byte
 	nodeMonitorMgr *NodeMonitorManager
+	// db is the PostgreSQL projection. It is nil when no database is configured;
+	// the DB-backed endpoints (node events, PPPoE status) then return 503.
+	db *db.DB
 }
 
-func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *RestServer {
-	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm}
+func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager, database *db.DB) *RestServer {
+	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm, db: database}
 }
 
 // EtcdHealthCheck returns the health status of the service
@@ -1676,14 +1679,23 @@ func (r *RestServer) GetNodeSubscriberCount(c *gin.Context) {
 	})
 }
 
-// FailedEventsResponse represents the response for failed events
+// FailedEventsResponse represents the response for node events
 type FailedEventsResponse struct {
-	Events []map[string]interface{} `json:"events"`
+	Events []db.NodeEventRow `json:"events"`
 }
 
-// GetFailedEvents returns failed events for a specific node
-// @Summary      Get failed events for a node
-// @Description  Get a list of failed events for a specific node
+// requireDB writes a 503 and returns false when no database is configured.
+func (r *RestServer) requireDB(c *gin.Context) bool {
+	if r.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return false
+	}
+	return true
+}
+
+// GetFailedEvents returns node events for a specific node (from PostgreSQL).
+// @Summary      Get node events for a node
+// @Description  Get a list of node events (config-apply results, runtime errors) for a specific node
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
@@ -1699,89 +1711,56 @@ func (r *RestServer) GetFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID is required"})
 		return
 	}
-
-	ctx := c.Request.Context()
-	prefix := fmt.Sprintf("failed_events_history/%s/", nodeId)
-
-	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get failed events"})
+	if !r.requireDB(c) {
 		return
 	}
 
-	events := []map[string]interface{}{}
-	for _, kv := range resp.Kvs {
-		var event map[string]interface{}
-		if err := json.Unmarshal(kv.Value, &event); err != nil {
-			logrus.WithError(err).Error("Failed to parse failed event")
-			continue
-		}
-		event["_etcd_key"] = string(kv.Key)
-		events = append(events, event)
+	events, err := r.db.ListNodeEvents(c.Request.Context(), nodeId, c.Query("event_type"), 0)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
+		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
-// GetAllFailedEvents returns all failed events across all nodes
-// @Summary      Get all failed events
-// @Description  Get a list of all failed events across all nodes. Supports optional event_type filter.
+// GetAllFailedEvents returns node events across all nodes (from PostgreSQL).
+// @Summary      Get all node events
+// @Description  Get a list of all node events across all nodes. Supports optional event_type filter.
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        event_type  query     string  false  "Filter by event type (e.g., pppoe_dial)"
+// @Param        event_type  query     string  false  "Filter by event type (e.g., RUNTIME_ERROR)"
 // @Success      200         {object}  FailedEventsResponse
 // @Failure      500         {object}  ErrorResponse
 // @Router       /failed-events [get]
 func (r *RestServer) GetAllFailedEvents(c *gin.Context) {
-	ctx := c.Request.Context()
-	prefix := "failed_events_history/"
-	eventTypeFilter := c.Query("event_type") // Optional filter
-
-	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get failed events"})
+	if !r.requireDB(c) {
 		return
 	}
-
-	events := []map[string]interface{}{}
-	for _, kv := range resp.Kvs {
-		var event map[string]interface{}
-		if err := json.Unmarshal(kv.Value, &event); err != nil {
-			logrus.WithError(err).Error("Failed to parse failed event")
-			continue
-		}
-
-		// Apply event_type filter if specified
-		if eventTypeFilter != "" {
-			if eventType, ok := event["event_type"].(string); ok {
-				if eventType != eventTypeFilter {
-					continue // Skip events that don't match the filter
-				}
-			}
-		}
-
-		event["_etcd_key"] = string(kv.Key)
-		events = append(events, event)
+	events, err := r.db.ListNodeEvents(c.Request.Context(), "", c.Query("event_type"), 0)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
+		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
-// DeleteFailedEventsRequest represents the request body for deleting failed events
+// DeleteFailedEventsRequest represents the request body for deleting node events
 type DeleteFailedEventsRequest struct {
-	Keys []string `json:"keys" binding:"required"`
+	IDs []int64 `json:"ids" binding:"required"`
 }
 
-// DeleteFailedEvents deletes specified failed events by their etcd keys
-// @Summary      Delete failed events
-// @Description  Delete one or more failed events by their etcd keys
+// DeleteFailedEvents deletes node events by id (from PostgreSQL).
+// @Summary      Delete node events
+// @Description  Delete one or more node events by their numeric ids
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        request  body      DeleteFailedEventsRequest  true  "Keys to delete"
+// @Param        request  body      DeleteFailedEventsRequest  true  "Event ids to delete"
 // @Success      200      {object}  map[string]interface{}
 // @Failure      400      {object}  ErrorResponse
 // @Failure      500      {object}  ErrorResponse
@@ -1792,30 +1771,59 @@ func (r *RestServer) DeleteFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-
-	if len(req.Keys) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No keys provided"})
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No ids provided"})
+		return
+	}
+	if !r.requireDB(c) {
 		return
 	}
 
-	ctx := c.Request.Context()
-	deleted := 0
-	for _, key := range req.Keys {
-		// Only allow deleting keys under the failed_events_history/ prefix for safety
-		if !strings.HasPrefix(key, "failed_events_history/") {
-			logrus.WithField("key", key).Warn("Rejected delete attempt for key outside failed_events_history/")
-			continue
-		}
-		_, err := r.etcd.Client().Delete(ctx, key)
-		if err != nil {
-			logrus.WithError(err).WithField("key", key).Error("Failed to delete failed event")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete event: " + key})
-			return
-		}
-		deleted++
+	deleted, err := r.db.DeleteNodeEvents(c.Request.Context(), req.IDs)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to delete node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete node events"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
+// GetPPPoEStatus returns the latest Kafka-fed PPPoE state for a user (from
+// PostgreSQL), surviving node/controller restarts. This is the recorded actual
+// state, distinct from the live node-scrape in GetPPPoEInfo.
+// @Summary      Get recorded PPPoE status
+// @Description  Get the latest PPPoE phase recorded from node events
+// @Tags         PPPoE
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  db.PPPoEStatusRow
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /pppoe/status/{nodeId}/{userId} [get]
+func (r *RestServer) GetPPPoEStatus(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	if nodeId == "" || userId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+		return
+	}
+	if !r.requireDB(c) {
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+	status, ok, err := r.db.GetPPPoEStatus(c.Request.Context(), nodeId, userId)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get PPPoE status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get PPPoE status"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No PPPoE status recorded for this user"})
+		return
+	}
+	c.JSON(http.StatusOK, status)
 }
 
 // ===== Static DNS Record Management =====
@@ -2068,6 +2076,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.DELETE("/config/:nodeId/hsi/:userId", r.AuthMiddlewareWithBlacklist(), r.DeleteHSIConfig)
 		api.POST("/pppoe/dial", r.AuthMiddlewareWithBlacklist(), r.DialPPPoE)
 		api.POST("/pppoe/hangup", r.AuthMiddlewareWithBlacklist(), r.HangupPPPoE)
+		api.GET("/pppoe/status/:nodeId/:userId", r.AuthMiddlewareWithBlacklist(), r.GetPPPoEStatus)
 		api.GET("/config/:nodeId/dhcp/lease/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpLeaseCount)
 		api.GET("/config/:nodeId/arp/:userId", r.AuthMiddlewareWithBlacklist(), r.GetArpTable)
 		api.GET("/config/:nodeId/dns-cache/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsCache)

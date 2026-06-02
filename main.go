@@ -16,6 +16,7 @@ import (
 
 	_ "fastrg-controller/docs"
 	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/kafka"
 	"fastrg-controller/internal/projection"
 	"fastrg-controller/internal/server"
 	"fastrg-controller/internal/storage"
@@ -101,22 +102,26 @@ func main() {
 	}
 	defer etcd.Close()
 
-	// Start failed events watcher
-	cancelWatcher := storage.StartFailedEventsWatcher(etcd)
-	defer cancelWatcher()
-
 	// Optional PostgreSQL projection (CQRS): when a database is configured,
-	// watch configs/ and project changes into the current/history tables. The
+	// watch configs/ and project changes into the current/history tables, and
+	// consume node events from Kafka into pppoe_status / node_events. The
 	// controller still serves entirely from etcd if the DB is absent or down.
+	var database *db.DB
 	if dsn := db.DSN(); dsn != "" {
-		database, dbErr := db.New(ctx, dsn)
-		if dbErr != nil {
-			logrus.WithError(dbErr).Error("failed to connect PostgreSQL; config projection disabled")
+		var dbErr error
+		if database, dbErr = db.New(ctx, dsn); dbErr != nil {
+			logrus.WithError(dbErr).Error("failed to connect PostgreSQL; projection and Kafka consumer disabled")
+			database = nil
 		} else {
 			defer database.Close()
-			proj := projection.New(etcd, database)
-			go proj.Run(ctx)
+			go projection.New(etcd, database).Run(ctx)
 			logrus.Info("Started config projection (etcd -> PostgreSQL)")
+
+			if brokers := kafka.Brokers(); brokers != nil {
+				go kafka.NewConsumer(brokers, database).Run(ctx)
+			} else {
+				logrus.Info("KAFKA_BROKERS not set; running without Kafka consumer")
+			}
 		}
 	} else {
 		logrus.Info("DATABASE_URL/POSTGRES_HOST not set; running without PostgreSQL projection")
@@ -150,7 +155,7 @@ func main() {
 	}
 
 	// start REST API (HTTPS)
-	rest := server.NewRestServer(etcd, nmm)
+	rest := server.NewRestServer(etcd, nmm, database)
 	logrus.Infof("Starting HTTPS server on :%s", httpsPort)
 	if err := rest.StartRestServer(":" + httpsPort); err != nil {
 		logrus.WithError(err).Fatal("failed to start HTTPS server")
