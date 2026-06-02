@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,91 @@ import (
 
 type EtcdClient struct {
 	client *clientv3.Client
+}
+
+// CAS parameters. These must stay in sync with docs/contracts/cas-convention.md
+// and the C side (fastrg-node), so both implementations behave identically.
+const (
+	casMaxRetries     = 5
+	casInitialBackoff = 50 * time.Millisecond
+)
+
+// ErrCASConflict is returned when a CAS operation still conflicts after the
+// maximum number of retries.
+var ErrCASConflict = errors.New("cas: exceeded max retries")
+
+// CASResult is what a CASMutateFunc asks CAS to commit for a key.
+type CASResult struct {
+	Value  []byte // value to put when Delete is false
+	Delete bool   // when true, the key is deleted instead of put
+}
+
+// CASMutateFunc inspects the current value of a key (nil when the key does not
+// exist) and returns the next state to commit. Returning an error aborts the
+// CAS without any write — use it for not-found / already-exists / validation
+// conditions, which the caller can then map to the right HTTP status.
+type CASMutateFunc func(current []byte) (CASResult, error)
+
+// CAS performs a compare-and-swap on key, following the project CAS convention
+// (docs/contracts/cas-convention.md): read value + ModRevision, run mutate,
+// then commit the put/delete inside a Txn guarded by that revision. If a
+// concurrent write landed in between, the Txn fails and the whole read-modify
+// cycle retries with exponential backoff, up to casMaxRetries.
+func (e *EtcdClient) CAS(ctx context.Context, key string, mutate CASMutateFunc) error {
+	backoff := casInitialBackoff
+	for attempt := 0; attempt < casMaxRetries; attempt++ {
+		resp, err := e.client.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+
+		var (
+			current     []byte
+			modRevision int64
+		)
+		if len(resp.Kvs) > 0 {
+			current = resp.Kvs[0].Value
+			modRevision = resp.Kvs[0].ModRevision
+		}
+
+		result, err := mutate(current)
+		if err != nil {
+			return err
+		}
+
+		// Guard the write on the exact revision we read: Version==0 for a key we
+		// believe is absent (create), ModRevision match for an existing key.
+		var guard clientv3.Cmp
+		if modRevision == 0 {
+			guard = clientv3.Compare(clientv3.Version(key), "=", 0)
+		} else {
+			guard = clientv3.Compare(clientv3.ModRevision(key), "=", modRevision)
+		}
+
+		var op clientv3.Op
+		if result.Delete {
+			op = clientv3.OpDelete(key)
+		} else {
+			op = clientv3.OpPut(key, string(result.Value))
+		}
+
+		txnResp, err := e.client.Txn(ctx).If(guard).Then(op).Commit()
+		if err != nil {
+			return err
+		}
+		if txnResp.Succeeded {
+			return nil
+		}
+
+		// Conflict: someone wrote between our Get and Txn. Back off and retry.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return fmt.Errorf("%w for key %s", ErrCASConflict, key)
 }
 
 // FailedEvent represents a failed event from a node instance

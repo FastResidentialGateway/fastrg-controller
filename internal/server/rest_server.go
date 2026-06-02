@@ -195,40 +195,43 @@ func (r *RestServer) getUserFromToken(tokenString string) (string, error) {
 	return username, nil
 }
 
-// Get next resource version for HSI config
-func (r *RestServer) getNextResourceVersion(ctx context.Context, etcdKey string) (string, error) {
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		return "", err
+// nextResourceVersion derives the display-only resourceVersion to stamp on the
+// value about to be written, from the current stored value (nil for a new key).
+// This is a human-readable audit counter only; concurrency control uses etcd's
+// ModRevision via EtcdClient.CAS, not this number. Behaviour mirrors the old
+// getNextResourceVersion: new key -> "1", unparseable/missing version -> "2".
+func nextResourceVersion(current []byte) string {
+	if len(current) == 0 {
+		return "1"
 	}
 
-	if len(resp.Kvs) == 0 {
-		// First time creation, start with version 1
-		return "1", nil
+	var meta struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(current, &meta); err != nil {
+		return "2"
+	}
+	if meta.Metadata.ResourceVersion == "" {
+		return "2"
 	}
 
-	// Parse existing config to get current version
-	var existingConfig HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &existingConfig); err != nil {
-		// If can't parse metadata, assume it's old format, start with version 2
-		return "2", nil
+	var n int
+	if _, err := fmt.Sscanf(meta.Metadata.ResourceVersion, "%d", &n); err != nil {
+		return "2"
 	}
-
-	// Parse current version and increment
-	currentVersion := existingConfig.Metadata.ResourceVersion
-	if currentVersion == "" {
-		return "2", nil
-	}
-
-	// Simple increment - parse as number and add 1
-	var nextVersion int
-	if _, err := fmt.Sscanf(currentVersion, "%d", &nextVersion); err != nil {
-		return "2", nil
-	}
-	nextVersion++
-
-	return fmt.Sprintf("%d", nextVersion), nil
+	return fmt.Sprintf("%d", n+1)
 }
+
+// Sentinel errors returned by CAS mutate closures so handlers can map them to
+// the right HTTP status. Their messages double as the client-facing text.
+var (
+	errHSIConfigExists   = errors.New("HSI config already exists for this user")
+	errHSIConfigNotFound = errors.New("HSI config not found")
+	errDNSRecordNotFound = errors.New("DNS record not found")
+	errDNSRecordLimit    = errors.New("DNS record limit reached: maximum 64 records allowed")
+)
 
 // listVlanOwners returns the (user, vlan) pairs of every HSI config on a node,
 // for the validation layer to detect VLAN conflicts.
@@ -276,25 +279,6 @@ func hsiConfigInput(config HSIConfig) validation.HSIConfigInput {
 		DHCPSubnet:   config.DHCPSubnet,
 		DHCPGateway:  config.DHCPGateway,
 	}
-}
-
-func (r *RestServer) isHSIConfigEnabled(ctx context.Context, nodeId, userId string) (string, error) {
-	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		return "unknown", err
-	}
-
-	if len(resp.Kvs) == 0 {
-		return "unknown", nil
-	}
-
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err != nil {
-		return "unknown", err
-	}
-
-	return configWithMetadata.Metadata.EnableStatus, nil
 }
 
 // AuthMiddleware with blacklist check for production
@@ -968,35 +952,38 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Get next resource version
-	key := fmt.Sprintf("configs/%s/hsi/%s", nodeId, config.UserID)
-	resourceVersion, err := r.getNextResourceVersion(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
-
-	// Create config with metadata
-	configWithMetadata := HSIConfigWithMetadata{
-		Config: config,
-	}
-	configWithMetadata.Metadata.Node = nodeId
-	configWithMetadata.Metadata.ResourceVersion = resourceVersion
-	configWithMetadata.Metadata.UpdatedBy = username
-	configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	configWithMetadata.Metadata.EnableStatus = "disabled"
-
+	// CAS-create: the Version==0 guard inside CAS rejects a concurrent create,
+	// and the mutate closure rejects an already-existing config.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, config.UserID)
+	var resourceVersion string
+	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		if current != nil {
+			return storage.CASResult{}, errHSIConfigExists
+		}
+		resourceVersion = nextResourceVersion(current)
 
-	configJSON, err := json.Marshal(configWithMetadata)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
+		configWithMetadata := HSIConfigWithMetadata{Config: config}
+		configWithMetadata.Metadata.Node = nodeId
+		configWithMetadata.Metadata.ResourceVersion = resourceVersion
+		configWithMetadata.Metadata.UpdatedBy = username
+		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		configWithMetadata.Metadata.EnableStatus = "disabled"
 
-	_, err = r.etcd.Client().Put(ctx, etcdKey, string(configJSON))
+		configJSON, err := json.Marshal(configWithMetadata)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: configJSON}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save HSI config"})
+		switch {
+		case errors.Is(err, errHSIConfigExists):
+			c.JSON(http.StatusConflict, gin.H{"error": errHSIConfigExists.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save HSI config"})
+		}
 		return
 	}
 
@@ -1076,20 +1063,6 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Get next resource version
-	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	resourceVersion, err := r.getNextResourceVersion(ctx, etcdKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
-
-	enableStatus, err := r.isHSIConfigEnabled(ctx, nodeId, userId)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current config status"})
-		return
-	}
-
 	// Default boolean toggle fields to true if not provided
 	if config.DNSProxyEnable == nil {
 		trueVal := true
@@ -1100,25 +1073,40 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		config.TCPConntrackEnable = &trueVal
 	}
 
-	// Create config with metadata
-	configWithMetadata := HSIConfigWithMetadata{
-		Config: config,
-	}
-	configWithMetadata.Metadata.Node = nodeId
-	configWithMetadata.Metadata.ResourceVersion = resourceVersion
-	configWithMetadata.Metadata.UpdatedBy = username
-	configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	configWithMetadata.Metadata.EnableStatus = enableStatus
+	// CAS-update (upsert): read the current value inside the mutate so the
+	// existing enableStatus is preserved atomically rather than via a separate
+	// racy Get.
+	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
+	var resourceVersion string
+	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		enableStatus := "unknown"
+		if current != nil {
+			var existing HSIConfigWithMetadata
+			if err := json.Unmarshal(current, &existing); err == nil {
+				enableStatus = existing.Metadata.EnableStatus
+			}
+		}
+		resourceVersion = nextResourceVersion(current)
 
-	configJSON, err := json.Marshal(configWithMetadata)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
+		configWithMetadata := HSIConfigWithMetadata{Config: config}
+		configWithMetadata.Metadata.Node = nodeId
+		configWithMetadata.Metadata.ResourceVersion = resourceVersion
+		configWithMetadata.Metadata.UpdatedBy = username
+		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		configWithMetadata.Metadata.EnableStatus = enableStatus
 
-	_, err = r.etcd.Client().Put(ctx, etcdKey, string(configJSON))
+		configJSON, err := json.Marshal(configWithMetadata)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: configJSON}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HSI config"})
+		if errors.Is(err, storage.ErrCASConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HSI config"})
+		}
 		return
 	}
 
@@ -1160,23 +1148,24 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 		return
 	}
 
+	// CAS-delete: the mutate closure confirms existence; the Txn guard ensures
+	// the delete only lands if nobody changed the config in between.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	// Check if config exists
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
+	err := r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errHSIConfigNotFound
+		}
+		return storage.CASResult{Delete: true}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check HSI config"})
-		return
-	}
-
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "HSI config not found"})
-		return
-	}
-
-	// Delete config
-	_, err = r.etcd.Client().Delete(ctx, etcdKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete HSI config"})
+		switch {
+		case errors.Is(err, errHSIConfigNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": errHSIConfigNotFound.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete HSI config"})
+		}
 		return
 	}
 
@@ -1623,31 +1612,28 @@ func (r *RestServer) UpdateNodeSubscriberCount(c *gin.Context) {
 		return
 	}
 
-	// Get next resource version
 	key := fmt.Sprintf("user_counts/%s/", nodeId)
-	resourceVersion, err := r.getNextResourceVersion(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
+	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		countData := SubscriberCountData{}
+		countData.SubscriberCount = fmt.Sprintf("%d", req.SubscriberCount)
+		countData.Metadata.Node = nodeId
+		countData.Metadata.ResourceVersion = nextResourceVersion(current)
+		countData.Metadata.UpdatedBy = username
+		countData.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	countData := SubscriberCountData{}
-	countData.SubscriberCount = fmt.Sprintf("%d", req.SubscriberCount)
-	countData.Metadata.Node = nodeId
-	countData.Metadata.ResourceVersion = resourceVersion
-	countData.Metadata.UpdatedBy = username
-	countData.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	countJSON, err := json.Marshal(countData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, key, string(countJSON))
+		countJSON, err := json.Marshal(countData)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: countJSON}, nil
+	})
 	if err != nil {
 		logrus.WithError(err).Errorf("Failed to update subscriber count for node %s", nodeId)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscriber count"})
+		if errors.Is(err, storage.ErrCASConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscriber count"})
+		}
 		return
 	}
 
@@ -1952,45 +1938,47 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 	ctx := c.Request.Context()
 	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
 
-	resp, err := r.etcd.Client().Get(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing DNS records"})
-		return
-	}
-
-	var records []DnsRecord
-	if len(resp.Kvs) > 0 {
-		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse existing DNS records"})
-			return
-		}
-	}
-
+	// CAS the whole DNS record array: read current, add/update the entry,
+	// enforce the 64-record cap, write back atomically.
 	isUpdate := false
-	for i, rec := range records {
-		if rec.Domain == newRecord.Domain {
-			records[i] = newRecord
-			isUpdate = true
-			break
+	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		var records []DnsRecord
+		if current != nil {
+			if err := json.Unmarshal(current, &records); err != nil {
+				return storage.CASResult{}, err
+			}
 		}
-	}
 
-	if !isUpdate {
-		if len(records) >= 64 {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "DNS record limit reached: maximum 64 records allowed"})
-			return
+		isUpdate = false
+		for i, rec := range records {
+			if rec.Domain == newRecord.Domain {
+				records[i] = newRecord
+				isUpdate = true
+				break
+			}
 		}
-		records = append(records, newRecord)
-	}
+		if !isUpdate {
+			if len(records) >= 64 {
+				return storage.CASResult{}, errDNSRecordLimit
+			}
+			records = append(records, newRecord)
+		}
 
-	data, err := json.Marshal(records)
+		data, err := json.Marshal(records)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: data}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
-		return
-	}
-
-	if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
+		switch {
+		case errors.Is(err, errDNSRecordLimit):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": errDNSRecordLimit.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
+		}
 		return
 	}
 
@@ -2016,53 +2004,50 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	ctx := c.Request.Context()
 	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
 
-	resp, err := r.etcd.Client().Get(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check DNS records"})
-		return
-	}
-
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
-		return
-	}
-
-	var records []DnsRecord
-	if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
-		return
-	}
-
-	found := false
-	newRecords := records[:0]
-	for _, rec := range records {
-		if rec.Domain == domain {
-			found = true
-		} else {
-			newRecords = append(newRecords, rec)
+	// CAS the DNS record array: remove the domain, then delete the key when no
+	// records remain or write back the trimmed array, atomically.
+	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errDNSRecordNotFound
 		}
-	}
 
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
-		return
-	}
-
-	if len(newRecords) == 0 {
-		if _, err := r.etcd.Client().Delete(ctx, key); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete DNS records"})
-			return
+		var records []DnsRecord
+		if err := json.Unmarshal(current, &records); err != nil {
+			return storage.CASResult{}, err
 		}
-	} else {
+
+		found := false
+		newRecords := records[:0]
+		for _, rec := range records {
+			if rec.Domain == domain {
+				found = true
+			} else {
+				newRecords = append(newRecords, rec)
+			}
+		}
+		if !found {
+			return storage.CASResult{}, errDNSRecordNotFound
+		}
+
+		if len(newRecords) == 0 {
+			return storage.CASResult{Delete: true}, nil
+		}
 		data, err := json.Marshal(newRecords)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
-			return
+			return storage.CASResult{}, err
 		}
-		if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
+		return storage.CASResult{Value: data}, nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errDNSRecordNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": errDNSRecordNotFound.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
-			return
 		}
+		return
 	}
 
 	logrus.Infof("DNS record deleted for node %s user %s domain %s", nodeId, userId, domain)
