@@ -11,7 +11,7 @@ export default function FailedEvents() {
   const [error, setError] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [eventTypeFilter, setEventTypeFilter] = useState('')
-  const [selectedKeys, setSelectedKeys] = useState(new Set())
+  const [selectedIds, setSelectedIds] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
@@ -32,11 +32,10 @@ export default function FailedEvents() {
       const data = await getAllFailedEvents(eventTypeFilter || null)
       setEvents(data)
       setError(null)
-      // Clear selections for keys that no longer exist
-      setSelectedKeys(prev => {
-        const existingKeys = new Set(data.map(e => e._etcd_key).filter(Boolean))
-        const next = new Set([...prev].filter(k => existingKeys.has(k)))
-        return next
+      // Drop selections for events that no longer exist.
+      setSelectedIds(prev => {
+        const existing = new Set(data.map(e => e.id))
+        return new Set([...prev].filter(id => existing.has(id)))
       })
     } catch (err) {
       setError(err.message || 'Failed to fetch events')
@@ -45,65 +44,59 @@ export default function FailedEvents() {
     }
   }
 
-  const formatTimestamp = (timestamp, timezone) => {
-    const date = new Date(timestamp * 1000)
-    const timeStr = date.toLocaleString()
-    return timezone ? `${timeStr} ${timezone}` : timeStr
-  }
-
-  const getErrorColor = (errorCode) => {
-    if (errorCode >= 100) return '#dc3545'
-    if (errorCode >= 50) return '#ffc107'
-    return '#17a2b8'
+  const formatTimestamp = (eventTime) => {
+    if (!eventTime) return ''
+    const date = new Date(eventTime)
+    return isNaN(date.getTime()) ? eventTime : date.toLocaleString()
   }
 
   const getEventTypeColor = (eventType) => {
     const colors = {
-      'pppoe_dial': '#007bff',
-      'pppoe_hangup': '#6c757d',
-      'hsi_config': '#28a745',
+      'CONFIG_APPLY_OK': '#28a745',
+      'CONFIG_APPLY_FAIL': '#dc3545',
+      'RUNTIME_ERROR': '#dc3545',
       'default': '#6c757d'
     }
     return colors[eventType] || colors.default
   }
 
-  const allKeys = events.map(e => e._etcd_key).filter(Boolean)
-  const allSelected = allKeys.length > 0 && allKeys.every(k => selectedKeys.has(k))
-  const someSelected = allKeys.some(k => selectedKeys.has(k))
+  const allIds = events.map(e => e.id)
+  const allSelected = allIds.length > 0 && allIds.every(id => selectedIds.has(id))
+  const someSelected = allIds.some(id => selectedIds.has(id))
 
   const toggleSelectAll = () => {
     if (allSelected) {
-      setSelectedKeys(new Set())
+      setSelectedIds(new Set())
     } else {
-      setSelectedKeys(new Set(allKeys))
+      setSelectedIds(new Set(allIds))
     }
   }
 
-  const toggleSelect = (key) => {
-    setSelectedKeys(prev => {
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => {
       const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
+      if (next.has(id)) {
+        next.delete(id)
       } else {
-        next.add(key)
+        next.add(id)
       }
       return next
     })
   }
 
   const handleDeleteSelected = async () => {
-    const keys = [...selectedKeys]
-    if (keys.length === 0) return
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
 
-    const confirmMsg = t('events.confirmDelete').replace('{count}', keys.length)
+    const confirmMsg = t('events.confirmDelete').replace('{count}', ids.length)
     if (!window.confirm(confirmMsg)) return
 
     setDeleting(true)
     try {
-      const result = await deleteFailedEvents(keys)
-      const deleted = result.deleted ?? keys.length
+      const result = await deleteFailedEvents(ids)
+      const deleted = result.deleted ?? ids.length
       alert(t('events.deleteSuccess').replace('{count}', deleted))
-      setSelectedKeys(new Set())
+      setSelectedIds(new Set())
       await fetchEvents()
     } catch (err) {
       alert(t('events.deleteFailed') + ': ' + (err.message || ''))
@@ -145,9 +138,9 @@ export default function FailedEvents() {
               }}
             >
               <option value="">{t('events.allTypes')}</option>
-              <option value="pppoe_dial">PPPoE Dial</option>
-              <option value="pppoe_hangup">PPPoE Hangup</option>
-              <option value="hsi_config">HSI Config</option>
+              <option value="CONFIG_APPLY_FAIL">Config Apply Fail</option>
+              <option value="CONFIG_APPLY_OK">Config Apply OK</option>
+              <option value="RUNTIME_ERROR">Runtime Error</option>
             </select>
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
@@ -185,7 +178,7 @@ export default function FailedEvents() {
                 cursor: deleting ? 'not-allowed' : 'pointer'
               }}
             >
-              {deleting ? t('common.processing') : `🗑 ${t('events.deleteSelected')} (${selectedKeys.size})`}
+              {deleting ? t('common.processing') : `🗑 ${t('events.deleteSelected')} (${selectedIds.size})`}
             </button>
           )}
         </div>
@@ -243,18 +236,17 @@ export default function FailedEvents() {
                   <th style={tableHeaderStyle}>Event type</th>
                   <th style={tableHeaderStyle}>Node ID</th>
                   <th style={tableHeaderStyle}>User ID</th>
+                  <th style={tableHeaderStyle}>Module / Action</th>
                   <th style={tableHeaderStyle}>Error Code</th>
-                  <th style={tableHeaderStyle}>Error Name</th>
-                  <th style={tableHeaderStyle}>Error Detail</th>
+                  <th style={tableHeaderStyle}>Error Message</th>
                 </tr>
               </thead>
               <tbody>
                 {events.map((event, index) => {
-                  const key = event._etcd_key
-                  const isSelected = key && selectedKeys.has(key)
+                  const isSelected = selectedIds.has(event.id)
                   return (
                     <tr
-                      key={index}
+                      key={event.id ?? index}
                       style={{
                         borderBottom: '1px solid #dee2e6',
                         backgroundColor: isSelected
@@ -263,16 +255,14 @@ export default function FailedEvents() {
                       }}
                     >
                       <td style={{ ...tableCellStyle, textAlign: 'center' }}>
-                        {key && (
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleSelect(key)}
-                          />
-                        )}
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(event.id)}
+                        />
                       </td>
                       <td style={tableCellStyle}>
-                        {formatTimestamp(event.timestamp, event.timezone)}
+                        {formatTimestamp(event.event_time)}
                       </td>
                       <td style={tableCellStyle}>
                         <span style={{
@@ -292,7 +282,7 @@ export default function FailedEvents() {
                           padding: '2px 6px',
                           borderRadius: '3px'
                         }}>
-                          {event.node_id}
+                          {event.node_uuid}
                         </code>
                       </td>
                       <td style={tableCellStyle}>
@@ -305,22 +295,24 @@ export default function FailedEvents() {
                         </code>
                       </td>
                       <td style={tableCellStyle}>
-                        <span style={{
-                          backgroundColor: getErrorColor(event.error_reason_code),
-                          color: 'white',
-                          padding: '4px 8px',
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          fontWeight: 'bold'
-                        }}>
-                          {event.error_reason_code}
-                        </span>
+                        {event.module || event.action || '-'}
                       </td>
                       <td style={tableCellStyle}>
-                        <strong>{event.error_reason_name}</strong>
+                        {event.error_code ? (
+                          <span style={{
+                            backgroundColor: '#dc3545',
+                            color: 'white',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            fontWeight: 'bold'
+                          }}>
+                            {event.error_code}
+                          </span>
+                        ) : '-'}
                       </td>
-                      <td style={{ ...tableCellStyle, maxWidth: '300px' }}>
-                        {event.error_detail}
+                      <td style={{ ...tableCellStyle, maxWidth: '320px' }}>
+                        {event.error_message || '-'}
                       </td>
                     </tr>
                   )

@@ -190,11 +190,20 @@ export async function getAllFailedEvents(eventType = null){
   return resp.data.events || []
 }
 
-export async function deleteFailedEvents(keys){
+export async function deleteFailedEvents(ids){
   const token = localStorage.getItem('token')
   const headers = token ? { Authorization: token } : {}
-  const resp = await axios.delete(`/api/failed-events`, { headers, data: { keys } })
+  const resp = await axios.delete(`/api/failed-events`, { headers, data: { ids } })
   if(resp.status !== 200) throw new Error('failed to delete failed events')
+  return resp.data
+}
+
+// Recorded (Kafka-fed) PPPoE status for a user
+export async function getPPPoEStatus(nodeId, userId){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.get(`/api/pppoe/status/${nodeId}/${userId}`, { headers })
+  if(resp.status !== 200) throw new Error('failed to get PPPoE status')
   return resp.data
 }
 
