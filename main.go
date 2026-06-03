@@ -135,13 +135,16 @@ func main() {
 	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
 	nmm := server.NewNodeMonitorManager()
 
+	// CLI-facing config gRPC service (shares same port as NodeManagement)
+	configSvc := server.NewConfigGrpcServer(etcd, []byte(server.GetJWTSecret()))
+
 	var wg sync.WaitGroup
 
 	// start gRPC server
 	wg.Go(func() {
 		grpcSrv := server.NewGrpcServer(etcd, nmm)
 		logrus.Infof("Starting gRPC server on :%s", grpcPort)
-		grpcSrv.Start(":" + grpcPort)
+		grpcSrv.Start(":"+grpcPort, configSvc)
 	})
 
 	// start HTTP redirect servers

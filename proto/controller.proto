@@ -7,6 +7,10 @@ option go_package = "fastrg-controller/proto/controllerpb";
 import "google/protobuf/empty.proto";
 
 
+// ──────────────────────────────────────────────
+//  NodeManagement — node registration / heartbeat
+// ──────────────────────────────────────────────
+
 service NodeManagement {
   rpc RegisterNode(NodeRegisterRequest) returns (NodeRegisterReply) {}
   rpc UnregisterNode(NodeRegisterRequest) returns (google.protobuf.Empty) {}
@@ -29,4 +33,156 @@ message NodeHeartbeat {
   int64 uptime_timestamp = 2;
   string ip = 3;
   string host_os = 4;
+}
+
+
+// ──────────────────────────────────────────────
+//  ConfigService — CLI-facing config management
+//
+//  Authentication: pass the JWT token in the
+//  "authorization" metadata key (same value as
+//  the REST Authorization header).
+//
+//  All mutating RPCs CAS-write etcd and reuse the
+//  same validation rules as the REST API so the
+//  two paths can never diverge.
+// ──────────────────────────────────────────────
+
+service ConfigService {
+  // HSI / PPPoE config CRUD
+  rpc CreateHSIConfig(CreateHSIConfigRequest)       returns (HSIConfigResponse) {}
+  rpc UpdateHSIConfig(UpdateHSIConfigRequest)       returns (HSIConfigResponse) {}
+  rpc DeleteHSIConfig(DeleteHSIConfigRequest)       returns (google.protobuf.Empty) {}
+  rpc GetHSIConfig(GetHSIConfigRequest)             returns (HSIConfigResponse) {}
+  rpc ListHSIConfigs(ListHSIConfigsRequest)         returns (ListHSIConfigsResponse) {}
+
+  // PPPoE desire-state — same semantics as REST /pppoe/dial|hangup
+  rpc DialPPPoE(PPPoEActionRequest)                 returns (google.protobuf.Empty) {}
+  rpc HangupPPPoE(PPPoEActionRequest)               returns (google.protobuf.Empty) {}
+
+  // Subscriber count
+  rpc SetSubscriberCount(SetSubscriberCountRequest) returns (google.protobuf.Empty) {}
+  rpc GetSubscriberCount(GetSubscriberCountRequest) returns (GetSubscriberCountResponse) {}
+
+  // Static DNS records
+  rpc AddOrUpdateDNSRecord(DNSRecordRequest)        returns (google.protobuf.Empty) {}
+  rpc DeleteDNSRecord(DeleteDNSRecordRequest)       returns (google.protobuf.Empty) {}
+  rpc ListDNSRecords(ListDNSRecordsRequest)         returns (ListDNSRecordsResponse) {}
+}
+
+// ── HSI config messages ──
+
+message PortMapping {
+  string index = 1;
+  string dip   = 2;
+  string dport = 3;
+  string eport = 4;
+}
+
+message HSIConfig {
+  string   user_id              = 1;
+  string   vlan_id              = 2;
+  string   account_name         = 3;
+  string   password             = 4;
+  string   dhcp_addr_pool       = 5;
+  string   dhcp_subnet          = 6;
+  string   dhcp_gateway         = 7;
+  bool     dns_proxy_enable     = 8;
+  bool     tcp_conntrack_enable = 9;
+  repeated PortMapping port_mappings = 10;
+  // desire_status is managed exclusively by DialPPPoE/HangupPPPoE.
+  // Create/Update preserve the stored value and ignore this field.
+  string desire_status = 11;
+}
+
+message HSIMetadata {
+  string node             = 1;
+  string resource_version = 2;
+  string updated_by       = 3;
+  string updated_at       = 4;
+}
+
+message HSIConfigResponse {
+  HSIConfig   config   = 1;
+  HSIMetadata metadata = 2;
+}
+
+message CreateHSIConfigRequest {
+  string    node_id = 1;
+  HSIConfig config  = 2;
+}
+
+message UpdateHSIConfigRequest {
+  string    node_id = 1;
+  string    user_id = 2;
+  HSIConfig config  = 3;
+}
+
+message DeleteHSIConfigRequest {
+  string node_id = 1;
+  string user_id = 2;
+}
+
+message GetHSIConfigRequest {
+  string node_id = 1;
+  string user_id = 2;
+}
+
+message ListHSIConfigsRequest {
+  string node_id = 1;
+}
+
+message ListHSIConfigsResponse {
+  repeated HSIConfigResponse configs = 1;
+}
+
+// ── PPPoE desire-state ──
+
+message PPPoEActionRequest {
+  string node_id = 1;
+  string user_id = 2;
+}
+
+// ── Subscriber count ──
+
+message SetSubscriberCountRequest {
+  string node_id          = 1;
+  int32  subscriber_count = 2;
+}
+
+message GetSubscriberCountRequest {
+  string node_id = 1;
+}
+
+message GetSubscriberCountResponse {
+  int32 subscriber_count = 1;
+}
+
+// ── DNS records ──
+
+message DNSRecord {
+  string domain = 1;
+  string ip     = 2;
+  uint32 ttl    = 3;
+}
+
+message DNSRecordRequest {
+  string    node_id = 1;
+  string    user_id = 2;
+  DNSRecord record  = 3;
+}
+
+message DeleteDNSRecordRequest {
+  string node_id = 1;
+  string user_id = 2;
+  string domain  = 3;
+}
+
+message ListDNSRecordsRequest {
+  string node_id = 1;
+  string user_id = 2;
+}
+
+message ListDNSRecordsResponse {
+  repeated DNSRecord records = 1;
 }

@@ -43,6 +43,9 @@ func RedirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
 }
 
+// GetJWTSecret returns the configured JWT secret, used by both REST and gRPC auth.
+func GetJWTSecret() string { return getJWTSecret() }
+
 func getJWTSecret() string {
 	if secret := os.Getenv("JWT_SECRET"); secret != "" {
 		return secret
