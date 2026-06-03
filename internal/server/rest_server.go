@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"fastrg-controller/internal/db"
@@ -43,19 +44,31 @@ func RedirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
 }
 
+var (
+	cachedJWTSecret string
+	jwtSecretOnce   sync.Once
+)
+
 // GetJWTSecret returns the configured JWT secret, used by both REST and gRPC auth.
-func GetJWTSecret() string { return getJWTSecret() }
+// This is computed once and cached to ensure both REST and gRPC use the same value.
+func GetJWTSecret() string {
+	jwtSecretOnce.Do(func() {
+		if secret := os.Getenv("JWT_SECRET"); secret != "" {
+			cachedJWTSecret = secret
+			return
+		}
+		bytes := make([]byte, 32)
+		if _, err := rand.Read(bytes); err != nil {
+			cachedJWTSecret = "super-secret-key"
+			return
+		}
+		cachedJWTSecret = base64.StdEncoding.EncodeToString(bytes)
+	})
+	return cachedJWTSecret
+}
 
 func getJWTSecret() string {
-	if secret := os.Getenv("JWT_SECRET"); secret != "" {
-		return secret
-	}
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		// Default for development environment
-		return "super-secret-key"
-	}
-	return base64.StdEncoding.EncodeToString(bytes)
+	return GetJWTSecret()
 }
 
 // PortMapping represents a single SNAT port forwarding rule
