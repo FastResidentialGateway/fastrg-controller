@@ -59,12 +59,18 @@ func (d *DB) ListCurrentKeys(ctx context.Context) ([]ConfigKey, error) {
 
 // AppendHistory appends one audit row.
 func (d *DB) AppendHistory(ctx context.Context, row HSIConfigRow) error {
+	return d.AppendHistoryWithStatus(ctx, row, "pending")
+}
+
+// AppendHistoryWithStatus appends a config change to history with explicit status.
+// status values: 'pending' (awaiting node apply result), 'success', 'failed'
+func (d *DB) AppendHistoryWithStatus(ctx context.Context, row HSIConfigRow, status string) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO hsi_config_history
-			(node_uuid, user_id, action, config, desire_status, mod_revision, resource_version, updated_by, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			(node_uuid, user_id, action, config, desire_status, mod_revision, resource_version, updated_by, updated_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		row.NodeUUID, row.UserID, row.Action, row.ConfigJSON, row.DesireStatus,
-		row.ModRevision, row.ResourceVersion, row.UpdatedBy, row.UpdatedAt,
+		row.ModRevision, row.ResourceVersion, row.UpdatedBy, row.UpdatedAt, status,
 	)
 	return err
 }
@@ -124,7 +130,8 @@ func (d *DB) GetLastSuccessfulConfig(ctx context.Context, nodeUUID, userID strin
 // hsi_config_current is now managed exclusively by CONFIG_APPLY_OK handlers,
 // so this function only records the failure event, not restores to current.
 func (d *DB) RollbackToLastSuccessful(ctx context.Context, nodeUUID, userID string, failureReason string) error {
-	// Record the failed attempt in history
+	// Record the failed attempt in history with explicit status='failed'
+	// This ensures GetLastSuccessfulConfig() can find "last success" by filtering status='success'
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO hsi_config_history
 			(node_uuid, user_id, action, config, desire_status, mod_revision,
