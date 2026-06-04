@@ -118,7 +118,7 @@ func main() {
 			logrus.Info("Started config projection (etcd -> PostgreSQL)")
 
 			if brokers := kafka.Brokers(); brokers != nil {
-				go kafka.NewConsumer(brokers, database).Run(ctx)
+				go kafka.NewConsumer(brokers, database, etcd).Run(ctx)
 			} else {
 				logrus.Info("KAFKA_BROKERS not set; running without Kafka consumer")
 			}

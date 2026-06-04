@@ -9,11 +9,13 @@ package kafka
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/storage"
 	eventsv1 "fastrg-controller/proto/eventsv1"
 
 	"github.com/segmentio/kafka-go"
@@ -31,6 +33,7 @@ const (
 type Consumer struct {
 	reader *kafka.Reader
 	db     *db.DB
+	etcd   *storage.EtcdClient
 }
 
 // Brokers returns the configured Kafka broker list, or nil when Kafka is not
@@ -56,7 +59,7 @@ func envOr(key, def string) string {
 
 // NewConsumer builds a consumer reading from KAFKA_TOPIC (default
 // fastrg.node.events) in consumer group KAFKA_GROUP (default fastrg-controller).
-func NewConsumer(brokers []string, database *db.DB) *Consumer {
+func NewConsumer(brokers []string, database *db.DB, etcdClient *storage.EtcdClient) *Consumer {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  brokers,
 		Topic:    envOr("KAFKA_TOPIC", defaultTopic),
@@ -64,7 +67,7 @@ func NewConsumer(brokers []string, database *db.DB) *Consumer {
 		MinBytes: 1,
 		MaxBytes: 10e6,
 	})
-	return &Consumer{reader: reader, db: database}
+	return &Consumer{reader: reader, db: database, etcd: etcdClient}
 }
 
 // Run consumes until ctx is cancelled, then closes the reader.
@@ -156,9 +159,43 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		if !success {
 			logrus.Warnf("kafka: config apply failed for node=%s user=%s, rolling back to last successful version",
 				ev.GetNodeUuid(), ev.GetUserId())
+
+			// Find the last successful config from DB history
+			prevConfig, err := c.db.GetLastSuccessfulConfig(ctx, ev.GetNodeUuid(), ev.GetUserId())
+			if err != nil {
+				logrus.WithError(err).Error("kafka: failed to query last successful config")
+				return err
+			}
+
+			if prevConfig != nil {
+				// Restore the last successful config to etcd using CAS
+				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+				if rbErr := c.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+					// Always overwrite with the last successful version (ignore current revision)
+					return storage.CASResult{Value: []byte(prevConfig.ConfigJSON)}, nil
+				}); rbErr != nil {
+					logrus.WithError(rbErr).Error("kafka: failed to restore config to etcd")
+					return rbErr
+				}
+				logrus.Infof("kafka: config rolled back to last successful version in etcd for node=%s user=%s",
+					ev.GetNodeUuid(), ev.GetUserId())
+			} else {
+				// No successful previous version: delete from etcd
+				if rbErr := c.etcd.CAS(ctx, fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId()),
+					func(current []byte) (storage.CASResult, error) {
+						return storage.CASResult{Delete: true}, nil
+					}); rbErr != nil {
+					logrus.WithError(rbErr).Error("kafka: failed to delete invalid config from etcd")
+					return rbErr
+				}
+				logrus.Infof("kafka: invalid config deleted from etcd for node=%s user=%s (no successful version)",
+					ev.GetNodeUuid(), ev.GetUserId())
+			}
+
+			// Record the failure in DB history
 			if rbErr := c.db.RollbackToLastSuccessful(ctx, ev.GetNodeUuid(), ev.GetUserId(),
 				p.ConfigApplyResult.GetErrorMessage()); rbErr != nil {
-				logrus.WithError(rbErr).Error("kafka: rollback failed")
+				logrus.WithError(rbErr).Error("kafka: failed to record rollback in DB")
 				return rbErr
 			}
 		}
