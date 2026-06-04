@@ -104,6 +104,7 @@ func (d *DB) GetLastSuccessfulConfig(ctx context.Context, nodeUUID, userID strin
 		       resource_version, updated_by, updated_at
 		FROM hsi_config_history
 		WHERE node_uuid = $1 AND user_id = $2 AND status = 'success'
+		  AND action = 'upsert' AND config IS NOT NULL
 		ORDER BY id DESC
 		LIMIT 1
 	`, nodeUUID, userID).Scan(
@@ -129,13 +130,14 @@ func (d *DB) RollbackToLastSuccessful(ctx context.Context, nodeUUID, userID stri
 	}
 	defer tx.Rollback(ctx)
 
-	// Find last successful version
+	// Find last successful version (exclude delete operations which have NULL config)
 	var prevConfig HSIConfigRow
 	err = tx.QueryRow(ctx, `
 		SELECT node_uuid, user_id, action, config, desire_status, mod_revision,
 		       resource_version, updated_by, updated_at
 		FROM hsi_config_history
 		WHERE node_uuid = $1 AND user_id = $2 AND status = 'success'
+		  AND action = 'upsert' AND config IS NOT NULL
 		ORDER BY id DESC
 		LIMIT 1
 	`, nodeUUID, userID).Scan(
