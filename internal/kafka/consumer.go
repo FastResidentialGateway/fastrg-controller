@@ -147,7 +147,23 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			CorrelationID: ev.GetCorrelationId(),
 			EventTime:     eventTime,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+
+		// If config apply failed, automatically rollback to the last successful version
+		// to prevent invalid config from remaining in etcd.
+		if !success {
+			logrus.Warnf("kafka: config apply failed for node=%s user=%s, rolling back to last successful version",
+				ev.GetNodeUuid(), ev.GetUserId())
+			if rbErr := c.db.RollbackToLastSuccessful(ctx, ev.GetNodeUuid(), ev.GetUserId(),
+				p.ConfigApplyResult.GetErrorMessage()); rbErr != nil {
+				logrus.WithError(rbErr).Error("kafka: rollback failed")
+				return rbErr
+			}
+		}
+
+		return nil
 
 	case *eventsv1.NodeEvent_RuntimeError:
 		_, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
