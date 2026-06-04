@@ -97,34 +97,25 @@ func (p *Projection) reconcile(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 
-	seen := make(map[db.ConfigKey]bool)
+	// Reconcile: list all etcd configs and record them in history (but NOT in current).
+	// hsi_config_current is now managed only by CONFIG_APPLY_OK handlers, so projection
+	// doesn't touch it. This ensures hsi_config_current only holds "node-confirmed-success" configs.
 	for _, ev := range events {
 		node, user, ok := parseHSIKey(ev.Key)
 		if !ok {
 			continue
 		}
-		seen[db.ConfigKey{NodeUUID: node, UserID: user}] = true
-		if err := p.db.UpsertCurrent(ctx, buildRow(node, user, ev.Value, ev.ModRevision)); err != nil {
+		row := buildRow(node, user, ev.Value, ev.ModRevision)
+		row.Action = db.ActionUpsert
+		if err := p.db.AppendHistory(ctx, row); err != nil {
 			return 0, err
-		}
-	}
-
-	keys, err := p.db.ListCurrentKeys(ctx)
-	if err != nil {
-		return 0, err
-	}
-	for _, k := range keys {
-		if !seen[k] {
-			if err := p.db.DeleteCurrent(ctx, k.NodeUUID, k.UserID); err != nil {
-				return 0, err
-			}
 		}
 	}
 
 	if err := p.db.SetWatchProgress(ctx, watcherName, rev); err != nil {
 		return 0, err
 	}
-	logrus.Infof("projection: reconciled %d configs at revision %d", len(seen), rev)
+	logrus.Infof("projection: reconciled %d configs at revision %d", len(events), rev)
 	return rev, nil
 }
 
@@ -138,10 +129,9 @@ func (p *Projection) handleEvent(ctx context.Context, ev storage.ConfigEvent) er
 		return p.db.SetWatchProgress(ctx, watcherName, ev.ModRevision)
 	}
 
+	// handleEvent only appends to history. hsi_config_current is now managed
+	// exclusively by CONFIG_APPLY_OK handlers in kafka/consumer.go
 	if ev.IsDelete {
-		if err := p.db.DeleteCurrent(ctx, node, user); err != nil {
-			return err
-		}
 		if err := p.db.AppendHistory(ctx, db.HSIConfigRow{
 			NodeUUID:    node,
 			UserID:      user,
@@ -154,9 +144,6 @@ func (p *Projection) handleEvent(ctx context.Context, ev storage.ConfigEvent) er
 	}
 
 	row := buildRow(node, user, ev.Value, ev.ModRevision)
-	if err := p.db.UpsertCurrent(ctx, row); err != nil {
-		return err
-	}
 	row.Action = db.ActionUpsert
 	if err := p.db.AppendHistory(ctx, row); err != nil {
 		return err

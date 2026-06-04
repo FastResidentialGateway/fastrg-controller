@@ -120,79 +120,16 @@ func (d *DB) GetLastSuccessfulConfig(ctx context.Context, nodeUUID, userID strin
 	return &row, nil
 }
 
-// RollbackToLastSuccessful finds the most recent successful config and restores it
-// to hsi_config_current, then records the failed attempt in history.
+// RollbackToLastSuccessful records a failed config apply attempt in history.
+// hsi_config_current is now managed exclusively by CONFIG_APPLY_OK handlers,
+// so this function only records the failure event, not restores to current.
 func (d *DB) RollbackToLastSuccessful(ctx context.Context, nodeUUID, userID string, failureReason string) error {
-	// Start transaction
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	// Find last successful version (exclude delete operations which have NULL config)
-	var prevConfig HSIConfigRow
-	err = tx.QueryRow(ctx, `
-		SELECT node_uuid, user_id, action, config, desire_status, mod_revision,
-		       resource_version, updated_by, updated_at
-		FROM hsi_config_history
-		WHERE node_uuid = $1 AND user_id = $2 AND status = 'success'
-		  AND action = 'upsert' AND config IS NOT NULL
-		ORDER BY id DESC
-		LIMIT 1
-	`, nodeUUID, userID).Scan(
-		&prevConfig.NodeUUID, &prevConfig.UserID, &prevConfig.Action, &prevConfig.ConfigJSON,
-		&prevConfig.DesireStatus, &prevConfig.ModRevision, &prevConfig.ResourceVersion,
-		&prevConfig.UpdatedBy, &prevConfig.UpdatedAt,
-	)
-	if err == pgx.ErrNoRows {
-		// No successful previous version, just record the failure
-		_, err := tx.Exec(ctx, `
-			INSERT INTO hsi_config_history
-				(node_uuid, user_id, action, config, desire_status, mod_revision,
-				 resource_version, updated_by, updated_at, status)
-			VALUES ($1, $2, 'rollback-no-prev', NULL, 'disconnect', 0, '', 'system', now(), 'failed')
-		`, nodeUUID, userID)
-		if err != nil {
-			return err
-		}
-		// Also delete current if exists
-		_, _ = tx.Exec(ctx, `DELETE FROM hsi_config_current WHERE node_uuid = $1 AND user_id = $2`,
-			nodeUUID, userID)
-		return tx.Commit(ctx)
-	}
-	if err != nil {
-		return err
-	}
-
-	// Restore the last successful version to current
-	_, err = tx.Exec(ctx, `
-		INSERT INTO hsi_config_current
-			(node_uuid, user_id, config, desire_status, mod_revision, resource_version, updated_by, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (node_uuid, user_id) DO UPDATE SET
-			config           = EXCLUDED.config,
-			desire_status    = EXCLUDED.desire_status,
-			mod_revision     = EXCLUDED.mod_revision,
-			resource_version = EXCLUDED.resource_version,
-			updated_by       = EXCLUDED.updated_by,
-			updated_at       = EXCLUDED.updated_at
-	`, prevConfig.NodeUUID, prevConfig.UserID, prevConfig.ConfigJSON, prevConfig.DesireStatus,
-		prevConfig.ModRevision, prevConfig.ResourceVersion, prevConfig.UpdatedBy, prevConfig.UpdatedAt)
-	if err != nil {
-		return err
-	}
-
 	// Record the failed attempt in history
-	_, err = tx.Exec(ctx, `
+	_, err := d.pool.Exec(ctx, `
 		INSERT INTO hsi_config_history
 			(node_uuid, user_id, action, config, desire_status, mod_revision,
 			 resource_version, updated_by, updated_at, status)
-		VALUES ($1, $2, 'apply-failed', NULL, '', 0, '', 'system', now(), 'failed')
+		VALUES ($1, $2, 'apply-failed', NULL, 'disconnect', 0, '', 'system', now(), 'failed')
 	`, nodeUUID, userID)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+	return err
 }

@@ -154,6 +154,38 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			return err
 		}
 
+		// If config apply succeeded, update hsi_config_current to mark this version
+		// as "node-confirmed-success". hsi_config_current is now the source of truth
+		// for "what config has the node successfully applied", NOT "etcd's latest config".
+		if success {
+			etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+			resp, err := c.etcd.Client().Get(ctx, etcdKey)
+			if err != nil {
+				logrus.WithError(err).Error("kafka: failed to read current config from etcd after CONFIG_APPLY_OK")
+				return err
+			}
+			if len(resp.Kvs) > 0 {
+				kv := resp.Kvs[0]
+				row := db.HSIConfigRow{
+					NodeUUID:        ev.GetNodeUuid(),
+					UserID:          ev.GetUserId(),
+					ConfigJSON:      kv.Value,
+					ModRevision:     kv.ModRevision,
+					ResourceVersion: "",
+					UpdatedBy:       "node",
+					UpdatedAt:       &eventTime,
+					Action:          db.ActionUpsert,
+					DesireStatus:    "",
+				}
+				if err := c.db.UpsertCurrent(ctx, row); err != nil {
+					logrus.WithError(err).Error("kafka: failed to update hsi_config_current after CONFIG_APPLY_OK")
+					return err
+				}
+				logrus.Infof("kafka: config apply succeeded for node=%s user=%s, updated hsi_config_current",
+					ev.GetNodeUuid(), ev.GetUserId())
+			}
+		}
+
 		// If config apply failed, automatically rollback to the last successful version
 		// to prevent invalid config from remaining in etcd.
 		if !success {
