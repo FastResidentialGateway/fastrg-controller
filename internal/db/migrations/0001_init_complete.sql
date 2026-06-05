@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS kafka_dlq (
     id              BIGSERIAL   PRIMARY KEY,
     topic           TEXT        NOT NULL,
     partition       INT         NOT NULL,
-    offset          BIGINT      NOT NULL,
+    "offset"        BIGINT      NOT NULL,
     message_value   BYTEA       NOT NULL,  -- raw protobuf message
     error_message   TEXT        NOT NULL,
     retry_count     INT         NOT NULL DEFAULT 0,
@@ -134,5 +134,5 @@ CREATE TABLE IF NOT EXISTS kafka_dlq (
 CREATE INDEX IF NOT EXISTS idx_kafka_dlq_status
     ON kafka_dlq (status, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_kafka_dlq_topic_partition
-    ON kafka_dlq (topic, partition, offset);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kafka_dlq_message
+    ON kafka_dlq (topic, partition, "offset");

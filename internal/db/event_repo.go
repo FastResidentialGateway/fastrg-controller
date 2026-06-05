@@ -16,7 +16,7 @@ type DLQRow struct {
 	MessageValue []byte
 	ErrorMessage string
 	RetryCount   int
-	Status       string    // pending, processing, resolved
+	Status       string // pending, processing, resolved
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -99,7 +99,7 @@ func (d *DB) SendToDLQ(ctx context.Context, topic string, partition int, offset 
 		INSERT INTO kafka_dlq
 			(topic, partition, offset, message_value, error_message, retry_count, status)
 		VALUES ($1, $2, $3, $4, $5, 0, 'pending')
-		ON CONFLICT (topic, partition, offset) DO UPDATE SET
+		ON CONFLICT (topic, partition, "offset") DO UPDATE SET
 			error_message = EXCLUDED.error_message,
 			retry_count = kafka_dlq.retry_count + 1,
 			updated_at = now()

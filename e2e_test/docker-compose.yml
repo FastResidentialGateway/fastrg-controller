@@ -65,7 +65,7 @@ services:
       - kafka-data:/var/lib/kafka/data
 
   controller:
-    build: .
+    build: ..
     depends_on:
       etcd:
         condition: service_healthy

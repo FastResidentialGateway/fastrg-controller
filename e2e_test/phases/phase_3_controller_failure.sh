@@ -33,7 +33,7 @@ test_controller_failure() {
     # Step 2: Write config to etcd
     log_info "Step 2: Write config to etcd"
     local test_config='{"config":{"user_id":"user-3","desire_status":"connect"},"metadata":{"resourceVersion":"3","updatedBy":"e2e-test","updatedAt":"2026-06-05T00:00:00Z"}}'
-    docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$test_config" > /dev/null
+    compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$test_config" > /dev/null
     sleep 2
     log_success "Config written to etcd"
 
@@ -47,7 +47,7 @@ test_controller_failure() {
     # Step 4: Stop controller
     log_info "Step 4: Stopping controller..."
     stop_service "controller"
-    log_warn "Controller is DOWN"
+    log_info "Controller is down as expected"
 
     # Step 5: Verify other services still work
     log_info "Step 5: Verifying etcd and database still operational"
@@ -63,7 +63,7 @@ test_controller_failure() {
     # Step 6: Modify config while controller is down
     log_info "Step 6: Modifying config while controller is down"
     local updated_config='{"config":{"user_id":"user-3","desire_status":"disconnect"},"metadata":{"resourceVersion":"4","updatedBy":"e2e-test-downtime","updatedAt":"2026-06-05T00:01:00Z"}}'
-    docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$updated_config" > /dev/null
+    compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$updated_config" > /dev/null
     log_success "Config modified in etcd during controller downtime"
 
     # Step 7: Restart controller
@@ -76,7 +76,6 @@ test_controller_failure() {
     sleep 5
 
     local final_etcd=$(config_get "$NODE_ID" "$USER_ID")
-    local final_db=$(db_query "SELECT config FROM hsi_config_current WHERE node_uuid='$NODE_ID' AND user_id='$USER_ID';" 2>/dev/null)
 
     if [ "$final_etcd" == "$updated_config" ]; then
         log_success "etcd still has updated config"

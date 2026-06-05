@@ -9,6 +9,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"fastrg-controller/internal/storage"
 	eventsv1 "fastrg-controller/proto/eventsv1"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/segmentio/kafka-go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -99,36 +101,46 @@ func (c *Consumer) Run(ctx context.Context) {
 			continue
 		}
 
-		// Retry the same message with exponential backoff. If it still fails after
-		// maxRetries, send to DLQ (persistent failure queue in database) and move on
-		// to the next message. This prevents a single failed message from blocking
-		// the entire partition when database is down for extended periods.
+		// Retry the same message with exponential backoff. If the DB is
+		// unavailable, keep retrying this message without committing the offset.
+		// If PostgreSQL is reachable and returned a SQL error, persist the
+		// message to DLQ before committing the offset.
 		const maxRetries = 5
 		backoff := 100 * time.Millisecond
-		for attempt := 0; attempt < maxRetries && ctx.Err() == nil; attempt++ {
+		failed := false
+		for attempt := 1; ctx.Err() == nil; {
 			if err := c.handle(ctx, m.Value); err != nil {
+				failed = true
+
+				if isDatabaseUnavailable(err) {
+					logrus.WithError(err).Warn("kafka: database unavailable, retrying same message")
+					c.sleep(ctx)
+					continue
+				}
+
 				logrus.WithError(err).Warnf("kafka: handle failed (attempt %d/%d), backing off %v",
-					attempt+1, maxRetries, backoff)
+					attempt, maxRetries, backoff)
+				if attempt >= maxRetries {
+					break
+				}
 				select {
 				case <-ctx.Done():
 					return
 				case <-time.After(backoff):
 					backoff = time.Duration(float64(backoff) * 1.5) // exponential backoff
+					attempt++
 					continue
 				}
 			}
 			// Success
-			backoff = 0
+			failed = false
 			break
 		}
 
-		// If still failed after retries, send to DLQ (database persistent queue)
-		if backoff > 0 && ctx.Err() == nil {
+		// If still failed after retries, send to DLQ (database persistent queue).
+		if failed && ctx.Err() == nil {
 			logrus.Errorf("kafka: message failed after %d retries, sending to DLQ", maxRetries)
-			if dlqErr := c.sendToDLQ(ctx, m); dlqErr != nil {
-				logrus.WithError(dlqErr).Error("kafka: failed to send message to DLQ")
-				// Don't return error here - we've done our best. Move on to next message.
-			}
+			c.waitAndSendToDLQ(ctx, m)
 		}
 		if ctx.Err() != nil {
 			return
@@ -138,6 +150,43 @@ func (c *Consumer) Run(ctx context.Context) {
 			logrus.WithError(err).Error("kafka: commit failed")
 		}
 	}
+}
+
+// isDatabaseUnavailable distinguishes transient connectivity/pool failures from
+// SQL errors returned by a reachable PostgreSQL server. Reachable SQL errors can
+// still be dead-lettered into kafka_dlq; unavailable DB errors cannot, because
+// kafka_dlq is stored in the same PostgreSQL instance.
+func isDatabaseUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var dbErr databaseOperationError
+	if !errors.As(err, &dbErr) {
+		return false
+	}
+
+	var pgErr *pgconn.PgError
+	return !errors.As(err, &pgErr)
+}
+
+type databaseOperationError struct {
+	err error
+}
+
+func (e databaseOperationError) Error() string {
+	return e.err.Error()
+}
+
+func (e databaseOperationError) Unwrap() error {
+	return e.err
+}
+
+func wrapDatabaseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return databaseOperationError{err: err}
 }
 
 // waitForTopicReady blocks until the Kafka topic has at least 1 partition or
@@ -183,7 +232,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 
 	switch p := ev.GetPayload().(type) {
 	case *eventsv1.NodeEvent_PppoeStateChange:
-		return c.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
+		return wrapDatabaseError(c.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
 			NodeUUID:     ev.GetNodeUuid(),
 			UserID:       ev.GetUserId(),
 			Phase:        phaseString(p.PppoeStateChange.GetPhase()),
@@ -191,7 +240,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			HSIIPv4GW:    p.PppoeStateChange.GetHsiIpv4Gw(),
 			ErrorMessage: p.PppoeStateChange.GetErrorMessage(),
 			EventTime:    eventTime,
-		})
+		}))
 
 	case *eventsv1.NodeEvent_ConfigApplyResult:
 		success := p.ConfigApplyResult.GetSuccess()
@@ -207,49 +256,56 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			EventTime:     eventTime,
 		})
 		if err != nil {
-			return err
+			return wrapDatabaseError(err)
 		}
 
 		// If config apply succeeded, update hsi_config_current to mark this version
 		// as "node-confirmed-success". hsi_config_current is now the source of truth
 		// for "what config has the node successfully applied", NOT "etcd's latest config".
 		if success {
-			etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
-			resp, err := c.etcd.Client().Get(ctx, etcdKey)
-			if err != nil {
-				logrus.WithError(err).Error("kafka: failed to read current config from etcd after CONFIG_APPLY_OK")
-				return err
-			}
-			if len(resp.Kvs) > 0 {
-				kv := resp.Kvs[0]
-				row := db.HSIConfigRow{
-					NodeUUID:        ev.GetNodeUuid(),
-					UserID:          ev.GetUserId(),
-					ConfigJSON:      kv.Value,
-					ModRevision:     kv.ModRevision,
-					ResourceVersion: "",
-					UpdatedBy:       "node",
-					UpdatedAt:       &eventTime,
-					Action:          db.ActionUpsert,
-					DesireStatus:    "",
-				}
-				if err := c.db.UpsertCurrent(ctx, row); err != nil {
-					logrus.WithError(err).Error("kafka: failed to update hsi_config_current after CONFIG_APPLY_OK")
-					return err
-				}
-				// Record this success in history. Database operation is idempotent
-				// (AppendHistoryWithStatus uses ON CONFLICT to avoid duplicates if
-				// consumer retries after database restart).
-				if err := c.db.AppendHistoryWithStatus(ctx, row, "success"); err != nil {
-					logrus.WithError(err).Error("kafka: failed to record success in history after CONFIG_APPLY_OK")
-					return err
-				}
-				logrus.Infof("kafka: config apply succeeded for node=%s user=%s, updated hsi_config_current",
+			// Update hsi_config_current only when etcd is configured; in unit tests
+			// the client may be nil (etcd not needed for projection-only testing).
+			if c.etcd == nil {
+				logrus.Warnf("kafka: etcd not configured, skipping hsi_config_current update for node=%s user=%s",
 					ev.GetNodeUuid(), ev.GetUserId())
 			} else {
-				logrus.Warnf("kafka: CONFIG_APPLY_OK for node=%s user=%s but config not found in etcd",
-					ev.GetNodeUuid(), ev.GetUserId())
-			}
+				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+				resp, err := c.etcd.Client().Get(ctx, etcdKey)
+				if err != nil {
+					logrus.WithError(err).Error("kafka: failed to read current config from etcd after CONFIG_APPLY_OK")
+					return err
+				}
+				if len(resp.Kvs) > 0 {
+					kv := resp.Kvs[0]
+					row := db.HSIConfigRow{
+						NodeUUID:        ev.GetNodeUuid(),
+						UserID:          ev.GetUserId(),
+						ConfigJSON:      kv.Value,
+						ModRevision:     kv.ModRevision,
+						ResourceVersion: "",
+						UpdatedBy:       "node",
+						UpdatedAt:       &eventTime,
+						Action:          db.ActionUpsert,
+						DesireStatus:    "",
+					}
+					if err := c.db.UpsertCurrent(ctx, row); err != nil {
+						logrus.WithError(err).Error("kafka: failed to update hsi_config_current after CONFIG_APPLY_OK")
+						return wrapDatabaseError(err)
+					}
+					// Record this success in history. Database operation is idempotent
+					// (AppendHistoryWithStatus uses ON CONFLICT to avoid duplicates if
+					// consumer retries after database restart).
+					if err := c.db.AppendHistoryWithStatus(ctx, row, "success"); err != nil {
+						logrus.WithError(err).Error("kafka: failed to record success in history after CONFIG_APPLY_OK")
+						return wrapDatabaseError(err)
+					}
+					logrus.Infof("kafka: config apply succeeded for node=%s user=%s, updated hsi_config_current",
+						ev.GetNodeUuid(), ev.GetUserId())
+				} else {
+					logrus.Warnf("kafka: CONFIG_APPLY_OK for node=%s user=%s but config not found in etcd",
+						ev.GetNodeUuid(), ev.GetUserId())
+				}
+			} // end c.etcd != nil
 		}
 
 		// If config apply failed, automatically rollback to the last successful version
@@ -262,10 +318,14 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			prevConfig, err := c.db.GetLastSuccessfulConfig(ctx, ev.GetNodeUuid(), ev.GetUserId())
 			if err != nil {
 				logrus.WithError(err).Error("kafka: failed to query last successful config")
-				return err
+				return wrapDatabaseError(err)
 			}
 
-			if prevConfig != nil {
+			// Skip etcd rollback when etcd is not configured (e.g. unit tests).
+			if c.etcd == nil {
+				logrus.Warnf("kafka: etcd not configured, skipping rollback write for node=%s user=%s",
+					ev.GetNodeUuid(), ev.GetUserId())
+			} else if prevConfig != nil {
 				// Restore the last successful config to etcd using CAS
 				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
 				if rbErr := c.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
@@ -294,7 +354,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			if rbErr := c.db.RollbackToLastSuccessful(ctx, ev.GetNodeUuid(), ev.GetUserId(),
 				p.ConfigApplyResult.GetErrorMessage()); rbErr != nil {
 				logrus.WithError(rbErr).Error("kafka: failed to record rollback in DB")
-				return rbErr
+				return wrapDatabaseError(rbErr)
 			}
 		}
 
@@ -312,7 +372,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			CorrelationID: ev.GetCorrelationId(),
 			EventTime:     eventTime,
 		})
-		return err
+		return wrapDatabaseError(err)
 
 	default:
 		logrus.WithField("type", ev.GetType()).Warn("kafka: event with no/unknown payload, skipping")
@@ -320,9 +380,19 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 	}
 }
 
+func (c *Consumer) waitAndSendToDLQ(ctx context.Context, m kafka.Message) {
+	for ctx.Err() == nil {
+		if err := c.sendToDLQ(ctx, m); err != nil {
+			logrus.WithError(err).Error("kafka: failed to send message to DLQ, retrying")
+			c.sleep(ctx)
+			continue
+		}
+		return
+	}
+}
 
 // sendToDLQ records a failed message to the database for human investigation.
-// This allows the consumer to move on to the next message instead of blocking.
+// The caller commits the Kafka offset only after this succeeds.
 func (c *Consumer) sendToDLQ(ctx context.Context, m kafka.Message) error {
 	if c.db == nil {
 		// No database configured, can't send to DLQ. Just log and move on.
@@ -332,7 +402,7 @@ func (c *Consumer) sendToDLQ(ctx context.Context, m kafka.Message) error {
 	}
 
 	dlqID, err := c.db.SendToDLQ(ctx, m.Topic, m.Partition, m.Offset, m.Value,
-		"Failed after max retries due to database unavailability")
+		"Failed after max retries while handling Kafka message")
 	if err != nil {
 		return err
 	}

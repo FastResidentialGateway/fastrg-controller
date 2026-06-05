@@ -101,7 +101,7 @@ func TestConsumerEndToEnd(t *testing.T) {
 	}
 
 	// Run the consumer.
-	go NewConsumer([]string{brokers}, database).Run(ctx)
+	go NewConsumer([]string{brokers}, database, nil).Run(ctx)
 
 	// PPPoE status projected.
 	waitFor(t, 25*time.Second, func() bool {

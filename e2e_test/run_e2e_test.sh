@@ -17,6 +17,7 @@
 #   --node-host    IP     FastRG Node IP (default: 192.168.10.211)
 #   --etcd-host    IP     etcd host (default: 192.168.10.212)
 #   --db-host      IP     PostgreSQL host (default: 192.168.10.212)
+#   --compose-dir  PATH   Docker Compose project directory on controller (default: /root/fastrg-controller/e2e_test)
 #   --ssh-key      PATH   SSH identity file (default: auto-detect)
 #   --phase        N      Run specific phase (1-4) (default: all)
 #   --help                Show this help
@@ -24,12 +25,11 @@
 # Requirements (local machine):
 #   - bash >= 4.0
 #   - ssh / scp
-#   - docker-compose (on runner)
 #   - jq, curl (on runner)
+#   - ssh access from runner to controller
 #
 # Requirements (remote runner):
-#   - docker-compose stack (etcd, postgres, kafka, controller)
-#   - git clone of fastrg-controller repo
+#   - Docker Compose stack on controller host
 # =============================================================================
 
 set -euo pipefail
@@ -164,6 +164,7 @@ CONTROLLER_HOST="${CONTROLLER_HOST:-192.168.10.212}"
 NODE_HOST="${NODE_HOST:-192.168.10.211}"
 ETCD_HOST="${ETCD_HOST:-192.168.10.212}"
 DB_HOST="${DB_HOST:-192.168.10.212}"
+COMPOSE_DIR="${COMPOSE_DIR:-/root/fastrg-controller/e2e_test}"
 
 # Auto-detect SSH key for remote node access
 if [[ -f "${HOME}/.ssh/id_ed25519" ]]; then
@@ -193,6 +194,7 @@ while [[ $# -gt 0 ]]; do
         --node-host)       NODE_HOST="$2"; shift 2 ;;
         --etcd-host)       ETCD_HOST="$2"; shift 2 ;;
         --db-host)         DB_HOST="$2"; shift 2 ;;
+        --compose-dir)     COMPOSE_DIR="$2"; shift 2 ;;
         --ssh-key)         SSH_KEY="$2"; shift 2 ;;
         --phase)           PHASE_TO_RUN="$2"; shift 2 ;;
         -*)                log_error "Unknown option: $1"; exit 1 ;;
@@ -216,15 +218,19 @@ fi
 SSH_OPTS="${SSH_KEY:+-i $SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
 
 ssh_node() {
-    ssh $SSH_OPTS "root@${NODE_HOST}" "$@" 2>&1 || true
+    ssh $SSH_OPTS "root@${NODE_HOST}" "$@" 2>&1
 }
 
 ssh_db() {
-    ssh $SSH_OPTS "root@${DB_HOST}" "$@" 2>&1 || true
+    ssh $SSH_OPTS "root@${DB_HOST}" "$@" 2>&1
 }
 
 ssh_etcd() {
-    ssh $SSH_OPTS "root@${ETCD_HOST}" "$@" 2>&1 || true
+    ssh $SSH_OPTS "root@${ETCD_HOST}" "$@" 2>&1
+}
+
+ssh_controller() {
+    ssh $SSH_OPTS "root@${CONTROLLER_HOST}" "$@" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -238,12 +244,18 @@ print_header() {
 
 run_phase() {
     local phase_num=$1
-    local phase_script="${SCRIPT_DIR}/phases/phase_${phase_num}_*.sh"
+    local phase_scripts=("${SCRIPT_DIR}"/phases/phase_"${phase_num}"_*.sh)
+    local phase_script
 
-    if [[ ! -f $phase_script ]]; then
+    if [[ ${#phase_scripts[@]} -eq 0 || ! -f "${phase_scripts[0]}" ]]; then
         log_warn "Phase ${phase_num} script not found"
         return 1
     fi
+    if [[ ${#phase_scripts[@]} -gt 1 ]]; then
+        log_warn "Multiple Phase ${phase_num} scripts found"
+        return 1
+    fi
+    phase_script="${phase_scripts[0]}"
 
     print_header "Running Phase ${phase_num}"
     bash "$phase_script" || return 1
@@ -259,10 +271,12 @@ main() {
     log_info "  Node:            ${NODE_HOST}"
     log_info "  etcd:            ${ETCD_HOST}"
     log_info "  Database:        ${DB_HOST}"
+    log_info "  Compose Dir:     ${COMPOSE_DIR}"
 
     # Export for child scripts
-    export CONTROLLER_HOST NODE_HOST ETCD_HOST DB_HOST SSH_KEY SSH_OPTS
-    export ssh_node ssh_db ssh_etcd
+    export CONTROLLER_HOST NODE_HOST ETCD_HOST DB_HOST COMPOSE_DIR SSH_KEY SSH_OPTS
+    export E2E_COMPOSE_VIA_SSH=1
+    export -f ssh_node ssh_db ssh_etcd ssh_controller
 
     printf "\n"
 

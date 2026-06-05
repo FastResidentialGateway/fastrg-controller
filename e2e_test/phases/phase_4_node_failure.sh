@@ -30,7 +30,7 @@ test_node_failure() {
 
     # Step 2: Check if node is registered
     log_info "Step 2: Checking registered nodes"
-    docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 get --prefix "nodes/" --keys-only > /tmp/nodes_before.txt
+    compose exec -T etcd etcdctl --endpoints=localhost:2379 get --prefix "nodes/" --keys-only > /tmp/nodes_before.txt
     local node_count=$(wc -l < /tmp/nodes_before.txt)
     log_info "Found $node_count registered nodes before test"
 
@@ -42,7 +42,7 @@ test_node_failure() {
 
         # Step 4: Record initial heartbeat
         log_info "Step 4: Recording initial node status"
-        local initial_heartbeat=$(docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 get "nodes/$test_node" --print-value-only 2>/dev/null)
+        local initial_heartbeat=$(compose exec -T etcd etcdctl --endpoints=localhost:2379 get "nodes/$test_node" --print-value-only 2>/dev/null)
         if [ -n "$initial_heartbeat" ]; then
             log_success "Node registration found"
         fi
@@ -51,12 +51,12 @@ test_node_failure() {
         log_info "Step 5: Simulating node network partition (stopping heartbeat reception)"
         # In a real scenario, the node would be isolated. Here we just verify controller
         # detects stale heartbeats. This requires waiting > 60 seconds (heartbeat timeout)
-        log_warn "Note: Full node failure test requires isolated network setup"
+        log_info "Note: Full node failure test requires isolated network setup"
         log_info "Skipping actual network partition (requires physical network setup)"
 
         # Step 6: Verify controller can still read node info
         log_info "Step 6: Verifying controller can access node information"
-        local node_info=$(docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 get "nodes/$test_node" 2>/dev/null)
+        local node_info=$(compose exec -T etcd etcdctl --endpoints=localhost:2379 get "nodes/$test_node" 2>/dev/null)
         if [ -n "$node_info" ]; then
             log_success "Controller can access node registration"
         else

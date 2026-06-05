@@ -34,7 +34,7 @@ test_etcd_failure() {
     # Step 2: Write test config to etcd
     log_info "Step 2: Write test config to etcd"
     local test_config='{"config":{"user_id":"user-1","desire_status":"connect"},"metadata":{"resourceVersion":"1","updatedBy":"e2e-test","updatedAt":"2026-06-05T00:00:00Z"}}'
-    docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$test_config" > /dev/null
+    compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$NODE_ID/hsi/$USER_ID" "$test_config" > /dev/null
     sleep 2
 
     # Verify config is readable
@@ -48,11 +48,11 @@ test_etcd_failure() {
     # Step 3: Stop etcd
     log_info "Step 3: Stopping etcd for 30 seconds..."
     stop_service "etcd"
-    log_warn "etcd is DOWN"
+    log_info "etcd is down as expected"
 
     # Step 4: Try to access etcd (should fail)
     log_info "Step 4: Verifying etcd is inaccessible"
-    if docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 get "configs/$NODE_ID/hsi/$USER_ID" 2>/dev/null; then
+    if compose_quiet exec -T etcd etcdctl --endpoints=localhost:2379 get "configs/$NODE_ID/hsi/$USER_ID"; then
         log_error "etcd should be down but still accessible!"
         return 1
     fi

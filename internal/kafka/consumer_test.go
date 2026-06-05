@@ -1,9 +1,12 @@
 package kafka
 
 import (
+	"errors"
 	"testing"
 
 	eventsv1 "fastrg-controller/proto/eventsv1"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPhaseString(t *testing.T) {
@@ -50,5 +53,20 @@ func TestBrokersParsing(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("Brokers()[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestIsDatabaseUnavailable(t *testing.T) {
+	if isDatabaseUnavailable(nil) {
+		t.Fatal("nil error should not be database unavailable")
+	}
+	if isDatabaseUnavailable(errors.New("connection refused")) {
+		t.Fatal("non-DB error should not be treated as database unavailable")
+	}
+	if !isDatabaseUnavailable(wrapDatabaseError(errors.New("connection refused"))) {
+		t.Fatal("DB operation connectivity error should be database unavailable")
+	}
+	if isDatabaseUnavailable(wrapDatabaseError(&pgconn.PgError{Code: "42P01", Message: "undefined table"})) {
+		t.Fatal("PostgreSQL SQL error means database is reachable and should be DLQ-eligible")
 	}
 }

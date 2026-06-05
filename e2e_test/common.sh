@@ -28,6 +28,31 @@ log_error() {
     echo -e "${RED}[✗]${NC} $1"
 }
 
+compose() {
+    if [[ "${E2E_COMPOSE_VIA_SSH:-0}" == "1" ]]; then
+        local quoted_dir
+        local quoted_args=""
+        local arg
+
+        printf -v quoted_dir '%q' "${COMPOSE_DIR:-/root/fastrg-controller/e2e_test}"
+        for arg in "$@"; do
+            local quoted_arg
+            printf -v quoted_arg '%q' "$arg"
+            quoted_args+=" ${quoted_arg}"
+        done
+
+        ssh_controller "cd ${quoted_dir} && if command -v docker-compose >/dev/null 2>&1; then docker-compose${quoted_args}; else docker compose${quoted_args}; fi"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
+compose_quiet() {
+    compose "$@" >/dev/null 2>&1
+}
+
 # Wait for service to be healthy
 wait_for_service() {
     local service=$1
@@ -37,7 +62,7 @@ wait_for_service() {
     log_info "Waiting for $service to be healthy..."
 
     while [ $attempt -lt $max_attempts ]; do
-        if docker-compose ps "$service" | grep -q "healthy"; then
+        if compose ps "$service" | grep -q "healthy"; then
             log_success "$service is healthy"
             return 0
         fi
@@ -53,14 +78,14 @@ wait_for_service() {
 # Check if service is up
 is_service_up() {
     local service=$1
-    docker-compose ps "$service" 2>/dev/null | grep -q "Up\|healthy" && return 0 || return 1
+    compose ps "$service" 2>/dev/null | grep -q "Up\|healthy" && return 0 || return 1
 }
 
 # Stop a service
 stop_service() {
     local service=$1
     log_info "Stopping $service..."
-    docker-compose stop "$service" || true
+    compose stop "$service" || true
     sleep 2
 }
 
@@ -68,27 +93,55 @@ stop_service() {
 start_service() {
     local service=$1
     log_info "Starting $service..."
-    docker-compose start "$service" || docker-compose up -d "$service"
+    compose start "$service" || compose up -d "$service"
     sleep 2
 }
 
 # Query etcd
 etcd_get() {
     local key=$1
-    docker-compose exec -T etcd etcdctl --endpoints=localhost:2379 get "$key" --print-value-only 2>/dev/null || echo ""
+    compose exec -T etcd etcdctl --endpoints=localhost:2379 get "$key" --print-value-only 2>/dev/null || echo ""
 }
 
 # Query database
 # Returns only the data rows, skipping psql header/footer output
 db_query() {
     local query=$1
-    docker-compose exec -T postgres psql -U fastrg -d fastrg -t -c "$query" 2>/dev/null | grep -v '^$' || echo ""
+    compose exec -T postgres psql -U fastrg -d fastrg -t -c "$query" 2>/dev/null | grep -v '^$' || echo ""
+}
+
+config_history_count() {
+    local node_id=$1
+    local user_id=$2
+    db_query "SELECT COUNT(*) FROM hsi_config_history WHERE node_uuid='$node_id' AND user_id='$user_id';" 2>/dev/null | xargs
+}
+
+dlq_pending_count() {
+    db_query "SELECT COUNT(*) FROM kafka_dlq WHERE status='pending';" 2>/dev/null | xargs
+}
+
+kafka_ensure_topic() {
+    local topic=${1:-fastrg.node.events}
+    compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server localhost:9092 \
+        --create \
+        --if-not-exists \
+        --topic "$topic" \
+        --partitions 1 \
+        --replication-factor 1 >/dev/null
+}
+
+kafka_produce_base64() {
+    local topic=$1
+    local payload_base64=$2
+
+    compose exec -T kafka sh -c "printf '%s' '$payload_base64' | base64 -d > /tmp/e2e-node-event.pb && /opt/kafka/bin/kafka-producer-perf-test.sh --topic '$topic' --num-records 1 --throughput -1 --payload-file /tmp/e2e-node-event.pb --producer-props bootstrap.servers=localhost:9092 >/dev/null"
 }
 
 # Query controller REST API
 api_get() {
     local endpoint=$1
-    curl -s -k -H "Content-Type: application/json" "https://localhost:28443/api$endpoint" || echo ""
+    curl -s -k -H "Content-Type: application/json" "https://${CONTROLLER_HOST:-localhost}:28443/api$endpoint" || echo ""
 }
 
 # Get node status from controller
@@ -157,13 +210,14 @@ verify_config_sync() {
 
 # Get Kafka consumer lag
 kafka_lag() {
-    docker-compose exec -T kafka kafka-consumer-groups.sh \
+    compose exec -T kafka kafka-consumer-groups.sh \
         --bootstrap-server localhost:9092 \
         --group fastrg-controller \
         --describe 2>/dev/null | tail -1 || echo "unknown"
 }
 
-export -f log_info log_success log_warn log_error
+export -f log_info log_success log_warn log_error compose compose_quiet
 export -f wait_for_service is_service_up stop_service start_service
-export -f etcd_get db_query api_get node_status config_get pppoe_status
+export -f etcd_get db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
+export -f api_get node_status config_get pppoe_status
 export -f wait_for verify_config_sync kafka_lag
