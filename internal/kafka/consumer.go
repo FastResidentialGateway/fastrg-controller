@@ -73,6 +73,19 @@ func NewConsumer(brokers []string, database *db.DB, etcdClient *storage.EtcdClie
 // Run consumes until ctx is cancelled, then closes the reader.
 func (c *Consumer) Run(ctx context.Context) {
 	logrus.Info("Started Kafka consumer for node events")
+
+	// Close the reader built at construction time and wait until the topic has
+	// at least one partition before re-joining the consumer group.  If the
+	// controller starts before the node has produced its first Kafka event the
+	// topic may not exist yet; kafka-go would join the group with 0 assigned
+	// partitions and silently receive nothing until process restart.
+	cfg := c.reader.Config()
+	c.reader.Close()
+	c.waitForTopicReady(ctx, cfg.Brokers, cfg.Topic)
+	if ctx.Err() != nil {
+		return
+	}
+	c.reader = kafka.NewReader(cfg)
 	defer c.reader.Close()
 
 	for ctx.Err() == nil {
@@ -124,6 +137,28 @@ func (c *Consumer) Run(ctx context.Context) {
 		if err := c.reader.CommitMessages(ctx, m); err != nil {
 			logrus.WithError(err).Error("kafka: commit failed")
 		}
+	}
+}
+
+// waitForTopicReady blocks until the Kafka topic has at least 1 partition or
+// ctx is cancelled.  This prevents the consumer group from joining before the
+// topic exists, which would assign 0 partitions and silently drop all messages.
+func (c *Consumer) waitForTopicReady(ctx context.Context, brokers []string, topic string) {
+	for ctx.Err() == nil {
+		conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+		if err != nil {
+			logrus.WithError(err).Warn("kafka: waiting for broker before joining consumer group")
+			c.sleep(ctx)
+			continue
+		}
+		partitions, err := conn.ReadPartitions(topic)
+		conn.Close()
+		if err == nil && len(partitions) > 0 {
+			logrus.Infof("kafka: topic %q ready (%d partition(s)), joining consumer group", topic, len(partitions))
+			return
+		}
+		logrus.Warnf("kafka: topic %q not yet available (partitions=%d), waiting", topic, len(partitions))
+		c.sleep(ctx)
 	}
 }
 
