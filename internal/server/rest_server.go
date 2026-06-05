@@ -1854,7 +1854,7 @@ func (r *RestServer) GetDnsRecords(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
@@ -1884,7 +1884,7 @@ func (r *RestServer) GetDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
@@ -1933,7 +1933,7 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
 	// CAS the whole DNS record array: read current, add/update the entry,
 	// enforce the 64-record cap, write back atomically.
@@ -1999,7 +1999,7 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
 	// CAS the DNS record array: remove the domain, then delete the key when no
 	// records remain or write back the trimmed array, atomically.

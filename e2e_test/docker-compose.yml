@@ -18,7 +18,7 @@ services:
       - --listen-client-urls=http://0.0.0.0:2379
       - --initial-cluster-state=new
     ports:
-      - "2379:2379"
+      - "22379:2379"  # Changed from 2379 to avoid K8s conflict
     volumes:
       - etcd-data:/var/run/etcd
     healthcheck:
@@ -34,7 +34,7 @@ services:
       POSTGRES_PASSWORD: fastrg
       POSTGRES_DB: fastrg
     ports:
-      - "5432:5432"
+      - "25432:5432"  # Changed from 5432 to avoid K8s conflict
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -46,13 +46,13 @@ services:
   kafka:
     image: apache/kafka:3.9.0
     ports:
-      - "9092:9092"
+      - "29092:9092"  # Changed from 9092 to avoid K8s conflict
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
       # Advertised so other containers reach the broker as "kafka:9092".
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://192.168.10.212:29092
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
@@ -82,11 +82,11 @@ services:
       PROMETHEUS_LISTEN_IP: "0.0.0.0"
       # JWT_SECRET: "change-me-in-production"
     ports:
-      - "8443:8443"   # REST API + Web UI (HTTPS)
-      - "8080:8080"   # HTTP -> HTTPS redirect
-      - "8444:8444"   # log file (HTTPS)
-      - "50051:50051" # gRPC (node registration / heartbeat)
-      - "55688:55688" # Prometheus metrics
+      - "28443:8443"  # REST API + Web UI (HTTPS) — changed from 8443 to avoid K8s conflict
+      - "28080:8080"  # HTTP -> HTTPS redirect — changed from 8080
+      - "28444:8444"  # log file (HTTPS) — changed from 8444
+      - "50052:50051" # gRPC (node registration / heartbeat) — changed from 50051 (K8s uses 50051)
+      - "55689:55688" # Prometheus metrics — changed from 55688
 
 volumes:
   etcd-data:

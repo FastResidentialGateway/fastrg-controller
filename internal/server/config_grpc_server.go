@@ -85,7 +85,7 @@ func hsiKey(nodeID, userID string) string {
 }
 
 func dnsKey(nodeID, userID string) string {
-	return fmt.Sprintf("configs/%s/%s/dns", nodeID, userID)
+	return fmt.Sprintf("configs/%s/dns/%s", nodeID, userID)
 }
 
 func subscriberCountKey(nodeID string) string {

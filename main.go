@@ -133,7 +133,8 @@ func main() {
 	}
 
 	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
-	nmm := server.NewNodeMonitorManager()
+	// Pass database for stateless recovery of PPPoE status
+	nmm := server.NewNodeMonitorManager(database)
 
 	// CLI-facing config gRPC service (shares same port as NodeManagement)
 	configSvc := server.NewConfigGrpcServer(etcd, []byte(server.GetJWTSecret()))

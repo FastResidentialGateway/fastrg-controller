@@ -86,15 +86,36 @@ func (c *Consumer) Run(ctx context.Context) {
 			continue
 		}
 
-		// Retry the same message until it is durably handled, so we never commit
-		// past an event we failed to persist. Handling is idempotent.
-		for ctx.Err() == nil {
+		// Retry the same message with exponential backoff. If it still fails after
+		// maxRetries, send to DLQ (persistent failure queue in database) and move on
+		// to the next message. This prevents a single failed message from blocking
+		// the entire partition when database is down for extended periods.
+		const maxRetries = 5
+		backoff := 100 * time.Millisecond
+		for attempt := 0; attempt < maxRetries && ctx.Err() == nil; attempt++ {
 			if err := c.handle(ctx, m.Value); err != nil {
-				logrus.WithError(err).Error("kafka: handle failed, retrying message")
-				c.sleep(ctx)
-				continue
+				logrus.WithError(err).Warnf("kafka: handle failed (attempt %d/%d), backing off %v",
+					attempt+1, maxRetries, backoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+					backoff = time.Duration(float64(backoff) * 1.5) // exponential backoff
+					continue
+				}
 			}
+			// Success
+			backoff = 0
 			break
+		}
+
+		// If still failed after retries, send to DLQ (database persistent queue)
+		if backoff > 0 && ctx.Err() == nil {
+			logrus.Errorf("kafka: message failed after %d retries, sending to DLQ", maxRetries)
+			if dlqErr := c.sendToDLQ(ctx, m); dlqErr != nil {
+				logrus.WithError(dlqErr).Error("kafka: failed to send message to DLQ")
+				// Don't return error here - we've done our best. Move on to next message.
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -181,6 +202,9 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 					logrus.WithError(err).Error("kafka: failed to update hsi_config_current after CONFIG_APPLY_OK")
 					return err
 				}
+				// Record this success in history. Database operation is idempotent
+				// (AppendHistoryWithStatus uses ON CONFLICT to avoid duplicates if
+				// consumer retries after database restart).
 				if err := c.db.AppendHistoryWithStatus(ctx, row, "success"); err != nil {
 					logrus.WithError(err).Error("kafka: failed to record success in history after CONFIG_APPLY_OK")
 					return err
@@ -259,6 +283,28 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		logrus.WithField("type", ev.GetType()).Warn("kafka: event with no/unknown payload, skipping")
 		return nil
 	}
+}
+
+
+// sendToDLQ records a failed message to the database for human investigation.
+// This allows the consumer to move on to the next message instead of blocking.
+func (c *Consumer) sendToDLQ(ctx context.Context, m kafka.Message) error {
+	if c.db == nil {
+		// No database configured, can't send to DLQ. Just log and move on.
+		logrus.Warnf("kafka: cannot send to DLQ - database not configured. "+
+			"Topic=%s Partition=%d Offset=%d", m.Topic, m.Partition, m.Offset)
+		return nil
+	}
+
+	dlqID, err := c.db.SendToDLQ(ctx, m.Topic, m.Partition, m.Offset, m.Value,
+		"Failed after max retries due to database unavailability")
+	if err != nil {
+		return err
+	}
+
+	logrus.Warnf("kafka: message sent to DLQ (dlq_id=%d topic=%s partition=%d offset=%d)",
+		dlqID, m.Topic, m.Partition, m.Offset)
+	return nil
 }
 
 // phaseString maps the PPPoEPhase enum to the stored phase string.

@@ -7,6 +7,20 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// DLQRow represents a failed message in the dead letter queue
+type DLQRow struct {
+	ID           int64
+	Topic        string
+	Partition    int
+	Offset       int64
+	MessageValue []byte
+	ErrorMessage string
+	RetryCount   int
+	Status       string    // pending, processing, resolved
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 // PPPoEStatusRow is the latest observed PPPoE state for a (node, user).
 type PPPoEStatusRow struct {
 	NodeUUID     string    `json:"node_uuid"`
@@ -74,6 +88,25 @@ func (d *DB) GetPPPoEStatus(ctx context.Context, nodeUUID, userID string) (row P
 		return PPPoEStatusRow{}, false, err
 	}
 	return row, true, nil
+}
+
+// SendToDLQ records a failed Kafka message for human investigation.
+// Returns the DLQ row ID for logging.
+func (d *DB) SendToDLQ(ctx context.Context, topic string, partition int, offset int64,
+	messageValue []byte, errorMessage string) (int64, error) {
+	var id int64
+	err := d.pool.QueryRow(ctx, `
+		INSERT INTO kafka_dlq
+			(topic, partition, offset, message_value, error_message, retry_count, status)
+		VALUES ($1, $2, $3, $4, $5, 0, 'pending')
+		ON CONFLICT (topic, partition, offset) DO UPDATE SET
+			error_message = EXCLUDED.error_message,
+			retry_count = kafka_dlq.retry_count + 1,
+			updated_at = now()
+		RETURNING id`,
+		topic, partition, offset, messageValue, errorMessage,
+	).Scan(&id)
+	return id, err
 }
 
 // InsertNodeEvent appends a node event, ignoring duplicates (same node, user,

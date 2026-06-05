@@ -11,7 +11,7 @@ func TestParseHSIKey(t *testing.T) {
 	}{
 		{key: "configs/node1/hsi/2", wantNode: "node1", wantUser: "2", wantOK: true},
 		{key: "configs/abc-uuid/hsi/100", wantNode: "abc-uuid", wantUser: "100", wantOK: true},
-		{key: "configs/node1/2/dns", wantOK: false},       // DNS key
+		{key: "configs/node1/dns/2", wantOK: false},       // DNS key
 		{key: "configs/node1/user_count", wantOK: false},  // user_count key
 		{key: "configs/node1/hsi", wantOK: false},         // too short
 		{key: "nodes/node1", wantOK: false},               // wrong prefix

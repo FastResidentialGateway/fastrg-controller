@@ -63,12 +63,16 @@ func (d *DB) AppendHistory(ctx context.Context, row HSIConfigRow) error {
 }
 
 // AppendHistoryWithStatus appends a config change to history with explicit status.
+// Idempotent: if the same (node, user, mod_revision, status) tuple already exists,
+// the duplicate is silently ignored via ON CONFLICT. This prevents Kafka consumer
+// retries from creating duplicate history entries.
 // status values: 'pending' (awaiting node apply result), 'success', 'failed'
 func (d *DB) AppendHistoryWithStatus(ctx context.Context, row HSIConfigRow, status string) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO hsi_config_history
 			(node_uuid, user_id, action, config, desire_status, mod_revision, resource_version, updated_by, updated_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (node_uuid, user_id, mod_revision, status) DO NOTHING`,
 		row.NodeUUID, row.UserID, row.Action, row.ConfigJSON, row.DesireStatus,
 		row.ModRevision, row.ResourceVersion, row.UpdatedBy, row.UpdatedAt, status,
 	)
