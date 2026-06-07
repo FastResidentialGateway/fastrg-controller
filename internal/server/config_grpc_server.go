@@ -112,7 +112,7 @@ func (s *ConfigGrpcServer) fetchVlanOwners(ctx context.Context, nodeID string) (
 }
 
 // fetchSubscriberCount reads the subscriber count for a node (-1 when absent).
-func (s *ConfigGrpcServer) fetchSubscriberCount(ctx context.Context, nodeID string) int {
+func (s *ConfigGrpcServer) fetchSubscriberCount(ctx context.Context, nodeID string) int32 {
 	resp, err := s.etcd.Client().Get(ctx, subscriberCountKey(nodeID))
 	if err != nil || len(resp.Kvs) == 0 {
 		return -1
@@ -121,11 +121,11 @@ func (s *ConfigGrpcServer) fetchSubscriberCount(ctx context.Context, nodeID stri
 	if err := json.Unmarshal(resp.Kvs[0].Value, &d); err != nil {
 		return -1
 	}
-	n, err := strconv.Atoi(d.SubscriberCount)
+	n, err := strconv.ParseInt(d.SubscriberCount, 10, 32)
 	if err != nil {
 		return -1
 	}
-	return n
+	return int32(n)
 }
 
 // ── shared inner types (mirror rest_server.go structs without HTTP coupling) ──
@@ -274,7 +274,7 @@ func (s *ConfigGrpcServer) CreateHSIConfig(ctx context.Context, req *controllerp
 	}
 
 	if err := validationToStatus(validation.CheckSubscriberCount(
-		p.GetUserId(), s.fetchSubscriberCount(ctx, req.NodeId),
+		p.GetUserId(), int(s.fetchSubscriberCount(ctx, req.NodeId)),
 	)); err != nil {
 		return nil, err
 	}
@@ -353,7 +353,7 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 		return nil, err
 	}
 	if err := validationToStatus(validation.CheckSubscriberCount(
-		p.GetUserId(), s.fetchSubscriberCount(ctx, req.NodeId),
+		p.GetUserId(), int(s.fetchSubscriberCount(ctx, req.NodeId)),
 	)); err != nil {
 		return nil, err
 	}
@@ -559,7 +559,7 @@ func (s *ConfigGrpcServer) GetSubscriberCount(ctx context.Context, req *controll
 	if n < 0 {
 		return nil, status.Error(codes.NotFound, "subscriber count not set for this node")
 	}
-	return &controllerpb.GetSubscriberCountResponse{SubscriberCount: int32(n)}, nil
+	return &controllerpb.GetSubscriberCountResponse{SubscriberCount: n}, nil
 }
 
 // ── DNS records ───────────────────────────────────────────────────────────
