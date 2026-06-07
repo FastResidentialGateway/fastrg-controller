@@ -30,76 +30,40 @@ This is an SDN-enabled and open source Residential Gateway Controller, designed 
 ## Service Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
- │ Management Plane                                                                                             │
- │ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
- │ │  CLI  (fastrg-cli)                                                                                       │ │
- │ │                                                                                                          │ │
- │ │  write / PPPoE connect・disconnect                                                                        │ │
- │ │    ① primary    ──► Controller gRPC ──► [validate + CAS] ──► etcd                                       │ │
- │ │    ② fallback1  ──► etcd direct  (controller unreachable; minimal local validation)                      │ │
- │ │    ③ standalone ──► Node gRPC ──► offline queue (disk, timestamped) ──► flush to etcd on reconnect      │ │
- │ │                                                                          (CAS + timestamp merge)          │ │
- │ │  query                                                                                                    │ │
- │ │    show desire-config  → ① Controller  → ② etcd  → ③ Node gRPC + pending queue                         │ │
- │ │    show current-config → Node gRPC direct  (live running config + PPPoE / DHCP actual status)           │ │
- │ │    show config diff    → desire vs current; list drifted fields or "in-sync"                            │ │
- │ └─────────┬────────────────────────────────────────────────────────────┬────┬──────────────────────────────┘ │
- │           │ ③ to Node                                                  │ ②  │ ① to Controller               │
- └───────────┼────────────────────────────────────────────────────────────┼────┼────────────────────────────────┘
-             │                                                            │    │
- ┌───────────┼────────────────────────────────────────────────────────────┼────┼────────────────────────────────┐
- │           ▼                                          Central Office    │    ▼                                │
- │  ┌──────────────────┐                                                  │  ┌─────────────────────────────────┐ │
- │  │    BNG/BRAS      │                                                  │  │      FastRG Controller          │ │
- │  │  PPPoE Server    │                                                  │  │      gRPC: 50051                │ │
- │  └──────────────────┘                                                  │  │      HTTP(s): 8080/8443         │ │
- │           ▲                                                            │  │      REST API: 8443             │ │
- │           │  PPPoE/IGMP/IPTV over VLAN                                 │  │      Prometheus: 55688          │ │
- │           ▼                                                            │  └──────────────┬──────────────────┘ │
- │  ┌──────────────────────┐                 ┌──────────────────────┐    │   CAS write │   │ watch configs/     │
- │  │     FastRG Node      │                 │     FastRG etcd      │◄───┘             │   │ → upsert/append DB │
- │  │     gRPC: 50052      │◄── watch ───────│     etcd: 2379       │◄─────────────────┘   │                    │
- │  │     PPPoE Client/NAT │   configs/      │  configs/{uuid}/     │──────────────────────┘                    │
- │  │     DHCP Server      │   desire_status │   hsi/{user_id}      │                                           │
- │  │                      │   → drives PPPoE│  desire_status        │  ┌──────────────────────────────────┐    │
- │  │  ┌────────────────┐  │     connect /   │  ∈ {connect,         │  │         PostgreSQL                │    │
- │  │  │ offline queue  │  │     disconnect  │    disconnect}        │  │  hsi_config_current  (upsert)     │    │
- │  │  │ (disk, ts'd)   │──┼─── flush ──────►│                      │  │  hsi_config_history  (append,     │    │
- │  │  └────────────────┘  │  on reconnect   │  [CAS: Txn(ModRev)]  │  │    mod_revision)                  │    │
- │  └──────────────────────┘  (CAS + ts mrg) │  no commands/        │  │  pppoe_status  (Kafka fed)        │    │
- │           │                               │  no failed_events/   │  │  node_events   (Kafka fed,        │    │
- │  Kafka    │  PPPoE: connecting/           │  no enable_status    │  │    replaces etcd failed_events/)  │    │
- │ producer  │  connected/                   └──────────────────────┘  │  etcd_watch_progress              │    │
- │           │  disconnecting/                                          │    (revision checkpoint)          │    │
- │           │  disconnected                                            └──────────────────────────────────┘    │
- │           │  config apply: ok / fail                                              ▲                          │
- │           │  runtime errors                                                       │ Kafka consumer            │
- │           ▼                                                                       │ (at-least-once,          │
- │  ┌────────────────────────────────────────────────────────────────────────────────┴──────────────────────┐  │
- │  │  Kafka  (topic: fastrg.node.events, partitioned by node_uuid)                                        │  │
- │  │  Node ──producer──► Broker ──consumer──► Controller  (idempotent write to PostgreSQL)                │  │
- │  └───────────────────────────────────────────────────────────────────────────────────────────────────────┘  │
- │                                                                                                              │
- │  ┌───────────────────┐                                                                                       │
- │  │       OLT         │◄─── IPoE over VLAN  (VLAN-A → Sub 1,  VLAN-B → Sub 2, ...)                          │
- │  └───────────────────┘                                                                                       │
- └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-          │  PON Network                    │  PON Network
-          ▼                                 ▼
- ┌────────────────────┐          ┌────────────────────┐
- │ ┌────────────────┐ │          │ ┌────────────────┐ │
- │ │      ONT       │ │          │ │      ONT       │ │
- │ └────────────────┘ │          │ └────────────────┘ │
- │         ▲          │          │         ▲          │
- │         │  IPoE    │          │         │  IPoE    │
- │         ▼          │          │         ▼          │
- │ ┌────────────────┐ │          │ ┌────────────────┐ │
- │ │Subscriber Dev. │ │          │ │Subscriber Dev. │ │
- │ │  (DHCP client) │ │          │ │  (DHCP client) │ │
- │ └────────────────┘ │          │ └────────────────┘ │
- │    Subscriber 1    │          │    Subscriber 2    │
- └────────────────────┘          └────────────────────┘   ...
+FastRG Components Overview
+
+┌──────┐                                  CONFIG STORAGE           DATA PLANE
+│FastRG│   ┌────────────┐if primary failed┌────────────┐           ┌────────────────────────┐
+│ User │──▶│ FastRG CLI │ ─ ─ ─ ─ ─ ─ ─ ─▶│ etcd :2379 │           │ Backbone / Core Network│
+└─┬────┘   └───────┬─┬──┘                 └─▲───────┬──┘           │ Internet uplink        │
+  │                │ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─│─ ─ ─ ─ ┐     └────────────▲───────────┘
+  │                │     if etcd unavailable│       │        │                  │ routed IP
+  │                │                        │       │watch   │     ┌────────────▼───────────┐
+  ▼                │                        │       │config  │     │ BNG / BRAS             │
+┌─────────────────┐│                        │       │        │     │ PPPoE server           │
+│FastRG Controller││                        │       │        │     └───────────▲────────────┘
+│web frontend     ││                        │       │        │                 │ PPPoE / IPoE
+│http(s):8080/8443││ primary path           │       │        │     ┌───────────▼────────────┐
+└──────┬──────────┘│                        │       │        └ ─ ─▶│ FastRG Node            │
+       │           │                        │       └──────────────┤ PPPoE client/NAT       │
+       ▼           ▼                        │     ┌────────────────│ DHCP server            │
+┌────────────────────────┐  write config    │     │ write events   │ gRPC :50052            │
+│ FastRG Controller      │──────────────────┘     │                └───────────▲────────────┘ 
+│ REST :8443             │        ┌───────────────▼────────┐                   │ IPoE over VLAN
+│ gRPC :50051            │consume │ Kafka                  │        ┌──────────▼─────────────┐
+│ Prometheus: 55688      │◄───────│ FastRG node events     │        │ OLT                    │
+└──────┬──────────▲──────┘        └────────────────────────┘        │ GPON aggregation       │
+       │          │                                                 └─────▲────────────▲─────┘
+       ▼          │                                                       │ PON        │ PON
+┌────────────────────────┐                                                ▼            ▼
+│ PostgreSQL             │                                          ┌──────────┐  ┌──────────┐
+│ FastRG config history  │                                          │ ONT      │  │ ONT      │
+│ FastRG node events     │                                          └────▲─────┘  └────▲─────┘
+└────────────────────────┘                                               │ IPoE        │ IPoE
+                                                                  ┌──────▼─────┐  ┌────▼───────┐
+                                                                  │Subscriber 1│  │Subscriber 2│ ...
+                                                                  │DHCP client │  │DHCP client │
+                                                                  └────────────┘  └────────────┘
 ```
 
 ## Deployment
