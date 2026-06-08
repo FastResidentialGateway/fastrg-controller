@@ -1,9 +1,4 @@
 # FastRG Controller — full single-host stack: etcd + PostgreSQL + Kafka + controller.
-# Bring up with: make docker-run   (or: docker compose up -d --build)
-#
-# etcd     = config source of truth (SSOT)
-# postgres = controller's projection / history / event store (auto-migrated on boot)
-# kafka    = node -> controller event pipeline (protobuf NodeEvent on fastrg.node.events)
 #
 # For a real deployment, see docs/deployment.md (managed services / Kubernetes,
 # TLS, persistence and security hardening).

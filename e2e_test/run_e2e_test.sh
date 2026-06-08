@@ -164,6 +164,7 @@ CONTROLLER_HOST="${CONTROLLER_HOST:-192.168.10.212}"
 NODE_HOST="${NODE_HOST:-192.168.10.211}"
 ETCD_HOST="${ETCD_HOST:-192.168.10.212}"
 DB_HOST="${DB_HOST:-192.168.10.212}"
+MONITOR_HOST="${MONITOR_HOST:-192.168.10.213}"
 COMPOSE_DIR="${COMPOSE_DIR:-/root/fastrg-controller/e2e_test}"
 
 # Auto-detect SSH key for remote node access
@@ -233,6 +234,10 @@ ssh_controller() {
     ssh $SSH_OPTS "root@${CONTROLLER_HOST}" "$@" 2>&1
 }
 
+ssh_monitor() {
+    ssh $SSH_OPTS "root@${MONITOR_HOST}" "$@" 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # Test execution
 # ---------------------------------------------------------------------------
@@ -272,11 +277,12 @@ main() {
     log_info "  etcd:            ${ETCD_HOST}"
     log_info "  Database:        ${DB_HOST}"
     log_info "  Compose Dir:     ${COMPOSE_DIR}"
+    log_info "  Monitor Host:    ${MONITOR_HOST}"
 
     # Export for child scripts
-    export CONTROLLER_HOST NODE_HOST ETCD_HOST DB_HOST COMPOSE_DIR SSH_KEY SSH_OPTS
+    export CONTROLLER_HOST MONITOR_HOST NODE_HOST ETCD_HOST DB_HOST COMPOSE_DIR SSH_KEY SSH_OPTS
     export E2E_COMPOSE_VIA_SSH=1
-    export -f ssh_node ssh_db ssh_etcd ssh_controller
+    export -f ssh_node ssh_db ssh_etcd ssh_controller ssh_monitor
 
     printf "\n"
 
