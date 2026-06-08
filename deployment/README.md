@@ -6,328 +6,294 @@ This directory contains Kubernetes deployment configurations for FastRG Controll
 
 ```
 deployment/
-├── k8s/                          # Native Kubernetes YAML files
-│   ├── deploy.sh                 # Deployment script for quick start
-│   ├── undeploy.sh               # Undeployment script for quick cleanup
-│   ├── etcd-external.yml         # external etcd deployment
-│   ├── etcd-internal.yml         # internal etcd deployment
-│   ├── ingress.yml               # LoadBalancer Service configuration
-│   └── fastrg_controller.yml     # FastRG Controller deployment configuration
-└── helm/                         # Helm Chart
+├── k8s/                              # Native Kubernetes YAML files
+│   ├── deploy.sh                     # Deployment script (quick start)
+│   ├── undeploy.sh                   # Cleanup script
+│   ├── test-env.sh                   # Kind test environment management
+│   ├── kind-config.yml               # Kind cluster configuration (extraPortMappings)
+│   ├── etcd-internal.yml             # etcd StatefulSet + Services (internal)
+│   ├── etcd-external.yml             # etcd external endpoint (Service + Endpoints)
+│   ├── postgresql-internal.yml       # PostgreSQL StatefulSet + Service (internal)
+│   ├── postgresql-external.yml       # PostgreSQL external endpoint (Service + Endpoints)
+│   ├── kafka-internal.yml            # Kafka StatefulSet + Services (internal, KRaft mode)
+│   ├── kafka-external.yml            # Kafka external endpoint (Service + Endpoints)
+│   └── fastrg_controller.yml         # FastRG Controller Deployment + Service
+└── helm/                             # Helm Chart
     └── fastrg-controller/
-        ├── Chart.yaml            # Chart metadata
-        ├── values.yaml           # Default configuration values
-        └── templates/            # Kubernetes resource templates
-            ├── _helpers.tpl      # Helm helper functions
-            ├── namespace.yaml    # Namespace definition
-            ├── etcd.yaml         # etcd resources
-            ├── controller.yaml   # Controller resources
-            ├── rbac.yaml         # RBAC configuration
-            └── extras.yaml       # PDB and HPA
+        ├── Chart.yaml                # Chart metadata
+        ├── values.yaml               # Default configuration values
+        └── templates/
+            ├── _helpers.tpl          # Helm helper functions
+            ├── namespace.yaml        # Namespace definition
+            ├── etcd.yaml             # etcd resources (internal/external)
+            ├── postgresql.yaml       # PostgreSQL resources (internal/external)
+            ├── kafka.yaml            # Kafka resources (internal/external)
+            ├── controller.yaml       # Controller Deployment + Services
+            ├── rbac.yaml             # RBAC configuration
+            └── extras.yaml           # PDB and HPA
 ```
+
+## Component Overview
+
+| Component | Role | Storage |
+|-----------|------|---------|
+| **fastrg-controller** | REST API, gRPC server, config projection | PVC (logs) |
+| **etcd** | System source of truth — HSI configs, node registry | PVC (10 Gi) |
+| **PostgreSQL** | CQRS read model — config history, PPPoE status, node events | PVC (10 Gi) |
+| **Kafka** | Node-event stream (KRaft, single-broker) | PVC (20 Gi) |
+
+## Port Reference
+
+### Controller (external access via LoadBalancer at `HOST_IP`)
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| `8443` | HTTPS | Web UI + REST API |
+| `8080` | HTTP | → HTTPS redirect |
+| `8444` | HTTPS | Log file viewer |
+| `50051` | TCP | gRPC — fastrg-node RegisterNode / Heartbeat |
+| `55688` | TCP | Prometheus metrics |
+
+### etcd
+
+| Port | Deployment mode | Description |
+|------|-----------------|-------------|
+| `2378` | internal — external access | `hostPort: 2378` on pod — used by fastrg-node to reach etcd running inside K8s |
+| `2379` | external — external access | fastrg-node connects directly to the external etcd server (standard etcd port) |
+| `2380` | internal only | Peer port for etcd cluster replication, not exposed externally |
+
+### PostgreSQL
+
+| Port | Description | Access method |
+|------|-------------|---------------|
+| `5432` | Client port (in-cluster) | ClusterIP Service `postgresql-endpoint` |
+
+### Kafka
+
+| Port | Description | Access method |
+|------|-------------|---------------|
+| `9092` | Broker port | ClusterIP `kafka-endpoint` (in-cluster) / `hostPort: 9092` (external) |
+| `9093` | KRaft controller port (in-cluster only) | — |
 
 ## Quick Start
 
-### Option 1: Using Native Kubernetes YAML
+### Prerequisites
+
+- Kind (for local dev) or a kubeadm cluster with Cilium CNI
+- `kubectl`, `helm`
+
+### Kind Development Environment
 
 ```bash
-# Use the deploy script for quick deployment, this will deploy Cilium CNI as well
-# Use deploy.sh --help to see available options
-cd deployment/k8s
-chmod +x deploy.sh
-./deploy.sh
+# 1. Create Kind cluster and build image
+make k8s-create-test-env
 
-# or
+# 2. Deploy all components (Cilium + etcd + PostgreSQL + Kafka + Controller)
+make k8s-deploy
 
-# 1. Deploy external etcd or internal etcd
-kubectl apply -f deployment/k8s/etcd-external.yml
-or
-kubectl apply -f deployment/k8s/etcd-internal.yml
-
-# 2. Wait for etcd to be ready
-kubectl wait --for=condition=available --timeout=300s deployment/etcd -n fastrg-system
-
-# 3. Deploy FastRG Controller
-kubectl apply -f deployment/k8s/fastrg_controller.yml
-
-# 4. Check deployment status
-kubectl get pods -n fastrg-system
-kubectl get services -n fastrg-system
+# 3. Run connectivity tests only (after deployment)
+deployment/k8s/deploy.sh --test-only -n fastrg-system
 ```
 
-### Option 2: Using Helm Chart (Recommended)
+#### fastrg-node `config.cfg`
+
+**etcd internal** (etcd running inside K8s)
+```
+ControllerAddress = "HOST_IP:50051"
+EtcdEndpoints     = "HOST_IP:2378"
+KafkaBrokers      = "HOST_IP:9092"
+```
+
+**etcd external** (etcd running outside K8s)
+```
+ControllerAddress = "HOST_IP:50051"
+EtcdEndpoints     = "ETCD_HOST:2379"
+KafkaBrokers      = "HOST_IP:9092"
+```
+
+### deploy.sh Options
+
+```
+Usage: deploy.sh [-n NAMESPACE] [-e etcd-type] [--postgresql-type TYPE]
+                 [--kafka-type TYPE] [-c] [--cilium-only] [--test-only] [-h]
+
+Options:
+  -n, --namespace NAMESPACE       Kubernetes namespace (default: default)
+  -e, --etcd-type TYPE            internal | external  (default: internal)
+      --postgresql-type TYPE      internal | external  (default: internal)
+      --kafka-type TYPE           internal | external  (default: internal)
+  -c, --install-cilium            Install Cilium CNI
+      --cilium-only               Install Cilium and exit
+      --test-only                 Run connectivity tests only
+
+Examples:
+  ./deploy.sh -n fastrg-system -c           # Full deploy with Cilium
+  ./deploy.sh --postgresql-type external    # Use external PostgreSQL
+  ./deploy.sh --kafka-type external         # Use external Kafka
+  ./deploy.sh --test-only -n fastrg-system  # Connectivity tests only
+```
+
+### Makefile Targets
 
 ```bash
-# 1. Install Helm Chart
-helm install fastrg-controller deployment/helm/fastrg-controller/
-
-# 2. Check deployment status
-kubectl get pods -n fastrg-system
-helm status fastrg-controller
-
-# 3. Get service information
-kubectl get services -n fastrg-system
+make k8s-create-test-env   # Create Kind cluster + build Docker image
+make k8s-delete-test-env   # Delete Kind cluster
+make k8s-deploy            # Deploy to K8s (internal etcd/PG/Kafka + Cilium)
+make k8s-delete            # Remove all K8s resources
+make helm-install          # Install via Helm (Cilium-only first, then helm install)
 ```
 
-## Configuration
+### Helm (Recommended for Production)
 
-### Environment Variables
+```bash
+# All internal services
+helm install fastrg-controller deployment/helm/fastrg-controller/ \
+  -n fastrg-system --create-namespace
 
-| Variable Name | Description | Default Value |
-|---------------|-------------|---------------|
-| `ETCD_ENDPOINTS` | etcd service endpoints | `etcd-service:2379` |
-| `GRPC_PORT` | gRPC service port | `50051` |
-| `HTTP_REDIRECT_PORT` | HTTP redirect port | `8080` |
-| `HTTPS_PORT` | HTTPS service port | `8443` |
-| `GIN_MODE` | Gin mode | `release` |
+# With external services
+helm install fastrg-controller deployment/helm/fastrg-controller/ \
+  -n fastrg-system --create-namespace \
+  --set postgresql.type=external \
+  --set postgresql.external.url="postgres://user:pass@host:5432/fastrg" \
+  --set kafka.type=external \
+  --set kafka.external.brokers="kafka1:9092,kafka2:9092" \
+  --set etcd.type=external \
+  --set etcd.external.endpoints[0].ip="192.168.10.12"
+```
 
-### Service Ports
+## Environment Variables (Controller)
 
-| Service | Port | Protocol | Description |
-|---------|------|----------|-------------|
-| gRPC | 50051 | TCP | gRPC API |
-| HTTP | 8080 | TCP | HTTP redirect |
-| HTTPS | 8443 | TCP | Web interface and REST API |
-| etcd Client | 2379 | TCP | etcd client connection |
-| etcd Peer | 2380 | TCP | etcd cluster communication |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ETCD_ENDPOINTS` | `etcd-endpoint:2379` | etcd client endpoints (comma-separated) |
+| `DATABASE_URL` | *(empty)* | PostgreSQL DSN — enables CQRS projection when set |
+| `KAFKA_BROKERS` | *(empty)* | Kafka brokers — enables event consumer when set |
+| `KAFKA_TOPIC` | `fastrg.node.events` | Kafka topic for node events |
+| `KAFKA_GROUP` | `fastrg-controller` | Kafka consumer group ID |
+| `GRPC_PORT` | `50051` | gRPC server port |
+| `HTTPS_PORT` | `8443` | HTTPS server port |
+| `HTTP_REDIRECT_PORT` | `8080` | HTTP → HTTPS redirect port |
+| `CERT_FILE` | `/app/certs/server.crt` | TLS certificate path |
+| `KEY_FILE` | `/app/certs/server.key` | TLS key path |
+| `PROMETHEUS_LISTEN_IP` | `127.0.0.1` | Prometheus metrics listen IP (`0.0.0.0` in K8s) |
+| `JWT_SECRET` | *(random per start)* | JWT signing secret — set a stable value in production |
 
-## Helm Chart Custom Configuration
+## Helm Values Reference
 
-### Basic Configuration Example
+### PostgreSQL
 
 ```yaml
-# custom-values.yaml
-controller:
-  replicaCount: 3
-  
-  service:
-    type: ClusterIP
-    
-  resources:
-    requests:
-      memory: "512Mi"
-      cpu: "500m"
-    limits:
-      memory: "1Gi"
-      cpu: "1000m"
+postgresql:
+  type: internal          # internal | external | none
+  internal:
+    auth:
+      username: fastrg
+      password: fastrg    # Change in production
+      database: fastrg
+    persistence:
+      size: 10Gi
+  external:
+    url: ""               # postgres://user:pass@host:5432/db?sslmode=disable
+```
 
+### Kafka
+
+```yaml
+kafka:
+  type: internal          # internal | external | none
+  topic: "fastrg.node.events"
+  group: "fastrg-controller"
+  internal:
+    persistence:
+      size: 20Gi
+  external:
+    brokers: ""           # host1:9092,host2:9092
+```
+
+### etcd
+
+```yaml
 etcd:
-  persistence:
-    size: 20Gi
+  type: internal          # internal | external
+  internal:
+    persistence:
+      size: 10Gi
+  external:
+    service:
+      type: ClusterIP     # ClusterIP or ExternalName
+      port: 2379
+    endpoints:
+      - ip: "192.168.10.12"
 ```
+
+## Connectivity Tests
+
+`deploy.sh` runs these tests automatically after each deployment, and can be run standalone with `--test-only`:
+
+| Test | Method | Expected |
+|------|--------|---------|
+| HTTPS `HOST_IP:8443` | `curl -k` | HTTP response |
+| HTTP `HOST_IP:8080` | `curl` | HTTP response |
+| gRPC `HOST_IP:50051` | `nc -z` | Port open |
+| etcd `etcd-endpoint:2379` | `etcdctl endpoint health` (in-cluster pod) | healthy |
+| PostgreSQL `postgresql-endpoint:5432` | `pg_isready` (in-cluster pod) | accepting connections |
+| Kafka `kafka-endpoint:9092` | `kafka-topics.sh --list` (in-cluster pod) | topic list returned |
+
+## Production Considerations
+
+### Use Managed Services
+
+| Component | Recommended managed alternative |
+|-----------|--------------------------------|
+| etcd | Dedicated 3-node cluster outside K8s |
+| PostgreSQL | RDS, Cloud SQL, CloudNativePG operator |
+| Kafka | MSK, Confluent Cloud, Redpanda Cloud |
+
+### JWT Secret
+
+The controller generates a random JWT secret on startup by default. Set a stable `JWT_SECRET` in production — otherwise all sessions are invalidated on pod restart.
+
+### TLS
+
+Auto-generated self-signed certificates work for dev. For production, provide certificates via `CERT_FILE` / `KEY_FILE` env vars or mount a Kubernetes Secret.
+
+## Troubleshooting
 
 ```bash
-helm install fastrg-controller deployment/helm/fastrg-controller/ -f custom-values.yaml
-```
-
-### Production Environment Configuration
-
-```yaml
-# production-values.yaml
-global:
-  namespace: fastrg-system
-  storageClass: "fast-ssd"
-
-controller:
-  replicaCount: 3
-  service:
-    type: LoadBalancer
-  
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
-
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 2
-
-monitoring:
-  enabled: true
-  serviceMonitor:
-    enabled: true
-```
-
-## SSL Certificate Management
-
-### Auto-generated Certificates (Default)
-
-The chart automatically generates self-signed certificates in the init container by default.
-
-### Using Existing Certificates
-
-```yaml
-controller:
-  tls:
-    enabled: true
-    generate: true  # Generate self-signed certificates
-    certFile: "/app/certs/server.crt"
-    keyFile: "/app/certs/server.key"
-    # If generate is false, provide existing certificates
-    existingSecret: ""
-```
-
-## Monitoring and Observability
-
-### Health Checks
-
-The service includes liveness and readiness probes:
-
-- **Endpoint**: `https://localhost:8443/api/health`
-- **Initial delay**: 30s (liveness), 10s (readiness)
-- **Check interval**: 10s (liveness), 5s (readiness)
-
-### Log Collection
-
-Application logs are stored in the `/app/logs` directory and persisted to PVC.
-
-### Prometheus Monitoring
-
-Enable monitoring features:
-
-```yaml
-monitoring:
-  enabled: true
-  serviceMonitor:
-    enabled: true
-    namespace: monitoring
-    interval: 30s
-```
-
-## Maintenance Operations
-
-### Upgrade
-
-```bash
-# Helm upgrade
-helm upgrade fastrg-controller deployment/helm/fastrg-controller/ -f values.yaml
-
-# Check upgrade status
-helm history fastrg-controller
-kubectl rollout status deployment/fastrg-controller -n fastrg-system
-```
-
-### Backup
-
-```bash
-# Backup etcd data
-kubectl exec -n fastrg-system deployment/etcd -- etcdctl snapshot save /etcd-data/backup.db
-
-# Copy backup file
-kubectl cp fastrg-system/etcd-pod:/etcd-data/backup.db ./etcd-backup-$(date +%Y%m%d).db
-```
-
-### Troubleshooting
-
-```bash
-# Check Pod status
+# Pod status
 kubectl get pods -n fastrg-system
-kubectl describe pod <pod-name> -n fastrg-system
 
-# Check logs
-kubectl logs <pod-name> -n fastrg-system
-kubectl logs <pod-name> -c init-container -n fastrg-system
+# Controller logs
+kubectl logs -f deployment/fastrg-controller -n fastrg-system
 
-# Check services
-kubectl get services -n fastrg-system
-kubectl describe service fastrg-controller-service -n fastrg-system
+# etcd health
+kubectl exec -n fastrg-system etcd-0 -- etcdctl endpoint health
 
-# Check certificates
-kubectl exec -n fastrg-system deployment/fastrg-controller -- ls -la /app/certs/
+# Services and LoadBalancer IPs
+kubectl get svc -n fastrg-system
+
+# Re-run connectivity tests
+deployment/k8s/deploy.sh --test-only -n fastrg-system
+
+# etcd backup
+kubectl exec -n fastrg-system etcd-0 -- \
+  etcdctl snapshot save /etcd-data/backup.db
+kubectl cp fastrg-system/etcd-0:/etcd-data/backup.db \
+  ./etcd-backup-$(date +%Y%m%d).db
 ```
 
-### Cleanup
+## Cleanup
 
 ```bash
-# Uninstall using Helm
-helm uninstall fastrg-controller
+# Helm
+helm uninstall fastrg-controller -n fastrg-system
 
-# Or delete using kubectl
-kubectl delete -f deployment/k8s/
+# Native YAML
+make k8s-delete
 
-# Clean up PVC (Note: This will delete data)
+# Kind cluster
+make k8s-delete-test-env
+
+# Remove PVCs (destroys data)
 kubectl delete pvc -n fastrg-system --all
-
-# Delete namespace
-kubectl delete namespace fastrg-system
-```
-
-## Security Considerations
-
-### Network Security
-
-- Use TLS encryption for all communications
-- Configure appropriate NetworkPolicy
-- Restrict Pod-to-Pod communication
-
-### Certificate Management
-
-- Regular certificate rotation
-- Use cert-manager for automatic management
-- Monitor certificate expiration times
-
-### RBAC
-
-Ensure principle of least privilege:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: fastrg-controller-role
-  namespace: fastrg-system
-rules:
-- apiGroups: [""]
-  resources: ["pods", "services", "configmaps"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-```
-
-### Secret Management
-
-- Use Kubernetes Secrets for sensitive data
-- Enable encryption at rest
-- Consider external secret management systems
-
-## Performance Tuning
-
-### Resource Configuration
-
-Adjust resource requests and limits based on load:
-
-```yaml
-resources:
-  requests:
-    memory: "256Mi"
-    cpu: "250m"
-  limits:
-    memory: "512Mi"
-    cpu: "500m"
-```
-
-### etcd Tuning
-
-```yaml
-etcd:
-  resources:
-    requests:
-      memory: "512Mi"
-      cpu: "500m"
-    limits:
-      memory: "1Gi"
-      cpu: "1000m"
-  config:
-    quota-backend-bytes: 8589934592  # 8GB
-    max-request-bytes: 10485760      # 10MB
-```
-
-### Horizontal Scaling
-
-```yaml
-replicaCount: 3
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
 ```

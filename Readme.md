@@ -68,8 +68,7 @@ FastRG Components Overview
 
 ## Deployment
 The FastRG Controller can be deployed using Kubernetes, or Helm charts. There are examples to deploy FastRG controller in Kubernetes and Helm. Please refer to the following documentation for detailed deployment instructions:
-- [Kubernetes Deployment Guide](deployment/k8s/README.md)
-- [Helm Chart Deployment Guide](deployment/README.md)
+- [Kubernetes and Helm Chart Deployment Guide](deployment/README.md)
 
 The FastRG system must work with an etcd cluster for configuration storage. You can either deploy your own etcd cluster or deploy an etcd service in Kubernetes cluster.
 - The Etcd service must enable the `2379` port for FastRG controller and node to store and retrieve configuration data.

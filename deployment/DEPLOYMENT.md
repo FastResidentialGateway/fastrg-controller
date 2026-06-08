@@ -11,25 +11,6 @@ a *separate* machine — they can all live on the same host/cluster.
 ---
 
 ## 1. Components and data flow
-
-```
-            ┌──────────── CLI / Web UI ───────────┐
-            │            writes config            │
-            ▼                                     │
-        ┌────────┐   watch configs/   ┌────────────────────┐
- node ─▶│  etcd  │◀──────────────────▶│  fastrg-controller │
-        └────────┘   (SSOT)           └────────────────────┘
-            ▲                            │        ▲
-            │ apply config               │ project│ consume
-            │                            ▼        │
- node ──────┘                       ┌──────────┐  │  ┌──────────┐
-   │  protobuf NodeEvent            │PostgreSQL│  └──│  Kafka   │◀── node
-   └────────────────────────────────────────────────┘ events    producer
-                                    (current/history,    (fastrg.node.events)
-                                     pppoe_status,
-                                     node_events)
-```
-
 | Component | Role | Required? |
 |-----------|------|-----------|
 | **etcd** | Configuration source of truth. Controller, nodes and CLI read/write here. | **Yes** |
@@ -199,25 +180,3 @@ Controller startup logs tell you which optional subsystems are active:
 `Started config projection (etcd -> PostgreSQL)` and
 `Started Kafka consumer for node events`, or the corresponding
 "not set; running without …" lines.
-
----
-
-## 9. Security (production checklist)
-
-- **etcd**: enable TLS + RBAC. PPPoE credentials are stored in etcd config
-  values; restrict access and consider encryption at rest.
-- **PostgreSQL / Kafka**: use TLS (`sslmode=require`+) and authentication; keep
-  them on a private network.
-- **Controller**: set a stable `JWT_SECRET`; replace the self-signed cert with a
-  real one via `CERT_FILE`/`KEY_FILE`.
-- **Clocks**: PostgreSQL guards and the (future) offline-queue merge rely on
-  reasonably synced clocks — run NTP on nodes and the controller host.
-
----
-
-## 10. Roadmap / not yet wired
-
-- Kafka **SASL/TLS** client options are not yet configurable via env (only plain
-  `KAFKA_BROKERS`). Add them before using a secured/managed broker.
-- The node-side **producer** (C / librdkafka) and the CLI three-tier write
-  fallback are separate work items in the node repo.
