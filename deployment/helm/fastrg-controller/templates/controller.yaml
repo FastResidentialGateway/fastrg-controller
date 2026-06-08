@@ -148,19 +148,27 @@ spec:
           value: {{ .Values.controller.tls.keyFile | quote }}
         - name: PROMETHEUS_LISTEN_IP
           value: {{ .Values.controller.config.prometheusListenIP | quote }}
-        {{- if .Values.controller.database.url }}
-        # Optional PostgreSQL projection (CQRS read/history model).
+        {{- if eq .Values.postgresql.type "internal" }}
         - name: DATABASE_URL
-          value: {{ .Values.controller.database.url | quote }}
+          value: "postgres://{{ .Values.postgresql.internal.auth.username }}:{{ .Values.postgresql.internal.auth.password }}@postgresql-endpoint:{{ .Values.postgresql.internal.service.port }}/{{ .Values.postgresql.internal.auth.database }}?sslmode=disable"
+        {{- else if and (eq .Values.postgresql.type "external") .Values.postgresql.external.url }}
+        - name: DATABASE_URL
+          value: {{ .Values.postgresql.external.url | quote }}
         {{- end }}
-        {{- if .Values.controller.kafka.brokers }}
-        # Optional Kafka consumer for node events (requires database.url).
+        {{- if eq .Values.kafka.type "internal" }}
         - name: KAFKA_BROKERS
-          value: {{ .Values.controller.kafka.brokers | quote }}
+          value: "kafka-endpoint:{{ .Values.kafka.internal.service.port }}"
         - name: KAFKA_TOPIC
-          value: {{ .Values.controller.kafka.topic | quote }}
+          value: {{ .Values.kafka.topic | quote }}
         - name: KAFKA_GROUP
-          value: {{ .Values.controller.kafka.group | quote }}
+          value: {{ .Values.kafka.group | quote }}
+        {{- else if and (eq .Values.kafka.type "external") .Values.kafka.external.brokers }}
+        - name: KAFKA_BROKERS
+          value: {{ .Values.kafka.external.brokers | quote }}
+        - name: KAFKA_TOPIC
+          value: {{ .Values.kafka.topic | quote }}
+        - name: KAFKA_GROUP
+          value: {{ .Values.kafka.group | quote }}
         {{- end }}
         readinessProbe:
           {{- toYaml .Values.controller.readinessProbe | nindent 10 }}

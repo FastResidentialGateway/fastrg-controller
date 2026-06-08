@@ -20,6 +20,7 @@ By default:
 | Runner host | `192.168.10.104` |
 | Runner SSH port | `2222` |
 | Controller host | `192.168.10.212` |
+| Monitor host | `192.168.10.213` |
 | etcd host | `192.168.10.212` |
 | DB host | `192.168.10.212` |
 | Node host | `192.168.10.211` |
@@ -91,6 +92,7 @@ bash run_e2e_test.sh \
   --etcd-host 192.168.10.212 \
   --db-host 192.168.10.212 \
   --node-host 192.168.10.211 \
+  --monitor-host 192.168.10.213 \
   --compose-dir /root/fastrg-controller/e2e_test
 ```
 
@@ -259,4 +261,3 @@ ssh root@192.168.10.212 \
 2. Source `common.sh` like existing phases
 3. Use helpers instead of direct `docker-compose` calls
 4. Return non-zero on failure
-5. Update this README and `QUICKSTART.md`

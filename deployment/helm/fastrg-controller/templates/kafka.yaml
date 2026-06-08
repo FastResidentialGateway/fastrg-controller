@@ -1,0 +1,148 @@
+{{- if eq .Values.kafka.type "internal" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-endpoint
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: kafka
+spec:
+  type: ClusterIP
+  ports:
+  - name: broker
+    port: {{ .Values.kafka.internal.service.port }}
+    targetPort: {{ .Values.kafka.internal.service.port }}
+    protocol: TCP
+  selector:
+    app: kafka
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-loadbalancer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: kafka
+  annotations:
+    service.cilium.io/lb-ipam-ips: {{ .Values.global.lbIP | default "auto" | quote }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: kafka
+  ports:
+  - name: broker
+    port: {{ .Values.kafka.internal.service.port }}
+    targetPort: {{ .Values.kafka.internal.service.port }}
+    protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: kafka
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - name: broker
+    port: {{ .Values.kafka.internal.service.port }}
+    targetPort: {{ .Values.kafka.internal.service.port }}
+    protocol: TCP
+  - name: controller
+    port: {{ .Values.kafka.internal.service.controllerPort }}
+    targetPort: {{ .Values.kafka.internal.service.controllerPort }}
+    protocol: TCP
+  selector:
+    app: kafka
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: kafka
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: "{{ .Values.kafka.internal.image.repository }}:{{ .Values.kafka.internal.image.tag }}"
+        imagePullPolicy: {{ .Values.kafka.internal.image.pullPolicy }}
+        ports:
+        - name: broker
+          containerPort: {{ .Values.kafka.internal.service.port }}
+          protocol: TCP
+        - name: controller
+          containerPort: {{ .Values.kafka.internal.service.controllerPort }}
+          protocol: TCP
+        env:
+        - name: KAFKA_NODE_ID
+          value: {{ .Values.kafka.internal.config.nodeId | quote }}
+        - name: KAFKA_PROCESS_ROLES
+          value: "broker,controller"
+        - name: KAFKA_LISTENERS
+          value: "PLAINTEXT://:{{ .Values.kafka.internal.service.port }},CONTROLLER://:{{ .Values.kafka.internal.service.controllerPort }}"
+        # ADVERTISED_LISTENERS points to the ClusterIP Service so any pod in the
+        # namespace can reach the broker through a stable DNS name.
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka-endpoint:{{ .Values.kafka.internal.service.port }}"
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: "{{ .Values.kafka.internal.config.nodeId }}@kafka-0.kafka-headless.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.kafka.internal.service.controllerPort }}"
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: "CONTROLLER"
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: "PLAINTEXT"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: {{ .Values.kafka.internal.config.offsetsTopicReplicationFactor | quote }}
+        - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+          value: {{ .Values.kafka.internal.config.transactionStateLogReplicationFactor | quote }}
+        - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+          value: {{ .Values.kafka.internal.config.transactionStateLogMinIsr | quote }}
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: {{ .Values.kafka.internal.config.autoCreateTopicsEnable | quote }}
+        {{- if .Values.kafka.internal.persistence.enabled }}
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+        {{- end }}
+        {{- if .Values.kafka.internal.resources }}
+        resources:
+          {{- toYaml .Values.kafka.internal.resources | nindent 10 }}
+        {{- end }}
+  {{- if .Values.kafka.internal.persistence.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: {{ .Values.kafka.internal.persistence.size }}
+      {{- if .Values.kafka.internal.persistence.storageClass }}
+      storageClassName: {{ .Values.kafka.internal.persistence.storageClass }}
+      {{- else if .Values.global.storageClass }}
+      storageClassName: {{ .Values.global.storageClass }}
+      {{- end }}
+  {{- end }}
+{{- end }}

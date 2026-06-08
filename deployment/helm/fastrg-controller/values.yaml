@@ -6,6 +6,10 @@
 global:
   namespace: fastrg-system
   storageClass: standard
+  # Shared LoadBalancer IP for all external-facing services (etcd, kafka, controller).
+  # Set to the host IP so Cilium can share one IP across multiple ports.
+  # Leave empty ("") to let Cilium auto-assign from the pool.
+  lbIP: ""
 
 # FastRG Controller configuration
 controller:
@@ -41,18 +45,6 @@ controller:
     ginMode: "release"
     # Prometheus metrics server IP (defaults to 127.0.0.1 if not set)
     prometheusListenIP: "0.0.0.0"
-
-  # Optional PostgreSQL projection (CQRS read/history model). Leave url empty to
-  # run from etcd only; set it to enable the config-watch projection.
-  database:
-    url: ""  # e.g. "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
-
-  # Optional Kafka consumer for node events (requires database.url). Leave
-  # brokers empty to run without it.
-  kafka:
-    brokers: ""  # e.g. "kafka:9092"
-    topic: "fastrg.node.events"
-    group: "fastrg-controller"
 
   # SSL Certificate configuration
   tls:
@@ -184,6 +176,102 @@ etcd:
       # - ip: "192.168.10.13"
       #   port: 2379
 
+# PostgreSQL configuration
+postgresql:
+  # Deploy internal PostgreSQL or use external database
+  type: internal  # internal | external | none
+
+  # Internal PostgreSQL configuration (when type: internal)
+  internal:
+    image:
+      repository: postgres
+      tag: "16-alpine"
+      pullPolicy: IfNotPresent
+
+    service:
+      port: 5432
+
+    auth:
+      username: fastrg
+      password: fastrg
+      database: fastrg
+
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""  # Uses global.storageClass if empty
+
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+    livenessProbe:
+      exec:
+        command: ["pg_isready", "-U", "fastrg"]
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    readinessProbe:
+      exec:
+        command: ["pg_isready", "-U", "fastrg"]
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  # External PostgreSQL configuration (when type: external)
+  external:
+    url: ""  # Full DSN: "postgres://user:pass@host:5432/db?sslmode=disable"
+
+# Kafka configuration
+kafka:
+  # Deploy internal Kafka or use external Kafka cluster
+  type: internal  # internal | external | none
+
+  # Common topic/group settings (used regardless of internal/external)
+  topic: "fastrg.node.events"
+  group: "fastrg-controller"
+
+  # Internal Kafka configuration (when type: internal)
+  internal:
+    image:
+      repository: apache/kafka
+      tag: "3.9.0"
+      pullPolicy: IfNotPresent
+
+    service:
+      port: 9092
+      controllerPort: 9093
+
+    config:
+      nodeId: 1
+      offsetsTopicReplicationFactor: 1
+      transactionStateLogReplicationFactor: 1
+      transactionStateLogMinIsr: 1
+      autoCreateTopicsEnable: "true"
+
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""  # Uses global.storageClass if empty
+
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "500m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+
+  # External Kafka configuration (when type: external)
+  external:
+    brokers: ""  # e.g. "kafka1:9092,kafka2:9092"
 
 # Service account configuration
 serviceAccount:
