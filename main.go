@@ -108,11 +108,30 @@ func main() {
 	// controller still serves entirely from etcd if the DB is absent or down.
 	var database *db.DB
 	if dsn := db.DSN(); dsn != "" {
-		var dbErr error
-		if database, dbErr = db.New(ctx, dsn); dbErr != nil {
-			logrus.WithError(dbErr).Error("failed to connect PostgreSQL; projection and Kafka consumer disabled")
-			database = nil
-		} else {
+		// Retry with exponential backoff: PostgreSQL pod may not be ready when
+		// the controller starts in Kubernetes (race condition on pod scheduling).
+		const maxRetries = 10
+		delay := 2 * time.Second
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			var dbErr error
+			database, dbErr = db.New(ctx, dsn)
+			if dbErr == nil {
+				break
+			}
+			if attempt == maxRetries {
+				logrus.WithError(dbErr).Error("failed to connect PostgreSQL after retries; projection and Kafka consumer disabled")
+				database = nil
+				break
+			}
+			logrus.WithError(dbErr).Warnf("PostgreSQL not ready, retrying in %s (%d/%d)", delay, attempt, maxRetries)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				database = nil
+			}
+			delay = min(delay*2, 30*time.Second)
+		}
+		if database != nil {
 			defer database.Close()
 			go projection.New(etcd, database).Run(ctx)
 			logrus.Info("Started config projection (etcd -> PostgreSQL)")
