@@ -312,11 +312,6 @@ create_ip_pool() {
     local host_ip=$1
     log_info "Creating Cilium LoadBalancer IP Pool (IP: $host_ip)..."
     
-    # Use a /30 block starting at the host IP so etcd (.+1) and kafka (.+2)
-    # can each get their own LoadBalancer IP without IP-sharing limitations.
-    local pool_cidr="${host_ip%.*}.${host_ip##*.}"
-    local pool_base=$(( ${host_ip##*.} & 252 ))
-    local pool_network="${host_ip%.*}.${pool_base}/30"
     cat > /tmp/cilium-lb-pool.yml <<EOF
 apiVersion: cilium.io/v2alpha1
 kind: CiliumLoadBalancerIPPool
@@ -325,7 +320,7 @@ metadata:
 spec:
   allowFirstLastIPs: "Yes"
   blocks:
-  - cidr: $pool_network
+  - cidr: $host_ip/32
 EOF
     
     retry_kubectl_apply /tmp/cilium-lb-pool.yml "IP Pool creation"

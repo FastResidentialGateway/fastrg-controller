@@ -96,7 +96,7 @@ jobs:
       run: |
         deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-        export ETCD_ENDPOINTS="$HOST_IP:2379"
+        export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
         tools/test_script.sh $HOST_IP run_feature_tests
   k8s-deployment:
@@ -140,6 +140,6 @@ jobs:
       run: |
         deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-        export ETCD_ENDPOINTS="$HOST_IP:2379"
+        export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
         tools/test_script.sh $HOST_IP run_feature_tests

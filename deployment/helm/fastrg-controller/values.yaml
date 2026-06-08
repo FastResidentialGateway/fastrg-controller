@@ -113,6 +113,7 @@ etcd:
       type: ClusterIP
       clientPort: 2379
       peerPort: 2380
+      hostPort: 2378
       
     config:
       name: "node1"
