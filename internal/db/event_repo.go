@@ -97,7 +97,7 @@ func (d *DB) SendToDLQ(ctx context.Context, topic string, partition int, offset 
 	var id int64
 	err := d.pool.QueryRow(ctx, `
 		INSERT INTO kafka_dlq
-			(topic, partition, offset, message_value, error_message, retry_count, status)
+			(topic, partition, "offset", message_value, error_message, retry_count, status)
 		VALUES ($1, $2, $3, $4, $5, 0, 'pending')
 		ON CONFLICT (topic, partition, "offset") DO UPDATE SET
 			error_message = EXCLUDED.error_message,

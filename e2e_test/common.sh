@@ -135,7 +135,12 @@ kafka_produce_base64() {
     local topic=$1
     local payload_base64=$2
 
-    compose exec -T kafka sh -c "printf '%s' '$payload_base64' | base64 -d > /tmp/e2e-node-event.pb && /opt/kafka/bin/kafka-producer-perf-test.sh --topic '$topic' --num-records 1 --throughput -1 --payload-file /tmp/e2e-node-event.pb --producer-props bootstrap.servers=localhost:9092 >/dev/null"
+    # kafka-producer-perf-test.sh --payload-file treats binary as text and splits
+    # on newlines, which corrupts protobuf payloads that contain 0x0A bytes.
+    # Use the kafka_produce Go tool on the controller host instead; it writes the
+    # full binary payload in a single Kafka message without any line-splitting.
+    local kafka_brokers="${KAFKA_BROKERS:-localhost:29092}"
+    ssh_controller "cd /root/fastrg-controller && KAFKA_BROKERS='$kafka_brokers' KAFKA_TOPIC='$topic' /usr/local/go/bin/go run ./tools/kafka_produce/main.go '$payload_base64'"
 }
 
 # Query controller REST API
@@ -216,8 +221,86 @@ kafka_lag() {
         --describe 2>/dev/null | tail -1 || echo "unknown"
 }
 
+# ---------------------------------------------------------------------------
+# FastRG Node control helpers (Phase 4)
+# ---------------------------------------------------------------------------
+# The node config lives at /etc/fastrg/config.cfg and normally points at the
+# production controller. For the e2e docker-compose controller the endpoints use
+# different ports (etcd 22379, kafka 29092, gRPC 50052), so the phase rewrites
+# config.cfg before starting the node and restores it afterwards.
+NODE_CONFIG="/etc/fastrg/config.cfg"
+NODE_CONFIG_BACKUP="/etc/fastrg/config.cfg.e2e-bak"
+NODE_LOG="/tmp/fastrg-e2e-node.log"
+NODE_BIN="/root/fastrg-node/fastrg"
+NODE_ARGS="-l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
+
+# Point the node config at the e2e docker-compose controller endpoints.
+# Backs up the original config first so node_restore_config can undo it.
+node_point_config_to_e2e() {
+    local controller_host="${CONTROLLER_HOST:-192.168.10.212}"
+    ssh_node "
+        cp -f '$NODE_CONFIG' '$NODE_CONFIG_BACKUP' &&
+        sed -i \
+            -e 's|^ControllerAddress = .*|ControllerAddress = \"${controller_host}:50052\";|' \
+            -e 's|^EtcdEndpoints = .*|EtcdEndpoints = \"${controller_host}:22379\";|' \
+            -e 's|^KafkaBrokers = .*|KafkaBrokers = \"${controller_host}:29092\";|' \
+            '$NODE_CONFIG' &&
+        grep -E 'ControllerAddress|EtcdEndpoints|KafkaBrokers' '$NODE_CONFIG'
+    "
+}
+
+# Restore the original node config from the backup made above.
+node_restore_config() {
+    ssh_node "
+        if [ -f '$NODE_CONFIG_BACKUP' ]; then
+            mv -f '$NODE_CONFIG_BACKUP' '$NODE_CONFIG' &&
+            echo 'config restored'
+        else
+            echo 'no backup found, leaving config as-is'
+        fi
+    "
+}
+
+# Stop any running fastrg process on the node (idempotent).
+node_stop() {
+    ssh_node "pkill -x fastrg 2>/dev/null; sleep 2; pkill -9 -x fastrg 2>/dev/null; true"
+}
+
+# Start the fastrg node process in the background, logging to NODE_LOG.
+# fastrg (DPDK) keeps file descriptors open that keep the SSH channel alive even
+# when stdio is redirected, so the launching ssh would hang. setsid fully
+# detaches the process from the SSH session, so we wrap the launch ssh in a
+# short timeout (killing the ssh does not kill the already-detached fastrg) and
+# then verify it is running with a separate ssh call.
+node_start() {
+    timeout 10 ssh $SSH_OPTS "root@${NODE_HOST}" \
+        "cd /root/fastrg-node && setsid $NODE_BIN $NODE_ARGS < /dev/null > '$NODE_LOG' 2>&1" \
+        >/dev/null 2>&1
+    sleep 2
+    if ssh_node "pgrep -x fastrg >/dev/null && echo up || echo down" | grep -q up; then
+        echo "fastrg started"
+    else
+        echo "fastrg failed to start"
+    fi
+}
+
+# Check whether the fastrg process is currently running on the node.
+node_is_running() {
+    ssh_node "pgrep -x fastrg >/dev/null && echo up || echo down" | grep -q up
+}
+
+# Count PPPoE rows in the given phase for a node. The controller records the raw
+# per-session PPPoE status it polls from the node; "Data phase" is the
+# established/data-passing state. Default matches that established state.
+pppoe_connected_count() {
+    local node_uuid=$1
+    local phase=${2:-Data phase}
+    db_query "SELECT COUNT(*) FROM pppoe_status WHERE node_uuid='$node_uuid' AND phase='$phase';" 2>/dev/null | xargs
+}
+
 export -f log_info log_success log_warn log_error compose compose_quiet
 export -f wait_for_service is_service_up stop_service start_service
 export -f etcd_get db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
 export -f api_get node_status config_get pppoe_status
 export -f wait_for verify_config_sync kafka_lag
+export -f node_point_config_to_e2e node_restore_config node_stop node_start node_is_running pppoe_connected_count

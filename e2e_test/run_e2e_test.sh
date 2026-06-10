@@ -239,6 +239,68 @@ ssh_monitor() {
 }
 
 # ---------------------------------------------------------------------------
+# Docker compose stack lifecycle (on the controller host)
+# ---------------------------------------------------------------------------
+# Run docker-compose in COMPOSE_DIR on the controller host, picking whichever of
+# `docker-compose` / `docker compose` is available there.
+compose_remote() {
+    local quoted_dir quoted_args="" arg quoted_arg
+    printf -v quoted_dir '%q' "${COMPOSE_DIR}"
+    for arg in "$@"; do
+        printf -v quoted_arg '%q' "$arg"
+        quoted_args+=" ${quoted_arg}"
+    done
+    ssh_controller "cd ${quoted_dir} && if command -v docker-compose >/dev/null 2>&1; then docker-compose${quoted_args}; else docker compose${quoted_args}; fi"
+}
+
+# True when every service defined in the compose project is currently running.
+stack_is_up() {
+    local defined running
+    defined=$(compose_remote config --services 2>/dev/null | grep -c .)
+    running=$(compose_remote ps --services --filter status=running 2>/dev/null | grep -c .)
+    [[ "$defined" -gt 0 && "$running" -ge "$defined" ]]
+}
+
+# Ensure the compose stack is running before the tests start. If it is not
+# already up, bring it up and wait for all containers to be running.
+ensure_stack_up() {
+    if stack_is_up; then
+        log_info "Docker compose stack already running"
+        return 0
+    fi
+    log_info "Docker compose stack not running — starting it..."
+    # Clear any leftover volumes from a previous (possibly interrupted) run so the
+    # projection checkpoint and etcd revision start consistent (see teardown_stack).
+    compose_remote down -v >/dev/null 2>&1 || true
+    compose_remote up -d || { log_error "docker-compose up failed"; return 1; }
+    log_info "Waiting for containers to be up..."
+    local attempt
+    for attempt in $(seq 1 60); do
+        if stack_is_up; then
+            log_success "Docker compose stack is up"
+            return 0
+        fi
+        sleep 5
+    done
+    log_error "Docker compose stack did not come up within timeout"
+    return 1
+}
+
+# Stop and remove the compose stack on the controller host, including named
+# volumes (-v). Removing volumes is required for correctness: etcd's data dir is
+# effectively ephemeral (its revision resets on each fresh start) while the
+# postgres volume would otherwise persist the projection's etcd_watch_progress
+# checkpoint. Keeping a stale checkpoint against a reset etcd makes the
+# projection watch from a future revision and silently miss every config write.
+# Wiping both volumes keeps etcd and the projection checkpoint consistent.
+# Runs on every exit path so the test always leaves the controller host clean.
+teardown_stack() {
+    log_info "Stopping docker-compose stack on controller host..."
+    compose_remote down -v || true
+    log_success "Docker compose stack stopped"
+}
+
+# ---------------------------------------------------------------------------
 # Test execution
 # ---------------------------------------------------------------------------
 print_header() {
@@ -283,6 +345,12 @@ main() {
     export CONTROLLER_HOST MONITOR_HOST NODE_HOST ETCD_HOST DB_HOST COMPOSE_DIR SSH_KEY SSH_OPTS
     export E2E_COMPOSE_VIA_SSH=1
     export -f ssh_node ssh_db ssh_etcd ssh_controller ssh_monitor
+
+    printf "\n"
+
+    # Bring the compose stack up if needed, and always tear it down on exit.
+    trap teardown_stack EXIT INT TERM
+    ensure_stack_up || { log_error "Aborting: stack failed to start"; return 1; }
 
     printf "\n"
 

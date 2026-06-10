@@ -141,6 +141,7 @@ func (d *DB) RollbackToLastSuccessful(ctx context.Context, nodeUUID, userID stri
 			(node_uuid, user_id, action, config, desire_status, mod_revision,
 			 resource_version, updated_by, updated_at, status)
 		VALUES ($1, $2, 'apply-failed', NULL, 'disconnect', 0, '', 'system', now(), 'failed')
+		ON CONFLICT (node_uuid, user_id, mod_revision, status) DO NOTHING
 	`, nodeUUID, userID)
 	return err
 }

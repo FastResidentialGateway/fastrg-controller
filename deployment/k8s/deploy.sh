@@ -586,7 +586,23 @@ test_services() {
     return $test_failed
 }
 
-# Show access information
+# Create the default admin user in etcd (idempotent).
+# Runs the create_user tool from the repo (resolved relative to this script, so
+# it works regardless of checkout path) against the etcd hostPort. Failures are
+# non-fatal so a transient etcd hiccup does not abort the whole deployment.
+create_admin_user() {
+    log_info "Creating default admin user (password: admin)..."
+    local repo_root="${SCRIPT_PATH}/../.."
+    local go_bin
+    go_bin="$(command -v go || echo /usr/local/go/bin/go)"
+    if ( cd "${repo_root}/tools/create_user" && \
+         ETCD_ENDPOINTS=localhost:2378 "$go_bin" run main.go ) 2>/dev/null; then
+        log_success "Admin user created (username: admin, password: admin)"
+    else
+        log_warning "Could not create default admin user (etcd not reachable?) — skipping"
+    fi
+}
+
 show_access_info() {
     local host_ip=$1
     echo
@@ -837,7 +853,10 @@ main() {
     if wait_for_loadbalancer $host_ip "$NAMESPACE"; then
         # Test services
         test_services $host_ip "$NAMESPACE"
-        
+
+        # Create default admin user
+        create_admin_user 
+
         # Show access information
         show_access_info $host_ip
     else

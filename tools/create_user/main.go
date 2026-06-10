@@ -30,7 +30,7 @@ func main() {
 	}
 	defer cli.Close()
 
-	pw := "secret"
+	pw := "admin"
 	hash, _ := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -38,5 +38,5 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("created user admin with password 'secret'")
+	fmt.Println("created user admin with password 'admin'")
 }
