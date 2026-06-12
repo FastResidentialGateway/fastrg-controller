@@ -40,6 +40,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Clean Go cache to force rebuild with latest embedded files
+RUN go clean -cache
+
 # Generate protobuf code
 RUN cd proto && go generate ./... || true
 

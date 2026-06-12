@@ -1,6 +1,7 @@
 backend*
 web/node_modules
 bin
+proto/**/*pb.go
 proto/*pb.go
 proto/fastrg_node.proto
 proto/fastrgnodepb/

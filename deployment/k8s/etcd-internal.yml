@@ -43,11 +43,10 @@ spec:
         ports:
         - name: client
           containerPort: 2379
-          hostPort: 2379
+          hostPort: 2378
           protocol: TCP
         - name: peer
           containerPort: 2380
-          hostPort: 2380
           protocol: TCP
         env:
         - name: ETCD_NAME

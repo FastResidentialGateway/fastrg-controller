@@ -54,34 +54,39 @@ get_image_tag() {
 
 # Show usage information
 show_usage() {
-    echo "Usage: $0 [-n|--namespace NAMESPACE] [-e|--etcd-type TYPE] [-c|--install-cilium] [--cilium-only] [--test-only] [-h|--help]"
+    echo "Usage: $0 [-n|--namespace NAMESPACE] [-e|--etcd-type TYPE] [--postgresql-type TYPE] [--kafka-type TYPE] [-c|--install-cilium] [--cilium-only] [--test-only] [-h|--help]"
     echo ""
     echo "Options:"
-    echo "  -n, --namespace NAMESPACE   Specify the Kubernetes namespace (default: default)"
-    echo "  -e, --etcd-type TYPE        Specify etcd type: internal or external (default: internal)"
-    echo "  -c, --install-cilium        Install Cilium CNI during deployment"
-    echo "      --cilium-only           Only install Cilium CNI and exit (no application deployment)"
-    echo "      --test-only             Only run service connectivity tests"
-    echo "  -h, --help                  Show this help message"
+    echo "  -n, --namespace NAMESPACE       Specify the Kubernetes namespace (default: default)"
+    echo "  -e, --etcd-type TYPE            Specify etcd type: internal or external (default: internal)"
+    echo "      --postgresql-type TYPE      Specify PostgreSQL type: internal or external (default: internal)"
+    echo "      --kafka-type TYPE           Specify Kafka type: internal or external (default: internal)"
+    echo "  -c, --install-cilium            Install Cilium CNI during deployment"
+    echo "      --cilium-only               Only install Cilium CNI and exit (no application deployment)"
+    echo "      --test-only                 Only run service connectivity tests"
+    echo "  -h, --help                      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0                          # Deploy to default namespace with internal etcd"
-    echo "  $0 -n fastrg-system         # Deploy to fastrg-system namespace with internal etcd"
-    echo "  $0 -e external              # Deploy with external etcd"
-    echo "  $0 -c                       # Deploy with Cilium installation"
-    echo "  $0 --cilium-only            # Only install Cilium CNI"
-    echo "  $0 --test-only              # Only test service connections"
-    echo "  $0 -n my-ns -e internal -c  # Deploy to my-ns namespace with internal etcd and Cilium"
+    echo "  $0                                           # Deploy with all internal services"
+    echo "  $0 -n fastrg-system                         # Deploy to fastrg-system namespace"
+    echo "  $0 -e external                               # Deploy with external etcd"
+    echo "  $0 --postgresql-type external                # Deploy with external PostgreSQL"
+    echo "  $0 --kafka-type external                     # Deploy with external Kafka"
+    echo "  $0 -c                                        # Deploy with Cilium installation"
+    echo "  $0 --cilium-only                             # Only install Cilium CNI"
+    echo "  $0 --test-only                               # Only test service connections"
 }
 
 # Parse command line arguments
 parse_arguments() {
     NAMESPACE="default"
     ETCD_TYPE="internal"
+    POSTGRESQL_TYPE="internal"
+    KAFKA_TYPE="internal"
     INSTALL_CILIUM="false"
     CILIUM_ONLY="false"
     TEST_ONLY="false"
-    
+
     while [[ $# -gt 0 ]]; do
         case $1 in
             -n|--namespace)
@@ -97,13 +102,31 @@ parse_arguments() {
                 fi
                 shift 2
                 ;;
+            --postgresql-type)
+                POSTGRESQL_TYPE="$2"
+                if [[ "$POSTGRESQL_TYPE" != "internal" && "$POSTGRESQL_TYPE" != "external" ]]; then
+                    echo "Error: postgresql-type must be 'internal' or 'external'"
+                    show_usage
+                    exit 1
+                fi
+                shift 2
+                ;;
+            --kafka-type)
+                KAFKA_TYPE="$2"
+                if [[ "$KAFKA_TYPE" != "internal" && "$KAFKA_TYPE" != "external" ]]; then
+                    echo "Error: kafka-type must be 'internal' or 'external'"
+                    show_usage
+                    exit 1
+                fi
+                shift 2
+                ;;
             -c|--install-cilium)
                 INSTALL_CILIUM="true"
                 shift 1
                 ;;
             --cilium-only)
                 CILIUM_ONLY="true"
-                INSTALL_CILIUM="true"  # Automatically enable Cilium installation
+                INSTALL_CILIUM="true"
                 shift 1
                 ;;
             --test-only)
@@ -246,7 +269,7 @@ wait_for_cilium_crds() {
     log_info "Verifying CRD API endpoints are accessible..."
     local api_retry=20
     while [ $api_retry -gt 0 ]; do
-        if kubectl get ciliuml2announcementpolicies.cilium.io 2>/dev/null; then
+        if kubectl get --request-timeout=5s ciliuml2announcementpolicies.cilium.io 2>/dev/null; then
             log_success "CRD API endpoints are accessible"
             return 0
         fi
@@ -295,11 +318,9 @@ kind: CiliumLoadBalancerIPPool
 metadata:
   name: fastrg-lb-pool
 spec:
+  allowFirstLastIPs: "Yes"
   blocks:
   - cidr: $host_ip/32
-  serviceSelector:
-    matchLabels:
-      app: fastrg-controller
 EOF
     
     retry_kubectl_apply /tmp/cilium-lb-pool.yml "IP Pool creation"
@@ -309,31 +330,83 @@ EOF
 # Create L2 Announcement Policy
 create_l2_policy() {
     log_info "Creating L2 Announcement Policy..."
-    
+
     # Dynamically detect network interface in Kind environment
     local interface=$(docker exec ${CLUSTER_NAME}-control-plane ip route | grep default | awk '{print $5}' | head -1)
     if [ -z "$interface" ]; then
         interface="eth0"  # Default interface inside Kind container
     fi
-    
+
     cat > /tmp/cilium-l2-policy.yml <<EOF
 apiVersion: cilium.io/v2alpha1
 kind: CiliumL2AnnouncementPolicy
 metadata:
   name: default
 spec:
-  serviceSelector:
-    matchLabels:
-      app: fastrg-controller
   nodeSelector: {}
   loadBalancerIPs: true
   externalIPs: true
   interfaces:
   - $interface
 EOF
-    
-    retry_kubectl_apply /tmp/cilium-l2-policy.yml "L2 Policy creation"
-    log_success "L2 Policy created successfully (interface: $interface)"
+
+    # L2 policy is best-effort: it only affects ARP announcement for the
+    # LoadBalancer IP. If the Cilium CRD API is not yet stable (common in
+    # Kind environments), skip it with a warning instead of blocking.
+    local attempt=1
+    local wait_time=2
+    while [ $attempt -le 3 ]; do
+        log_info "Attempting to apply L2 Policy (attempt $attempt/3)..."
+        if kubectl apply --request-timeout=10s -f /tmp/cilium-l2-policy.yml 2>&1; then
+            log_success "L2 Policy created successfully (interface: $interface)"
+            return 0
+        fi
+        if [ $attempt -lt 3 ]; then
+            log_warning "L2 Policy creation failed, retrying in ${wait_time}s..."
+            sleep $wait_time
+            wait_time=$((wait_time * 2))
+        fi
+        attempt=$((attempt + 1))
+    done
+    log_warning "L2 Policy could not be applied (Cilium CRD API not ready). LoadBalancer ARP announcement may not work, but in-cluster connectivity is unaffected."
+}
+
+# Deploy PostgreSQL
+deploy_postgresql() {
+    local namespace=$1
+    if [ "$POSTGRESQL_TYPE" = "internal" ]; then
+        log_info "Deploying PostgreSQL (internal)..."
+        sed "s/namespace: default/namespace: $namespace/g" "${SCRIPT_PATH}/postgresql-internal.yml" > /tmp/postgresql-ns.yml
+        kubectl apply -f /tmp/postgresql-ns.yml
+        log_info "Waiting for PostgreSQL to be ready..."
+        kubectl wait --for=condition=ready pod -l app=postgresql -n "$namespace" --timeout=120s
+        log_success "PostgreSQL deployment completed"
+    else
+        log_info "Configuring external PostgreSQL endpoint..."
+        sed "s/namespace: default/namespace: $namespace/g" "${SCRIPT_PATH}/postgresql-external.yml" > /tmp/postgresql-ns.yml
+        kubectl apply -f /tmp/postgresql-ns.yml
+        log_success "External PostgreSQL endpoint configured"
+    fi
+}
+
+# Deploy Kafka
+deploy_kafka() {
+    local namespace=$1
+    if [ "$KAFKA_TYPE" = "internal" ]; then
+        log_info "Deploying Kafka (internal)..."
+        sed -e "s/namespace: default/namespace: $namespace/g" \
+            -e "s/KAFKA_HOST_IP_PLACEHOLDER/${host_ip}/g" \
+            "${SCRIPT_PATH}/kafka-internal.yml" > /tmp/kafka-ns.yml
+        kubectl apply -f /tmp/kafka-ns.yml
+        log_info "Waiting for Kafka to be ready..."
+        kubectl wait --for=condition=ready pod -l app=kafka -n "$namespace" --timeout=120s
+        log_success "Kafka deployment completed"
+    else
+        log_info "Configuring external Kafka endpoint..."
+        sed "s/namespace: default/namespace: $namespace/g" "${SCRIPT_PATH}/kafka-external.yml" > /tmp/kafka-ns.yml
+        kubectl apply -f /tmp/kafka-ns.yml
+        log_success "External Kafka endpoint configured"
+    fi
 }
 
 # Deploy application
@@ -458,11 +531,78 @@ test_services() {
         kubectl run test-pod --image=curlimages/curl:latest --rm -i --restart=Never -n "$2" -- curl -k -s --connect-timeout 5 fastrg-controller-service:8443/ && echo "Internal service is normal" || echo "Check internal service"
         test_failed=1
     fi
-    
+
+    # Test etcd in-cluster connectivity (always present)
+    if kubectl get service etcd-endpoint -n "$namespace" &>/dev/null; then
+        if kubectl run etcd-connectivity-test --rm --restart=Never -i \
+            --image=gcr.io/etcd-development/etcd:v3.6.5 -n "$namespace" \
+            --timeout=30s \
+            -- etcdctl --endpoints=http://etcd-endpoint:2379 endpoint health \
+            &>/dev/null; then
+            log_success "etcd (etcd-endpoint:2379) is reachable"
+        else
+            log_warning "etcd (etcd-endpoint:2379) connectivity test failed"
+            test_failed=1
+        fi
+    fi
+
+    # Test PostgreSQL in-cluster connectivity (only when internal Service exists)
+    if kubectl get service postgresql-endpoint -n "$namespace" &>/dev/null; then
+        local pg_user
+        pg_user=$(kubectl get statefulset postgresql -n "$namespace" \
+            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="POSTGRES_USER")].value}' \
+            2>/dev/null || echo "fastrg")
+        local pg_db
+        pg_db=$(kubectl get statefulset postgresql -n "$namespace" \
+            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="POSTGRES_DB")].value}' \
+            2>/dev/null || echo "fastrg")
+        if kubectl run pg-connectivity-test --rm --restart=Never -i \
+            --image=postgres:16-alpine -n "$namespace" \
+            --timeout=30s \
+            -- pg_isready -h postgresql-endpoint -p 5432 -U "$pg_user" -d "$pg_db" \
+            &>/dev/null; then
+            log_success "PostgreSQL (postgresql-endpoint:5432) is reachable"
+        else
+            log_warning "PostgreSQL (postgresql-endpoint:5432) connectivity test failed"
+            test_failed=1
+        fi
+    fi
+
+    # Test Kafka in-cluster connectivity (only when internal Service exists)
+    if kubectl get service kafka-endpoint -n "$namespace" &>/dev/null; then
+        if kubectl run kafka-connectivity-test --rm --restart=Never -i \
+            --image=apache/kafka:3.9.0 -n "$namespace" \
+            --timeout=60s \
+            -- /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka-endpoint:9092 --list \
+            &>/dev/null; then
+            log_success "Kafka (kafka-endpoint:9092) is reachable"
+        else
+            log_warning "Kafka (kafka-endpoint:9092) connectivity test failed"
+            test_failed=1
+        fi
+    fi
+
     return $test_failed
 }
 
-# Show access information
+# Create the default admin user in etcd (idempotent).
+# Runs the create_user tool from the repo (resolved relative to this script, so
+# it works regardless of checkout path) against the etcd hostPort. Failures are
+# non-fatal so a transient etcd hiccup does not abort the whole deployment.
+create_admin_user() {
+    log_info "Creating default admin user (password: admin)..."
+    local repo_root="${SCRIPT_PATH}/../.."
+    local go_bin
+    go_bin="$(command -v go || echo /usr/local/go/bin/go)"
+    if ( cd "${repo_root}/tools/create_user" && \
+         ETCD_ENDPOINTS=localhost:2378 "$go_bin" run main.go ) 2>/dev/null; then
+        log_success "Admin user created (username: admin, password: admin)"
+    else
+        log_warning "Could not create default admin user (etcd not reachable?) — skipping"
+    fi
+}
+
 show_access_info() {
     local host_ip=$1
     echo
@@ -493,7 +633,7 @@ show_access_info() {
 
 # Clean up temporary files
 cleanup() {
-    rm -f /tmp/cilium-lb-pool.yml /tmp/cilium-l2-policy.yml /tmp/loadbalancer-service.yml /tmp/etcd-ns.yml /tmp/fastrg_controller-ns.yml
+    rm -f /tmp/cilium-lb-pool.yml /tmp/cilium-l2-policy.yml /tmp/loadbalancer-service.yml /tmp/etcd-ns.yml /tmp/fastrg_controller-ns.yml /tmp/postgresql-ns.yml /tmp/kafka-ns.yml
 }
 
 # Install and configure Cilium CNI
@@ -689,16 +829,19 @@ main() {
     
     # Stop conflicting processes
     stop_conflicting_proxies
-    
-    # Deploy ETCD
-    deploy_etcd "$NAMESPACE"
-    
-    # Wait for Cilium CRDs to be ready before applying resources
+
+    # Wait for Cilium CRDs and create IP pool FIRST, so LoadBalancer services
+    # created by etcd/kafka can get their explicit IPs from the pool immediately.
     wait_for_cilium_crds
-    
-    # Create Cilium configuration
     create_ip_pool $host_ip
     create_l2_policy
+
+    # Deploy ETCD
+    deploy_etcd "$NAMESPACE"
+
+    # Deploy PostgreSQL and Kafka
+    deploy_postgresql "$NAMESPACE"
+    deploy_kafka "$NAMESPACE"
     
     # Deploy application
     deploy_application "$NAMESPACE"
@@ -710,7 +853,10 @@ main() {
     if wait_for_loadbalancer $host_ip "$NAMESPACE"; then
         # Test services
         test_services $host_ip "$NAMESPACE"
-        
+
+        # Create default admin user
+        create_admin_user 
+
         # Show access information
         show_access_info $host_ip
     else

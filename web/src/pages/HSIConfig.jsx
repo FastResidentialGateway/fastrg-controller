@@ -40,8 +40,8 @@ export default function HSIConfig() {
     password: '',
     dns_proxy_enable: true,
     tcp_conntrack_enable: true,
-    // enableStatus is returned from backend metadata as a string: "enabled", "enabling", "disabling", "disabled"
-    enableStatus: ''
+    // desireStatus is the PPPoE expected state from config: "connect" | "disconnect"
+    desireStatus: ''
   })
 
   // DHCP server config
@@ -110,16 +110,14 @@ export default function HSIConfig() {
   const [isCheckingConfig, setIsCheckingConfig] = useState(false)
   const { showToast } = useToast()
 
-  // Map backend enableStatus string to display label and color
+  // Map the config's desire_status to a display label and color. This is the
+  // expected PPPoE state set via dial/hangup; the actual phase comes from the
+  // Kafka-fed /pppoe/status endpoint.
   const getStatusInfo = (status) => {
     switch ((status || '').toLowerCase()) {
-    case 'enabled':
+    case 'connect':
       return { label: t('hsi.statusOn'), color: '#28a745' }
-    case 'enabling':
-      return { label: t('hsi.statusConnecting'), color: '#ffc107' }
-    case 'disabling':
-      return { label: t('hsi.statusDisconnecting'), color: '#ffc107' }
-    case 'disabled':
+    case 'disconnect':
     default:
       return { label: t('hsi.statusOff'), color: '#6c757d' }
     }
@@ -184,8 +182,8 @@ export default function HSIConfig() {
         password: configData.password || '',
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
-        // store backend string state (enabled/enabling/disabling/disabled)
-        enableStatus: metadata.enableStatus || ''
+        // expected PPPoE state lives in the config object now
+        desireStatus: configData.desire_status || ''
       })
       setDhcpConfig({
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
@@ -220,7 +218,7 @@ export default function HSIConfig() {
               vlan_id: configData.vlan_id || '',
               account_name: configData.account_name || '',
               password: configData.password || '',
-              enableStatus: metadata.enableStatus || '',
+              desireStatus: configData.desire_status || '',
               dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
               tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
               dhcp_addr_pool: configData.dhcp_addr_pool || '',
@@ -228,7 +226,7 @@ export default function HSIConfig() {
               dhcp_gateway: configData.dhcp_gateway || ''
             }
           } catch (_) {
-            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, tcp_conntrack_enable: true, enableStatus: '' }
+            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, tcp_conntrack_enable: true, desireStatus: '' }
           }
         })
       )
@@ -257,7 +255,7 @@ export default function HSIConfig() {
         password: configData.password || '',
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
-        enableStatus: metadata.enableStatus || ''
+        desireStatus: configData.desire_status || ''
       }))
       setDhcpConfig({
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
@@ -849,7 +847,8 @@ export default function HSIConfig() {
         exists = false
       }
 
-      // Build payload only with HSIConfig fields (do not send UI-only fields like enableStatus)
+      // Build payload only with HSIConfig fields. Do not send UI-only fields or
+      // desire_status — the backend preserves the existing desire_status.
       const fullConfig = {
         user_id: pppoeConfig.user_id,
         vlan_id: pppoeConfig.vlan_id,
@@ -1567,7 +1566,7 @@ export default function HSIConfig() {
                 </thead>
                 <tbody>
                   {allPppoeConfigs.map((cfg, idx) => {
-                    const statusInfo = getStatusInfo(cfg.enableStatus)
+                    const statusInfo = getStatusInfo(cfg.desireStatus)
                     return (
                       <React.Fragment key={idx}>
                         <tr>

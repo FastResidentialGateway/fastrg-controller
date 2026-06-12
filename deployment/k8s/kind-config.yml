@@ -12,8 +12,11 @@ nodes:
   - containerPort: 50051
     hostPort: 50051
     protocol: TCP
-  - containerPort: 2379
-    hostPort: 2379
+  - containerPort: 2378
+    hostPort: 2378
+    protocol: TCP
+  - containerPort: 9092
+    hostPort: 9092
     protocol: TCP
   - containerPort: 8444
     hostPort: 8444

@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package fastrg.events.v1;
+
+option go_package = "fastrg-controller/proto/eventsv1";
+
+// ------------------------------------------------------------
+// Kafka Topic: fastrg.node.events
+//
+// Partition key: node_uuid  (保證同一 node 的事件有序)
+// Producer:      fastrg-node (librdkafka, non-blocking)
+// Consumer:      fastrg-controller (consumer group: fastrg-controller)
+// Delivery:      at-least-once → consumer 端需冪等寫 DB
+// ------------------------------------------------------------
+
+// 頂層事件信封,所有 Kafka 訊息使用此結構
+message NodeEvent {
+  string node_uuid  = 1;  // 發送此事件的 node UUID
+  string user_id    = 2;  // 相關 subscriber id;對 node 級別事件填 "0"
+  EventType type    = 3;
+  int64 timestamp   = 4;  // Unix timestamp (秒)
+  string correlation_id = 5;  // 對應觸發此事件的 etcd mod_revision(字串);無則空
+
+  oneof payload {
+    ConfigApplyResult  config_apply_result  = 10;
+    PPPoEStateChange   pppoe_state_change   = 11;
+    RuntimeError       runtime_error        = 12;
+  }
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED       = 0;
+
+  // Config 套用結果 (point 5)
+  EVENT_TYPE_CONFIG_APPLY_OK   = 1;
+  EVENT_TYPE_CONFIG_APPLY_FAIL = 2;
+
+  // PPPoE 狀態轉態 (point 6)
+  EVENT_TYPE_PPPOE_CONNECTING    = 10;
+  EVENT_TYPE_PPPOE_CONNECTED     = 11;
+  EVENT_TYPE_PPPOE_DISCONNECTING = 12;
+  EVENT_TYPE_PPPOE_DISCONNECTED  = 13;
+
+  // Runtime 錯誤 (point 5)
+  EVENT_TYPE_RUNTIME_ERROR     = 20;
+}
+
+// Config 套用結果 (EVENT_TYPE_CONFIG_APPLY_OK / FAIL)
+message ConfigApplyResult {
+  string action        = 1;  // "create" | "update" | "delete"
+  bool   success       = 2;
+  string error_code    = 3;  // 失敗時填;對應 etcd_error_reason_t
+  string error_message = 4;  // 人類可讀錯誤描述
+}
+
+// PPPoE 狀態轉態 (EVENT_TYPE_PPPOE_*)
+message PPPoEStateChange {
+  PPPoEPhase phase     = 1;
+  string hsi_ipv4      = 2;  // 連線完成時填入;其他轉態可為空
+  string hsi_ipv4_gw   = 3;  // 連線完成時填入
+  string error_message = 4;  // 失敗/異常斷線時填入
+}
+
+enum PPPoEPhase {
+  PPPOE_PHASE_UNSPECIFIED   = 0;
+  PPPOE_PHASE_CONNECTING    = 1;  // 開始建線 (撥號中)
+  PPPOE_PHASE_CONNECTED     = 2;  // 連線完成 (取得 IP)
+  PPPOE_PHASE_DISCONNECTING = 3;  // 開始斷線
+  PPPOE_PHASE_DISCONNECTED  = 4;  // 斷線完成
+}
+
+// Runtime 錯誤 (EVENT_TYPE_RUNTIME_ERROR)
+message RuntimeError {
+  string module        = 1;  // 產生錯誤的模組,例如 "pppd" | "dhcpd" | "dnsd" | "dp"
+  string error_code    = 2;
+  string error_message = 3;
+  string context       = 4;  // 額外 debug 資訊 (JSON 字串或空)
+}

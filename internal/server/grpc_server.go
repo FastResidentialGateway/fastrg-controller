@@ -48,7 +48,7 @@ func NewGrpcServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *GrpcServe
 	return server
 }
 
-func (s *GrpcServer) Start(addr string) {
+func (s *GrpcServer) Start(addr string, configSvc *ConfigGrpcServer) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		logrus.WithError(err).Warn("failed to listen")
@@ -56,6 +56,7 @@ func (s *GrpcServer) Start(addr string) {
 
 	s.grpcServer = grpc.NewServer()
 	controllerpb.RegisterNodeManagementServer(s.grpcServer, s)
+	controllerpb.RegisterConfigServiceServer(s.grpcServer, configSvc)
 
 	logrus.Infof("gRPC server listening at %v", addr)
 	if err := s.grpcServer.Serve(lis); err != nil {

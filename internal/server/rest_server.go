@@ -5,14 +5,17 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
+	"fastrg-controller/internal/db"
 	"fastrg-controller/internal/storage"
+	"fastrg-controller/internal/validation"
 
 	"github.com/sirupsen/logrus"
 
@@ -41,16 +44,31 @@ func RedirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
 }
 
+var (
+	cachedJWTSecret string
+	jwtSecretOnce   sync.Once
+)
+
+// GetJWTSecret returns the configured JWT secret, used by both REST and gRPC auth.
+// This is computed once and cached to ensure both REST and gRPC use the same value.
+func GetJWTSecret() string {
+	jwtSecretOnce.Do(func() {
+		if secret := os.Getenv("JWT_SECRET"); secret != "" {
+			cachedJWTSecret = secret
+			return
+		}
+		bytes := make([]byte, 32)
+		if _, err := rand.Read(bytes); err != nil {
+			cachedJWTSecret = "super-secret-key"
+			return
+		}
+		cachedJWTSecret = base64.StdEncoding.EncodeToString(bytes)
+	})
+	return cachedJWTSecret
+}
+
 func getJWTSecret() string {
-	if secret := os.Getenv("JWT_SECRET"); secret != "" {
-		return secret
-	}
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		// Default for development environment
-		return "super-secret-key"
-	}
-	return base64.StdEncoding.EncodeToString(bytes)
+	return GetJWTSecret()
 }
 
 // PortMapping represents a single SNAT port forwarding rule
@@ -63,16 +81,19 @@ type PortMapping struct {
 
 // HSI config structure (Include PPPoE and DHCP settings)
 type HSIConfig struct {
-	UserID         string        `json:"user_id" example:"2"`
-	VlanID         string        `json:"vlan_id" example:"2"`
-	AccountName    string        `json:"account_name" example:"admin"`
-	Password       string        `json:"password" example:"admin"`
-	DHCPAddrPool   string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
-	DHCPSubnet     string        `json:"dhcp_subnet" example:"255.255.255.0"`
-	DHCPGateway    string        `json:"dhcp_gateway" example:"192.168.3.1"`
+	UserID             string        `json:"user_id" example:"2"`
+	VlanID             string        `json:"vlan_id" example:"2"`
+	AccountName        string        `json:"account_name" example:"admin"`
+	Password           string        `json:"password" example:"admin"`
+	DHCPAddrPool       string        `json:"dhcp_addr_pool" example:"192.168.3.100-192.168.3.200"`
+	DHCPSubnet         string        `json:"dhcp_subnet" example:"255.255.255.0"`
+	DHCPGateway        string        `json:"dhcp_gateway" example:"192.168.3.1"`
 	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
 	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
 	PortMappings       []PortMapping `json:"port-mapping,omitempty"`
+	// DesireStatus is the PPPoE expected state ("connect" | "disconnect").
+	// Only DialPPPoE/HangupPPPoE change it; ordinary config edits preserve it.
+	DesireStatus string `json:"desire_status" example:"disconnect"`
 }
 
 // HSIMetadata represents the metadata for HSI configuration
@@ -81,7 +102,6 @@ type HSIMetadata struct {
 	ResourceVersion string `json:"resourceVersion" example:"1"`
 	UpdatedBy       string `json:"updatedBy" example:"admin"`
 	UpdatedAt       string `json:"updatedAt" example:"2024-01-01T00:00:00Z"`
-	EnableStatus    string `json:"enableStatus" example:"disabled"`
 }
 
 // HSI config with metadata structure for etcd storage
@@ -126,10 +146,13 @@ type RestServer struct {
 	etcd           *storage.EtcdClient
 	jwtSecret      []byte
 	nodeMonitorMgr *NodeMonitorManager
+	// db is the PostgreSQL projection. It is nil when no database is configured;
+	// the DB-backed endpoints (node events, PPPoE status) then return 503.
+	db *db.DB
 }
 
-func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *RestServer {
-	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm}
+func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager, database *db.DB) *RestServer {
+	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm, db: database}
 }
 
 // EtcdHealthCheck returns the health status of the service
@@ -193,85 +216,97 @@ func (r *RestServer) getUserFromToken(tokenString string) (string, error) {
 	return username, nil
 }
 
-// Get next resource version for HSI config
-func (r *RestServer) getNextResourceVersion(ctx context.Context, etcdKey string) (string, error) {
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		return "", err
+// nextResourceVersion derives the display-only resourceVersion to stamp on the
+// value about to be written, from the current stored value (nil for a new key).
+// This is a human-readable audit counter only; concurrency control uses etcd's
+// ModRevision via EtcdClient.CAS, not this number. Behaviour mirrors the old
+// getNextResourceVersion: new key -> "1", unparseable/missing version -> "2".
+func nextResourceVersion(current []byte) string {
+	if len(current) == 0 {
+		return "1"
 	}
 
-	if len(resp.Kvs) == 0 {
-		// First time creation, start with version 1
-		return "1", nil
+	var meta struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(current, &meta); err != nil {
+		return "2"
+	}
+	if meta.Metadata.ResourceVersion == "" {
+		return "2"
 	}
 
-	// Parse existing config to get current version
-	var existingConfig HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &existingConfig); err != nil {
-		// If can't parse metadata, assume it's old format, start with version 2
-		return "2", nil
+	var n int
+	if _, err := fmt.Sscanf(meta.Metadata.ResourceVersion, "%d", &n); err != nil {
+		return "2"
 	}
-
-	// Parse current version and increment
-	currentVersion := existingConfig.Metadata.ResourceVersion
-	if currentVersion == "" {
-		return "2", nil
-	}
-
-	// Simple increment - parse as number and add 1
-	var nextVersion int
-	if _, err := fmt.Sscanf(currentVersion, "%d", &nextVersion); err != nil {
-		return "2", nil
-	}
-	nextVersion++
-
-	return fmt.Sprintf("%d", nextVersion), nil
+	return fmt.Sprintf("%d", n+1)
 }
 
-// Check if VLAN is already in use by another user on the same node
-func (r *RestServer) isVlanInUse(ctx context.Context, nodeId, vlanId, currentUserId string) (bool, string, error) {
+// Sentinel errors returned by CAS mutate closures so handlers can map them to
+// the right HTTP status. Their messages double as the client-facing text.
+var (
+	errHSIConfigExists   = errors.New("HSI config already exists for this user")
+	errHSIConfigNotFound = errors.New("HSI config not found")
+	errDNSRecordNotFound = errors.New("DNS record not found")
+	errDNSRecordLimit    = errors.New("DNS record limit reached: maximum 64 records allowed")
+)
+
+// PPPoE expected-state values for HSIConfig.DesireStatus. node watches this
+// field and reconciles the link; controller never drives PPPoE directly.
+const (
+	desireStatusConnect    = "connect"
+	desireStatusDisconnect = "disconnect"
+)
+
+// listVlanOwners returns the (user, vlan) pairs of every HSI config on a node,
+// for the validation layer to detect VLAN conflicts.
+func (r *RestServer) listVlanOwners(ctx context.Context, nodeId string) ([]validation.VlanOwner, error) {
 	etcdHSIConfigKey := fmt.Sprintf("configs/%s/hsi/", nodeId)
 	resp, err := r.etcd.Client().Get(ctx, etcdHSIConfigKey, clientv3.WithPrefix())
 	if err != nil {
-		return false, "", err
+		return nil, err
 	}
 
+	owners := make([]validation.VlanOwner, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
 		var configWithMetadata HSIConfigWithMetadata
-		var config HSIConfig
-
-		if err := json.Unmarshal(kv.Value, &configWithMetadata); err == nil {
-			config = configWithMetadata.Config
-		} else {
+		if err := json.Unmarshal(kv.Value, &configWithMetadata); err != nil {
 			continue
 		}
-
-		// Check if this VLAN is used by a different user
-		if config.VlanID == vlanId && config.UserID != currentUserId {
-			return true, config.UserID, nil
-		}
+		owners = append(owners, validation.VlanOwner{
+			UserID: configWithMetadata.Config.UserID,
+			VlanID: configWithMetadata.Config.VlanID,
+		})
 	}
-
-	return false, "", nil
+	return owners, nil
 }
 
-func (r *RestServer) isHSIConfigEnabled(ctx context.Context, nodeId, userId string) (string, error) {
-	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		return "unknown", err
+// respondValidationError maps a validation error to the matching HTTP status:
+// a uniqueness conflict becomes 409, any other validation failure 400.
+func respondValidationError(c *gin.Context, err error) {
+	var ve *validation.Error
+	if errors.As(err, &ve) && ve.Conflict {
+		c.JSON(http.StatusConflict, gin.H{"error": ve.Error()})
+		return
 	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+}
 
-	if len(resp.Kvs) == 0 {
-		return "unknown", nil
+// hsiConfigInput maps the REST HSIConfig into the transport-neutral validation
+// input.
+func hsiConfigInput(config HSIConfig) validation.HSIConfigInput {
+	return validation.HSIConfigInput{
+		UserID:       config.UserID,
+		VlanID:       config.VlanID,
+		AccountName:  config.AccountName,
+		Password:     config.Password,
+		DHCPAddrPool: config.DHCPAddrPool,
+		DHCPSubnet:   config.DHCPSubnet,
+		DHCPGateway:  config.DHCPGateway,
 	}
-
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err != nil {
-		return "unknown", err
-	}
-
-	return configWithMetadata.Metadata.EnableStatus, nil
 }
 
 // AuthMiddleware with blacklist check for production
@@ -848,13 +883,10 @@ func (r *RestServer) GetHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(c.Request.Context(), nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(userId); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(userId, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	ctx := c.Request.Context()
@@ -908,32 +940,8 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	}
 
 	// Validate required fields
-	if config.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
-		return
-	}
-	if config.VlanID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "VLAN ID is required"})
-		return
-	}
-	if config.AccountName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Account Name is required"})
-		return
-	}
-	if config.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
-		return
-	}
-	if config.DHCPAddrPool == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Address Pool is required"})
-		return
-	}
-	if config.DHCPSubnet == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Subnet is required"})
-		return
-	}
-	if config.DHCPGateway == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Gateway is required"})
+	if err := validation.ValidateHSIConfig(hsiConfigInput(config)); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -942,25 +950,20 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(config.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(config.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if VLAN is already in use by another user
-	inUse, existingUserId, err := r.isVlanInUse(ctx, nodeId, config.VlanID, config.UserID)
+	owners, err := r.listVlanOwners(ctx, nodeId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check VLAN availability"})
 		return
 	}
-	if inUse {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": fmt.Sprintf("Input VLAN has been already used by other user: %s", existingUserId),
-		})
+	if err := validation.CheckVlanUnique(config.VlanID, config.UserID, owners); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -968,6 +971,8 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 	trueVal := true
 	config.DNSProxyEnable = &trueVal
 	config.TCPConntrackEnable = &trueVal
+	// New configs start disconnected; PPPoE is driven later via desire_status.
+	config.DesireStatus = desireStatusDisconnect
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
@@ -977,35 +982,37 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Get next resource version
-	key := fmt.Sprintf("configs/%s/hsi/%s", nodeId, config.UserID)
-	resourceVersion, err := r.getNextResourceVersion(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
-
-	// Create config with metadata
-	configWithMetadata := HSIConfigWithMetadata{
-		Config: config,
-	}
-	configWithMetadata.Metadata.Node = nodeId
-	configWithMetadata.Metadata.ResourceVersion = resourceVersion
-	configWithMetadata.Metadata.UpdatedBy = username
-	configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	configWithMetadata.Metadata.EnableStatus = "disabled"
-
+	// CAS-create: the Version==0 guard inside CAS rejects a concurrent create,
+	// and the mutate closure rejects an already-existing config.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, config.UserID)
+	var resourceVersion string
+	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		if current != nil {
+			return storage.CASResult{}, errHSIConfigExists
+		}
+		resourceVersion = nextResourceVersion(current)
 
-	configJSON, err := json.Marshal(configWithMetadata)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
+		configWithMetadata := HSIConfigWithMetadata{Config: config}
+		configWithMetadata.Metadata.Node = nodeId
+		configWithMetadata.Metadata.ResourceVersion = resourceVersion
+		configWithMetadata.Metadata.UpdatedBy = username
+		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	_, err = r.etcd.Client().Put(ctx, etcdKey, string(configJSON))
+		configJSON, err := json.Marshal(configWithMetadata)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: configJSON}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save HSI config"})
+		switch {
+		case errors.Is(err, errHSIConfigExists):
+			c.JSON(http.StatusConflict, gin.H{"error": errHSIConfigExists.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save HSI config"})
+		}
 		return
 	}
 
@@ -1044,38 +1051,14 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	}
 
 	// Validate required fields
-	if config.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
-		return
-	}
-	if config.VlanID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "VLAN ID is required"})
-		return
-	}
-	if config.AccountName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Account Name is required"})
-		return
-	}
-	if config.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
-		return
-	}
-	if config.DHCPAddrPool == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Address Pool is required"})
-		return
-	}
-	if config.DHCPSubnet == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Subnet is required"})
-		return
-	}
-	if config.DHCPGateway == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "DHCP Gateway is required"})
+	if err := validation.ValidateHSIConfig(hsiConfigInput(config)); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
 	// Ensure userId in URL params matches UserID in request body
-	if config.UserID != userId {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID mismatch"})
+	if err := validation.ValidateUserIDMatch(userId, config.UserID); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1084,25 +1067,20 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(config.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(config.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
 	// Check if VLAN is already in use by another user
-	inUse, existingUserId, err := r.isVlanInUse(ctx, nodeId, config.VlanID, userId)
+	owners, err := r.listVlanOwners(ctx, nodeId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check VLAN availability"})
 		return
 	}
-	if inUse {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": fmt.Sprintf("Input VLAN has been already used by other user: %s", existingUserId),
-		})
+	if err := validation.CheckVlanUnique(config.VlanID, userId, owners); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1111,20 +1089,6 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 	username, err := r.getUserFromToken(authHeader)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
-		return
-	}
-
-	// Get next resource version
-	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	resourceVersion, err := r.getNextResourceVersion(ctx, etcdKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
-
-	enableStatus, err := r.isHSIConfigEnabled(ctx, nodeId, userId)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get current config status"})
 		return
 	}
 
@@ -1138,25 +1102,41 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		config.TCPConntrackEnable = &trueVal
 	}
 
-	// Create config with metadata
-	configWithMetadata := HSIConfigWithMetadata{
-		Config: config,
-	}
-	configWithMetadata.Metadata.Node = nodeId
-	configWithMetadata.Metadata.ResourceVersion = resourceVersion
-	configWithMetadata.Metadata.UpdatedBy = username
-	configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	configWithMetadata.Metadata.EnableStatus = enableStatus
+	// CAS-update (upsert): read the current value inside the mutate so the
+	// existing desire_status is preserved atomically. An ordinary config edit
+	// must never change desire_status — only DialPPPoE/HangupPPPoE do — so any
+	// desire_status sent in the request body is ignored.
+	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
+	var resourceVersion string
+	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		desire := desireStatusDisconnect
+		if current != nil {
+			var existing HSIConfigWithMetadata
+			if err := json.Unmarshal(current, &existing); err == nil && existing.Config.DesireStatus != "" {
+				desire = existing.Config.DesireStatus
+			}
+		}
+		config.DesireStatus = desire
+		resourceVersion = nextResourceVersion(current)
 
-	configJSON, err := json.Marshal(configWithMetadata)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
+		configWithMetadata := HSIConfigWithMetadata{Config: config}
+		configWithMetadata.Metadata.Node = nodeId
+		configWithMetadata.Metadata.ResourceVersion = resourceVersion
+		configWithMetadata.Metadata.UpdatedBy = username
+		configWithMetadata.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	_, err = r.etcd.Client().Put(ctx, etcdKey, string(configJSON))
+		configJSON, err := json.Marshal(configWithMetadata)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: configJSON}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HSI config"})
+		if errors.Is(err, storage.ErrCASConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HSI config"})
+		}
 		return
 	}
 
@@ -1192,32 +1172,30 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, nodeId)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", nodeId)
-	} else {
-		if uidNum, err := strconv.Atoi(userId); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(userId, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
+	// CAS-delete: the mutate closure confirms existence; the Txn guard ensures
+	// the delete only lands if nobody changed the config in between.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
-	// Check if config exists
-	resp, err := r.etcd.Client().Get(ctx, etcdKey)
+	err := r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errHSIConfigNotFound
+		}
+		return storage.CASResult{Delete: true}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check HSI config"})
-		return
-	}
-
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "HSI config not found"})
-		return
-	}
-
-	// Delete config
-	_, err = r.etcd.Client().Delete(ctx, etcdKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete HSI config"})
+		switch {
+		case errors.Is(err, errHSIConfigNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": errHSIConfigNotFound.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete HSI config"})
+		}
 		return
 	}
 
@@ -1225,9 +1203,52 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "HSI config deleted successfully"})
 }
 
-// DialPPPoE sends a PPPoE dial command to a node
+// setDesireStatus CAS-updates the user's HSI config so its desire_status is the
+// requested value, preserving every other config field. node watches this
+// field and reconciles the PPPoE link. Returns errHSIConfigNotFound when the
+// config is absent and storage.ErrCASConflict on retry exhaustion.
+func (r *RestServer) setDesireStatus(ctx context.Context, nodeId, userId, username, desire string) error {
+	key := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
+	return r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errHSIConfigNotFound
+		}
+
+		var cwm HSIConfigWithMetadata
+		// Guard against wiping a malformed/legacy value: require a real config.
+		if err := json.Unmarshal(current, &cwm); err != nil || cwm.Config.UserID == "" {
+			return storage.CASResult{}, fmt.Errorf("parse HSI config: %w", err)
+		}
+
+		cwm.Config.DesireStatus = desire
+		cwm.Metadata.ResourceVersion = nextResourceVersion(current)
+		cwm.Metadata.UpdatedBy = username
+		cwm.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+		b, err := json.Marshal(cwm)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: b}, nil
+	})
+}
+
+// respondDesireStatusError maps a setDesireStatus failure to an HTTP response.
+func respondDesireStatusError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, errHSIConfigNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": errHSIConfigNotFound.Error()})
+	case errors.Is(err, storage.ErrCASConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update PPPoE desire status"})
+	}
+}
+
+// DialPPPoE requests a PPPoE connection by setting the config's desire_status
+// to "connect"; the node reconciles the actual link.
 // @Summary      Dial PPPoE
-// @Description  Send a PPPoE dial command to establish connection on a node
+// @Description  Set desire_status=connect on the HSI config so the node establishes the PPPoE link
 // @Tags         PPPoE
 // @Accept       json
 // @Produce      json
@@ -1255,74 +1276,31 @@ func (r *RestServer) DialPPPoE(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, req.NodeID)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", req.NodeID)
-	} else {
-		if uidNum, err := strconv.Atoi(req.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(req.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
-	// Check if HSI config exists
-	configKey := fmt.Sprintf("configs/%s/hsi/%s", req.NodeID, req.UserID)
-	resp, err := r.etcd.Client().Get(ctx, configKey)
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check PPPoE config"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
 	}
 
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "PPPoE config not found"})
+	if err := r.setDesireStatus(ctx, req.NodeID, req.UserID, username, desireStatusConnect); err != nil {
+		respondDesireStatusError(c, err)
 		return
 	}
 
-	// Parse HSI config to get PPPoE related parameters
-	var hsiConfig HSIConfig
-
-	// Try to parse new format (with metadata)
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err == nil {
-		// New format
-		hsiConfig = configWithMetadata.Config
-	} else {
-		// Try to parse old format
-		if err := json.Unmarshal(resp.Kvs[0].Value, &hsiConfig); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse HSI config"})
-			return
-		}
-	}
-
-	// Create dial command and store it in etcd for the node to execute
-	commandKey := fmt.Sprintf("commands/%s/pppoe_dial_%s", req.NodeID, req.UserID)
-	commandData := map[string]interface{}{
-		"action":    "dial",
-		"user_id":   req.UserID,
-		"vlan":      hsiConfig.VlanID,
-		"account":   hsiConfig.AccountName,
-		"password":  hsiConfig.Password,
-		"timestamp": time.Now().Unix(),
-	}
-
-	commandJSON, err := json.Marshal(commandData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create command"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, commandKey, string(commandJSON))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send dial command"})
-		return
-	}
-
-	logrus.Infof("PPPoE dial command sent to node %s for user %s", req.NodeID, req.UserID)
-	c.JSON(http.StatusOK, gin.H{"message": "PPPoE dial command sent successfully"})
+	logrus.Infof("PPPoE desire_status set to connect for node %s user %s by %s", req.NodeID, req.UserID, username)
+	c.JSON(http.StatusOK, gin.H{"message": "PPPoE dial request accepted"})
 }
 
-// HangupPPPoE sends a PPPoE hangup command to a node
+// HangupPPPoE requests a PPPoE disconnect by setting the config's desire_status
+// to "disconnect"; the node reconciles the actual link.
 // @Summary      Hangup PPPoE
-// @Description  Send a PPPoE hangup command to disconnect on a node
+// @Description  Set desire_status=disconnect on the HSI config so the node tears down the PPPoE link
 // @Tags         PPPoE
 // @Accept       json
 // @Produce      json
@@ -1350,69 +1328,25 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 	subscriberCount := r.GetSubscriberCount(ctx, req.NodeID)
 	if subscriberCount < 0 {
 		logrus.Infof("No valid subscriber count found for node %s, proceeding without filtering", req.NodeID)
-	} else {
-		if uidNum, err := strconv.Atoi(req.UserID); err == nil {
-			if uidNum > subscriberCount {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "User ID exceeds subscriber count"})
-				return
-			}
-		}
+	}
+	if err := validation.CheckSubscriberCount(req.UserID, subscriberCount); err != nil {
+		respondValidationError(c, err)
+		return
 	}
 
-	// Check if HSI config exists
-	configKey := fmt.Sprintf("configs/%s/hsi/%s", req.NodeID, req.UserID)
-	resp, err := r.etcd.Client().Get(ctx, configKey)
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check HSI config"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
 	}
 
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "HSI config not found"})
+	if err := r.setDesireStatus(ctx, req.NodeID, req.UserID, username, desireStatusDisconnect); err != nil {
+		respondDesireStatusError(c, err)
 		return
 	}
 
-	// Parse HSI config to get PPPoE related parameters
-	var hsiConfig HSIConfig
-
-	// Try to parse new format (with metadata)
-	var configWithMetadata HSIConfigWithMetadata
-	if err := json.Unmarshal(resp.Kvs[0].Value, &configWithMetadata); err == nil {
-		// New format
-		hsiConfig = configWithMetadata.Config
-	} else {
-		// Try to parse old format
-		if err := json.Unmarshal(resp.Kvs[0].Value, &hsiConfig); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse HSI config"})
-			return
-		}
-	}
-
-	// Create hangup command and store it in etcd for the node to execute
-	commandKey := fmt.Sprintf("commands/%s/pppoe_hangup_%s", req.NodeID, req.UserID)
-	commandData := map[string]interface{}{
-		"action":    "hangup",
-		"user_id":   req.UserID,
-		"vlan":      hsiConfig.VlanID,
-		"account":   hsiConfig.AccountName,
-		"password":  hsiConfig.Password,
-		"timestamp": time.Now().Unix(),
-	}
-
-	commandJSON, err := json.Marshal(commandData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create command"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, commandKey, string(commandJSON))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send hangup command"})
-		return
-	}
-
-	logrus.Infof("PPPoE hangup command sent to node %s for user %s", req.NodeID, req.UserID)
-	c.JSON(http.StatusOK, gin.H{"message": "PPPoE hangup command sent successfully"})
+	logrus.Infof("PPPoE desire_status set to disconnect for node %s user %s by %s", req.NodeID, req.UserID, username)
+	c.JSON(http.StatusOK, gin.H{"message": "PPPoE hangup request accepted"})
 }
 
 // GetDhcpLeaseCount returns current DHCP lease count for a user on a node
@@ -1655,8 +1589,8 @@ func (r *RestServer) UpdateNodeSubscriberCount(c *gin.Context) {
 		return
 	}
 
-	if req.SubscriberCount < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Subscriber count must be non-negative"})
+	if err := validation.ValidateSubscriberCount(req.SubscriberCount); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1670,31 +1604,28 @@ func (r *RestServer) UpdateNodeSubscriberCount(c *gin.Context) {
 		return
 	}
 
-	// Get next resource version
 	key := fmt.Sprintf("user_counts/%s/", nodeId)
-	resourceVersion, err := r.getNextResourceVersion(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get resource version"})
-		return
-	}
+	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		countData := SubscriberCountData{}
+		countData.SubscriberCount = fmt.Sprintf("%d", req.SubscriberCount)
+		countData.Metadata.Node = nodeId
+		countData.Metadata.ResourceVersion = nextResourceVersion(current)
+		countData.Metadata.UpdatedBy = username
+		countData.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	countData := SubscriberCountData{}
-	countData.SubscriberCount = fmt.Sprintf("%d", req.SubscriberCount)
-	countData.Metadata.Node = nodeId
-	countData.Metadata.ResourceVersion = resourceVersion
-	countData.Metadata.UpdatedBy = username
-	countData.Metadata.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	countJSON, err := json.Marshal(countData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal config"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(ctx, key, string(countJSON))
+		countJSON, err := json.Marshal(countData)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: countJSON}, nil
+	})
 	if err != nil {
 		logrus.WithError(err).Errorf("Failed to update subscriber count for node %s", nodeId)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscriber count"})
+		if errors.Is(err, storage.ErrCASConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscriber count"})
+		}
 		return
 	}
 
@@ -1764,14 +1695,23 @@ func (r *RestServer) GetNodeSubscriberCount(c *gin.Context) {
 	})
 }
 
-// FailedEventsResponse represents the response for failed events
+// FailedEventsResponse represents the response for node events
 type FailedEventsResponse struct {
-	Events []map[string]interface{} `json:"events"`
+	Events []db.NodeEventRow `json:"events"`
 }
 
-// GetFailedEvents returns failed events for a specific node
-// @Summary      Get failed events for a node
-// @Description  Get a list of failed events for a specific node
+// requireDB writes a 503 and returns false when no database is configured.
+func (r *RestServer) requireDB(c *gin.Context) bool {
+	if r.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return false
+	}
+	return true
+}
+
+// GetFailedEvents returns node events for a specific node (from PostgreSQL).
+// @Summary      Get node events for a node
+// @Description  Get a list of node events (config-apply results, runtime errors) for a specific node
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
@@ -1787,89 +1727,56 @@ func (r *RestServer) GetFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID is required"})
 		return
 	}
-
-	ctx := c.Request.Context()
-	prefix := fmt.Sprintf("failed_events_history/%s/", nodeId)
-
-	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get failed events"})
+	if !r.requireDB(c) {
 		return
 	}
 
-	events := []map[string]interface{}{}
-	for _, kv := range resp.Kvs {
-		var event map[string]interface{}
-		if err := json.Unmarshal(kv.Value, &event); err != nil {
-			logrus.WithError(err).Error("Failed to parse failed event")
-			continue
-		}
-		event["_etcd_key"] = string(kv.Key)
-		events = append(events, event)
+	events, err := r.db.ListNodeEvents(c.Request.Context(), nodeId, c.Query("event_type"), 0)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
+		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
-// GetAllFailedEvents returns all failed events across all nodes
-// @Summary      Get all failed events
-// @Description  Get a list of all failed events across all nodes. Supports optional event_type filter.
+// GetAllFailedEvents returns node events across all nodes (from PostgreSQL).
+// @Summary      Get all node events
+// @Description  Get a list of all node events across all nodes. Supports optional event_type filter.
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        event_type  query     string  false  "Filter by event type (e.g., pppoe_dial)"
+// @Param        event_type  query     string  false  "Filter by event type (e.g., RUNTIME_ERROR)"
 // @Success      200         {object}  FailedEventsResponse
 // @Failure      500         {object}  ErrorResponse
 // @Router       /failed-events [get]
 func (r *RestServer) GetAllFailedEvents(c *gin.Context) {
-	ctx := c.Request.Context()
-	prefix := "failed_events_history/"
-	eventTypeFilter := c.Query("event_type") // Optional filter
-
-	resp, err := r.etcd.Client().Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get failed events"})
+	if !r.requireDB(c) {
 		return
 	}
-
-	events := []map[string]interface{}{}
-	for _, kv := range resp.Kvs {
-		var event map[string]interface{}
-		if err := json.Unmarshal(kv.Value, &event); err != nil {
-			logrus.WithError(err).Error("Failed to parse failed event")
-			continue
-		}
-
-		// Apply event_type filter if specified
-		if eventTypeFilter != "" {
-			if eventType, ok := event["event_type"].(string); ok {
-				if eventType != eventTypeFilter {
-					continue // Skip events that don't match the filter
-				}
-			}
-		}
-
-		event["_etcd_key"] = string(kv.Key)
-		events = append(events, event)
+	events, err := r.db.ListNodeEvents(c.Request.Context(), "", c.Query("event_type"), 0)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
+		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
-// DeleteFailedEventsRequest represents the request body for deleting failed events
+// DeleteFailedEventsRequest represents the request body for deleting node events
 type DeleteFailedEventsRequest struct {
-	Keys []string `json:"keys" binding:"required"`
+	IDs []int64 `json:"ids" binding:"required"`
 }
 
-// DeleteFailedEvents deletes specified failed events by their etcd keys
-// @Summary      Delete failed events
-// @Description  Delete one or more failed events by their etcd keys
+// DeleteFailedEvents deletes node events by id (from PostgreSQL).
+// @Summary      Delete node events
+// @Description  Delete one or more node events by their numeric ids
 // @Tags         Failed Events
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        request  body      DeleteFailedEventsRequest  true  "Keys to delete"
+// @Param        request  body      DeleteFailedEventsRequest  true  "Event ids to delete"
 // @Success      200      {object}  map[string]interface{}
 // @Failure      400      {object}  ErrorResponse
 // @Failure      500      {object}  ErrorResponse
@@ -1880,30 +1787,59 @@ func (r *RestServer) DeleteFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-
-	if len(req.Keys) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No keys provided"})
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No ids provided"})
+		return
+	}
+	if !r.requireDB(c) {
 		return
 	}
 
-	ctx := c.Request.Context()
-	deleted := 0
-	for _, key := range req.Keys {
-		// Only allow deleting keys under the failed_events_history/ prefix for safety
-		if !strings.HasPrefix(key, "failed_events_history/") {
-			logrus.WithField("key", key).Warn("Rejected delete attempt for key outside failed_events_history/")
-			continue
-		}
-		_, err := r.etcd.Client().Delete(ctx, key)
-		if err != nil {
-			logrus.WithError(err).WithField("key", key).Error("Failed to delete failed event")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete event: " + key})
-			return
-		}
-		deleted++
+	deleted, err := r.db.DeleteNodeEvents(c.Request.Context(), req.IDs)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to delete node events")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete node events"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
+// GetPPPoEStatus returns the latest Kafka-fed PPPoE state for a user (from
+// PostgreSQL), surviving node/controller restarts. This is the recorded actual
+// state, distinct from the live node-scrape in GetPPPoEInfo.
+// @Summary      Get recorded PPPoE status
+// @Description  Get the latest PPPoE phase recorded from node events
+// @Tags         PPPoE
+// @Produce      json
+// @Security     BearerAuth
+// @Param        nodeId  path      string  true  "Node ID"
+// @Param        userId  path      string  true  "User ID"
+// @Success      200     {object}  db.PPPoEStatusRow
+// @Failure      404     {object}  ErrorResponse
+// @Failure      500     {object}  ErrorResponse
+// @Router       /pppoe/status/{nodeId}/{userId} [get]
+func (r *RestServer) GetPPPoEStatus(c *gin.Context) {
+	nodeId := c.Param("nodeId")
+	userId := c.Param("userId")
+	if nodeId == "" || userId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+		return
+	}
+	if !r.requireDB(c) {
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+	status, ok, err := r.db.GetPPPoEStatus(c.Request.Context(), nodeId, userId)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get PPPoE status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get PPPoE status"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No PPPoE status recorded for this user"})
+		return
+	}
+	c.JSON(http.StatusOK, status)
 }
 
 // ===== Static DNS Record Management =====
@@ -1918,7 +1854,7 @@ func (r *RestServer) GetDnsRecords(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
@@ -1948,7 +1884,7 @@ func (r *RestServer) GetDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 	resp, err := r.etcd.Client().Get(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS records"})
@@ -1991,61 +1927,55 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 		return
 	}
 
-	if newRecord.Domain == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
-		return
-	}
-	if newRecord.IP == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "IP is required"})
-		return
-	}
-	if newRecord.TTL == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "TTL must be greater than 0"})
+	if err := validation.ValidateDnsRecord(newRecord.Domain, newRecord.IP, newRecord.TTL); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
-	resp, err := r.etcd.Client().Get(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing DNS records"})
-		return
-	}
-
-	var records []DnsRecord
-	if len(resp.Kvs) > 0 {
-		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse existing DNS records"})
-			return
-		}
-	}
-
+	// CAS the whole DNS record array: read current, add/update the entry,
+	// enforce the 64-record cap, write back atomically.
 	isUpdate := false
-	for i, rec := range records {
-		if rec.Domain == newRecord.Domain {
-			records[i] = newRecord
-			isUpdate = true
-			break
+	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		var records []DnsRecord
+		if current != nil {
+			if err := json.Unmarshal(current, &records); err != nil {
+				return storage.CASResult{}, err
+			}
 		}
-	}
 
-	if !isUpdate {
-		if len(records) >= 64 {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "DNS record limit reached: maximum 64 records allowed"})
-			return
+		isUpdate = false
+		for i, rec := range records {
+			if rec.Domain == newRecord.Domain {
+				records[i] = newRecord
+				isUpdate = true
+				break
+			}
 		}
-		records = append(records, newRecord)
-	}
+		if !isUpdate {
+			if len(records) >= 64 {
+				return storage.CASResult{}, errDNSRecordLimit
+			}
+			records = append(records, newRecord)
+		}
 
-	data, err := json.Marshal(records)
+		data, err := json.Marshal(records)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: data}, nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
-		return
-	}
-
-	if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
+		switch {
+		case errors.Is(err, errDNSRecordLimit):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": errDNSRecordLimit.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
+		}
 		return
 	}
 
@@ -2069,55 +1999,52 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	key := fmt.Sprintf("configs/%s/%s/dns", nodeId, userId)
+	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
-	resp, err := r.etcd.Client().Get(ctx, key)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check DNS records"})
-		return
-	}
-
-	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
-		return
-	}
-
-	var records []DnsRecord
-	if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
-		return
-	}
-
-	found := false
-	newRecords := records[:0]
-	for _, rec := range records {
-		if rec.Domain == domain {
-			found = true
-		} else {
-			newRecords = append(newRecords, rec)
+	// CAS the DNS record array: remove the domain, then delete the key when no
+	// records remain or write back the trimmed array, atomically.
+	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, errDNSRecordNotFound
 		}
-	}
 
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
-		return
-	}
-
-	if len(newRecords) == 0 {
-		if _, err := r.etcd.Client().Delete(ctx, key); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete DNS records"})
-			return
+		var records []DnsRecord
+		if err := json.Unmarshal(current, &records); err != nil {
+			return storage.CASResult{}, err
 		}
-	} else {
+
+		found := false
+		newRecords := records[:0]
+		for _, rec := range records {
+			if rec.Domain == domain {
+				found = true
+			} else {
+				newRecords = append(newRecords, rec)
+			}
+		}
+		if !found {
+			return storage.CASResult{}, errDNSRecordNotFound
+		}
+
+		if len(newRecords) == 0 {
+			return storage.CASResult{Delete: true}, nil
+		}
 		data, err := json.Marshal(newRecords)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal DNS records"})
-			return
+			return storage.CASResult{}, err
 		}
-		if _, err = r.etcd.Client().Put(ctx, key, string(data)); err != nil {
+		return storage.CASResult{Value: data}, nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errDNSRecordNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": errDNSRecordNotFound.Error()})
+		case errors.Is(err, storage.ErrCASConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent update conflict, please retry"})
+		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save DNS records"})
-			return
 		}
+		return
 	}
 
 	logrus.Infof("DNS record deleted for node %s user %s domain %s", nodeId, userId, domain)
@@ -2165,6 +2092,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.DELETE("/config/:nodeId/hsi/:userId", r.AuthMiddlewareWithBlacklist(), r.DeleteHSIConfig)
 		api.POST("/pppoe/dial", r.AuthMiddlewareWithBlacklist(), r.DialPPPoE)
 		api.POST("/pppoe/hangup", r.AuthMiddlewareWithBlacklist(), r.HangupPPPoE)
+		api.GET("/pppoe/status/:nodeId/:userId", r.AuthMiddlewareWithBlacklist(), r.GetPPPoEStatus)
 		api.GET("/config/:nodeId/dhcp/lease/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDhcpLeaseCount)
 		api.GET("/config/:nodeId/arp/:userId", r.AuthMiddlewareWithBlacklist(), r.GetArpTable)
 		api.GET("/config/:nodeId/dns-cache/:userId", r.AuthMiddlewareWithBlacklist(), r.GetDnsCache)

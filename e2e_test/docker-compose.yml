@@ -1,0 +1,89 @@
+# FastRG Controller — full single-host stack: etcd + PostgreSQL + Kafka + controller.
+#
+# For a real deployment, see docs/deployment.md (managed services / Kubernetes,
+# TLS, persistence and security hardening).
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    command:
+      - etcd
+      - --name=etcd0
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-cluster-state=new
+    ports:
+      - "22379:2379"  # Changed from 2379 to avoid K8s conflict
+    volumes:
+      - etcd-data:/var/run/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fastrg
+      POSTGRES_PASSWORD: fastrg
+      POSTGRES_DB: fastrg
+    ports:
+      - "25432:5432"  # Changed from 5432 to avoid K8s conflict
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastrg"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.9.0
+    ports:
+      - "29092:9092"  # Changed from 9092 to avoid K8s conflict
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      # Advertised so other containers reach the broker as "kafka:9092".
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://192.168.10.212:29092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  controller:
+    build: ..
+    depends_on:
+      etcd:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    environment:
+      ETCD_ENDPOINTS: "etcd:2379"
+      DATABASE_URL: "postgres://fastrg:fastrg@postgres:5432/fastrg?sslmode=disable"
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_TOPIC: "fastrg.node.events"
+      KAFKA_GROUP: "fastrg-controller"
+      PROMETHEUS_LISTEN_IP: "0.0.0.0"
+      # JWT_SECRET: "change-me-in-production"
+    ports:
+      - "28443:8443"  # REST API + Web UI (HTTPS) — changed from 8443 to avoid K8s conflict
+      - "28080:8080"  # HTTP -> HTTPS redirect — changed from 8080
+      - "28444:8444"  # log file (HTTPS) — changed from 8444
+      - "50052:50051" # gRPC (node registration / heartbeat) — changed from 50051 (K8s uses 50051)
+      - "55689:55688" # Prometheus metrics — changed from 55688
+
+volumes:
+  etcd-data:
+  postgres-data:
+  kafka-data:

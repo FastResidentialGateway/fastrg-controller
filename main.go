@@ -15,6 +15,9 @@ import (
 	"github.com/sirupsen/logrus"
 
 	_ "fastrg-controller/docs"
+	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/kafka"
+	"fastrg-controller/internal/projection"
 	"fastrg-controller/internal/server"
 	"fastrg-controller/internal/storage"
 
@@ -99,9 +102,49 @@ func main() {
 	}
 	defer etcd.Close()
 
-	// Start failed events watcher
-	cancelWatcher := storage.StartFailedEventsWatcher(etcd)
-	defer cancelWatcher()
+	// Optional PostgreSQL projection (CQRS): when a database is configured,
+	// watch configs/ and project changes into the current/history tables, and
+	// consume node events from Kafka into pppoe_status / node_events. The
+	// controller still serves entirely from etcd if the DB is absent or down.
+	var database *db.DB
+	if dsn := db.DSN(); dsn != "" {
+		// Retry with exponential backoff: PostgreSQL pod may not be ready when
+		// the controller starts in Kubernetes (race condition on pod scheduling).
+		const maxRetries = 10
+		delay := 2 * time.Second
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			var dbErr error
+			database, dbErr = db.New(ctx, dsn)
+			if dbErr == nil {
+				break
+			}
+			if attempt == maxRetries {
+				logrus.WithError(dbErr).Error("failed to connect PostgreSQL after retries; projection and Kafka consumer disabled")
+				database = nil
+				break
+			}
+			logrus.WithError(dbErr).Warnf("PostgreSQL not ready, retrying in %s (%d/%d)", delay, attempt, maxRetries)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				database = nil
+			}
+			delay = min(delay*2, 30*time.Second)
+		}
+		if database != nil {
+			defer database.Close()
+			go projection.New(etcd, database).Run(ctx)
+			logrus.Info("Started config projection (etcd -> PostgreSQL)")
+
+			if brokers := kafka.Brokers(); brokers != nil {
+				go kafka.NewConsumer(brokers, database, etcd).Run(ctx)
+			} else {
+				logrus.Info("KAFKA_BROKERS not set; running without Kafka consumer")
+			}
+		}
+	} else {
+		logrus.Info("DATABASE_URL/POSTGRES_HOST not set; running without PostgreSQL projection")
+	}
 
 	// Start Prometheus metrics server
 	if err := server.StartPrometheusServer(); err != nil {
@@ -109,7 +152,11 @@ func main() {
 	}
 
 	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
-	nmm := server.NewNodeMonitorManager()
+	// Pass database for stateless recovery of PPPoE status
+	nmm := server.NewNodeMonitorManager(database)
+
+	// CLI-facing config gRPC service (shares same port as NodeManagement)
+	configSvc := server.NewConfigGrpcServer(etcd, []byte(server.GetJWTSecret()))
 
 	var wg sync.WaitGroup
 
@@ -117,7 +164,7 @@ func main() {
 	wg.Go(func() {
 		grpcSrv := server.NewGrpcServer(etcd, nmm)
 		logrus.Infof("Starting gRPC server on :%s", grpcPort)
-		grpcSrv.Start(":" + grpcPort)
+		grpcSrv.Start(":"+grpcPort, configSvc)
 	})
 
 	// start HTTP redirect servers
@@ -131,7 +178,7 @@ func main() {
 	}
 
 	// start REST API (HTTPS)
-	rest := server.NewRestServer(etcd, nmm)
+	rest := server.NewRestServer(etcd, nmm, database)
 	logrus.Infof("Starting HTTPS server on :%s", httpsPort)
 	if err := rest.StartRestServer(":" + httpsPort); err != nil {
 		logrus.WithError(err).Fatal("failed to start HTTPS server")

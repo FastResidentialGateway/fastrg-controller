@@ -1,0 +1,84 @@
+{{- if eq .Values.postgresql.type "internal" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-endpoint
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: postgresql
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgres
+    port: {{ .Values.postgresql.internal.service.port }}
+    targetPort: {{ .Values.postgresql.internal.service.port }}
+    protocol: TCP
+  selector:
+    app: postgresql
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: postgresql
+spec:
+  serviceName: postgresql-endpoint
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      containers:
+      - name: postgresql
+        image: "{{ .Values.postgresql.internal.image.repository }}:{{ .Values.postgresql.internal.image.tag }}"
+        imagePullPolicy: {{ .Values.postgresql.internal.image.pullPolicy }}
+        ports:
+        - name: postgres
+          containerPort: {{ .Values.postgresql.internal.service.port }}
+          protocol: TCP
+        env:
+        - name: POSTGRES_USER
+          value: {{ .Values.postgresql.internal.auth.username | quote }}
+        - name: POSTGRES_PASSWORD
+          value: {{ .Values.postgresql.internal.auth.password | quote }}
+        - name: POSTGRES_DB
+          value: {{ .Values.postgresql.internal.auth.database | quote }}
+        {{- if .Values.postgresql.internal.persistence.enabled }}
+        volumeMounts:
+        - name: postgresql-data
+          mountPath: /var/lib/postgresql/data
+        {{- end }}
+        livenessProbe:
+          {{- toYaml .Values.postgresql.internal.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.postgresql.internal.readinessProbe | nindent 10 }}
+        {{- if .Values.postgresql.internal.resources }}
+        resources:
+          {{- toYaml .Values.postgresql.internal.resources | nindent 10 }}
+        {{- end }}
+  {{- if .Values.postgresql.internal.persistence.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: postgresql-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: {{ .Values.postgresql.internal.persistence.size }}
+      {{- if .Values.postgresql.internal.persistence.storageClass }}
+      storageClassName: {{ .Values.postgresql.internal.persistence.storageClass }}
+      {{- else if .Values.global.storageClass }}
+      storageClassName: {{ .Values.global.storageClass }}
+      {{- end }}
+  {{- end }}
+{{- end }}

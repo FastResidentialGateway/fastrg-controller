@@ -77,13 +77,13 @@ test_etcd_seed() {
 # Function: Test login via REST (HTTPS)
 test_login() {
     log_info "Testing POST /api/login (HTTPS)..."
-    curl -s -k -X POST https://$ENDPOINT:8443/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"secret"}' | jq -C . || true
+    curl -s -k -X POST https://$ENDPOINT:8443/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}' | jq -C . || true
 }
 
 # Function: Test fetch nodes (HTTPS)
 test_nodes() {
     log_info "Testing GET /api/nodes (HTTPS)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}' | jq -r .token)
     if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
         log_error "No token, aborting"
         exit 1
@@ -126,11 +126,11 @@ test_unregister() {
     go run test_grpc/main.go --addr "$ENDPOINT:50051"
     
     log_info "Now test unregistration via REST API..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/nodes/test-node-001 | jq .
     
     log_info "Verification - check remaining nodes..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/nodes | jq .
 }
 
@@ -146,7 +146,7 @@ test_redirect() {
 test_logout() {
     log_info "Testing logout with token blacklist..."
     log_info "1. Login and get token..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     
     log_info "2. Test token validity..."
     curl -s -k -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/nodes > /dev/null && log_success "Token is valid"
@@ -168,7 +168,7 @@ test_logout() {
 # Function: Test Create HSI config
 test_hsi_create() {
     log_info "Testing POST /api/config/:nodeId/hsi (Create HSI config with PPPoE and DHCP)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1001","vlan_id":"100","account_name":"test@example.com","password":"testpass123","dhcp_addr_pool":"192.168.1.10~192.168.1.200","dhcp_subnet":"255.255.255.0","dhcp_gateway":"192.168.1.1"}' | jq -C . || true
@@ -177,21 +177,21 @@ test_hsi_create() {
 # Function: Test Get HSI user IDs list
 test_hsi_users() {
     log_info "Testing GET /api/config/:nodeId/hsi/users (Get HSI user IDs)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/users | jq -C . || true
 }
 
 # Function: Test Get specific HSI config
 test_hsi_get_config() {
     log_info "Testing GET /api/config/:nodeId/hsi/:userId (Get HSI config)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1001 | jq -C . || true
 }
 
 # Function: Test Update HSI config
 test_hsi_update() {
     log_info "Testing PUT /api/config/:nodeId/hsi/:userId (Update HSI config)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X PUT -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi/1001 \
         -d '{"user_id":"1001","vlan_id":"200","account_name":"updated@example.com","password":"newpass456","dhcp_addr_pool":"10.0.1.50~10.0.1.150","dhcp_subnet":"255.0.0.0","dhcp_gateway":"10.0.1.1"}' | jq -C . || true
@@ -200,7 +200,7 @@ test_hsi_update() {
 # Function: Test Delete HSI config
 test_hsi_delete() {
     log_info "Testing DELETE /api/config/:nodeId/hsi/:userId (Delete HSI config)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1001 | jq -C . || true
 }
 
@@ -208,13 +208,13 @@ test_hsi_delete() {
 test_hsi_validation() {
     log_info "Testing HSI config validation..."
     log_info "1. Testing invalid User ID (out of range)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"2001","vlan_id":"100","account_name":"test@example.com","password":"testpass123","dhcp_addr_pool":"192.168.1.10~192.168.1.200","dhcp_subnet":"255.255.255.0","dhcp_gateway":"192.168.1.1"}' | jq -C . || true
     
     log_info "2. Testing invalid VLAN ID (out of range)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1500","vlan_id":"1","account_name":"test@example.com","password":"testpass123","dhcp_addr_pool":"192.168.1.10~192.168.1.200","dhcp_subnet":"255.255.255.0","dhcp_gateway":"192.168.1.1"}' | jq -C . || true
@@ -224,19 +224,19 @@ test_hsi_validation() {
 test_dhcp_configs() {
     log_info "Testing various DHCP configurations..."
     log_info "1. Testing Class A private network (10.x.x.x)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1002","vlan_id":"101","account_name":"test_class_a@example.com","password":"testpass123","dhcp_addr_pool":"10.0.1.2~10.0.1.254","dhcp_subnet":"255.0.0.0","dhcp_gateway":"10.0.1.1"}' | jq -C . || true
     
     log_info "2. Testing Class B private network (172.16.x.x)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1003","vlan_id":"102","account_name":"test_class_b@example.com","password":"testpass123","dhcp_addr_pool":"172.16.1.10~172.16.1.100","dhcp_subnet":"255.255.0.0","dhcp_gateway":"172.16.1.1"}' | jq -C . || true
     
     log_info "3. Testing Class C private network (192.168.x.x)..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1004","vlan_id":"103","account_name":"test_class_c@example.com","password":"testpass123","dhcp_addr_pool":"192.168.100.50~192.168.100.150","dhcp_subnet":"255.255.255.0","dhcp_gateway":"192.168.100.1"}' | jq -C . || true
@@ -261,20 +261,20 @@ test_hsi_workflow() {
     test_dhcp_configs > /dev/null 2>&1
     
     log_info "6. Test PPPoE dial with HSI config..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/pppoe/dial \
         -d '{"node_id":"node1","user_id":"1001"}' | jq -C . || true
     
     log_info "7. Test PPPoE hangup..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/pppoe/hangup \
         -d '{"node_id":"node1","user_id":"1001"}' | jq -C . || true
     
     log_info "8. Delete HSI configs..."
     test_hsi_delete > /dev/null 2>&1
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1002 > /dev/null 2>&1 || true
     curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1003 > /dev/null 2>&1 || true
     curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1004 > /dev/null 2>&1 || true
@@ -299,13 +299,13 @@ test_hsi_apis() {
 test_autofill() {
     log_info "Testing auto-fill feature..."
     log_info "1. First, create a test HSI config..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
         https://$ENDPOINT:8443/api/config/node1/hsi \
         -d '{"user_id":"1006","vlan_id":"106","account_name":"test-autofill2@example.com","password":"autofillpass","dhcp_addr_pool":"192.168.6.20~192.168.6.200","dhcp_subnet":"255.255.255.0","dhcp_gateway":"192.168.6.1"}' > /dev/null 2>&1
     
     log_info "2. Verify the config was created..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     curl -s -k -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/1006 | jq -C .
     
     log_success "3. Test config created successfully!"
@@ -321,7 +321,7 @@ test_autofill() {
 # Function: Clean up test data
 clean_test_data() {
     log_info "Cleaning up test HSI configs..."
-    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"secret"}' | jq -r .token)
+    TOKEN=$(curl -s -k -X POST https://$ENDPOINT:8443/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' | jq -r .token)
     for id in 1005 1006 2001; do
         curl -s -k -X DELETE -H "Authorization: $TOKEN" https://$ENDPOINT:8443/api/config/node1/hsi/$id > /dev/null 2>&1 || true
     done

@@ -13,6 +13,9 @@ runs:
         node-version: '>=24.10.0'
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
+      with:
+        # Authenticate release downloads to avoid GitHub API anonymous rate limits.
+        repo-token: ${{ github.token }}
     - run: |
         sudo apt update -y && \
         go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \

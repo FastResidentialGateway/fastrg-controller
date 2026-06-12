@@ -25,6 +25,27 @@ spec:
     app: etcd
 
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-loadbalancer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "fastrg-controller.labels" . | nindent 4 }}
+    app: etcd
+  annotations:
+    service.cilium.io/lb-ipam-ips: {{ .Values.global.lbIP | default "auto" | quote }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: etcd
+  ports:
+  - name: client
+    port: {{ .Values.etcd.internal.service.clientPort }}
+    targetPort: {{ .Values.etcd.internal.service.clientPort }}
+    protocol: TCP
+
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -51,11 +72,10 @@ spec:
         ports:
         - name: client
           containerPort: {{ .Values.etcd.internal.service.clientPort }}
-          hostPort: {{ .Values.etcd.internal.service.clientPort }}
+          hostPort: {{ .Values.etcd.internal.service.hostPort }}
           protocol: TCP
         - name: peer
           containerPort: {{ .Values.etcd.internal.service.peerPort }}
-          hostPort: {{ .Values.etcd.internal.service.peerPort }}
           protocol: TCP
         env:
         - name: ETCD_NAME

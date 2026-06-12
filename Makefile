@@ -146,6 +146,14 @@ test:
 	go test -count=1 -v ./internal/utils/
 	@$(MAKE) -C tools test
 
+# DB integration tests (need a throwaway PostgreSQL). Skipped when
+# TEST_DATABASE_URL is unset (see internal/db/*_test.go), so plain `make test`
+# stays runnable without a database. CI points TEST_DATABASE_URL at a disposable
+# postgres service (see .github/workflows/ci.yml) so these always run there.
+test-db:
+	go clean -testcache
+	go test -count=1 -v ./internal/db/
+
 # Test Help
 test-help:
 	@$(MAKE) -C tools help

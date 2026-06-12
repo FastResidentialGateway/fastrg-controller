@@ -18,6 +18,20 @@ jobs:
       run: make build
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fastrg
+          POSTGRES_PASSWORD: fastrg
+          POSTGRES_DB: fastrg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
     - uses: actions/checkout@v6
     - name: Setup build environment
@@ -25,6 +39,10 @@ jobs:
     - name: Run tests
       run: |
         make test
+    - name: Run DB integration tests (throwaway PostgreSQL)
+      env:
+        TEST_DATABASE_URL: postgres://fastrg:fastrg@localhost:5432/fastrg?sslmode=disable
+      run: make test-db
   docker-build:
     runs-on: ubuntu-latest
     steps:
@@ -96,7 +114,7 @@ jobs:
       run: |
         deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-        export ETCD_ENDPOINTS="$HOST_IP:2379"
+        export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
         tools/test_script.sh $HOST_IP run_feature_tests
   k8s-deployment:
@@ -140,6 +158,6 @@ jobs:
       run: |
         deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-        export ETCD_ENDPOINTS="$HOST_IP:2379"
+        export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
         tools/test_script.sh $HOST_IP run_feature_tests

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"fastrg-controller/internal/db"
 	"fastrg-controller/internal/utils"
 	fastrgnodepb "fastrg-controller/proto/fastrgnodepb"
 
@@ -28,6 +29,7 @@ type NodeMonitor struct {
 	grpcConn     *grpc.ClientConn
 	fastrgClient fastrgnodepb.FastrgServiceClient
 	metrics      *NodeMetrics
+	db           *db.DB // Optional: for syncing PPPoE status to database (stateless recovery)
 }
 
 // NodeMetrics holds Prometheus metrics for a node
@@ -75,10 +77,12 @@ type NodeMonitorManager struct {
 	mu       sync.RWMutex
 	monitors map[string]*NodeMonitor
 	metrics  *NodeMetrics
+	db       *db.DB // Optional: for syncing PPPoE status to database
 }
 
-// NewNodeMonitorManager creates a new NodeMonitorManager
-func NewNodeMonitorManager() *NodeMonitorManager {
+// NewNodeMonitorManager creates a new NodeMonitorManager.
+// database parameter is optional (can be nil) for stateless recovery of PPPoE status.
+func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 	metrics := &NodeMetrics{
 		rxPackets: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -375,6 +379,7 @@ func NewNodeMonitorManager() *NodeMonitorManager {
 	return &NodeMonitorManager{
 		monitors: make(map[string]*NodeMonitor),
 		metrics:  metrics,
+		db:       database,
 	}
 }
 
@@ -412,6 +417,7 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 		grpcConn:     conn,
 		fastrgClient: fastrgClient,
 		metrics:      nmm.metrics,
+		db:           nmm.db,
 	}
 
 	// Store monitor
@@ -587,6 +593,23 @@ func (nm *NodeMonitor) getPPPoESessionStats(ctx context.Context) error {
 		nm.metrics.perPPPoESessionRxBytes.WithLabelValues(nm.nodeUUID, fmt.Sprint(hsi.UserId)).Set(float64(hsi.PppoesRxBytes))
 		nm.metrics.perPPPoESessionTxPackets.WithLabelValues(nm.nodeUUID, fmt.Sprint(hsi.UserId)).Set(float64(hsi.PppoesTxPackets))
 		nm.metrics.perPPPoESessionTxBytes.WithLabelValues(nm.nodeUUID, fmt.Sprint(hsi.UserId)).Set(float64(hsi.PppoesTxBytes))
+
+		// Sync PPPoE status to database for stateless recovery
+		if nm.db != nil {
+			userID := fmt.Sprint(hsi.UserId)
+			statusErr := nm.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
+				NodeUUID:     nm.nodeUUID,
+				UserID:       userID,
+				Phase:        hsi.Status,
+				HSIIPv4:      hsi.IpAddr,
+				HSIIPv4GW:    hsi.Gateway,
+				ErrorMessage: "",
+				EventTime:    time.Now().UTC(),
+			})
+			if statusErr != nil {
+				logrus.WithError(statusErr).Debugf("Failed to sync PPPoE status to database for node=%s user=%s", nm.nodeUUID, userID)
+			}
+		}
 	}
 
 	nm.metrics.totalPPPoEDataSessions.WithLabelValues(nm.nodeUUID).Set(float64(totalPPPoEDataSessions))
