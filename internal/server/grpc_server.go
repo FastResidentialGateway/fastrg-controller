@@ -78,6 +78,7 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 		"node_uuid":      req.NodeUuid,
 		"ip":             req.Ip,
 		"version":        req.Version,
+		"location":       req.Location,
 		"registered_at":  time.Now().Unix(),
 		"last_seen_time": time.Now().Unix(),
 		"status":         "active",

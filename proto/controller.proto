@@ -21,6 +21,7 @@ message NodeRegisterRequest {
   string node_uuid = 1;
   string ip = 2;
   string version = 3;
+  string location = 4;
 }
 
 message NodeRegisterReply {
