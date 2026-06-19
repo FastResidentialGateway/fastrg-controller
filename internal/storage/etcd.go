@@ -68,12 +68,17 @@ func (e *EtcdClient) ListConfigs(ctx context.Context) ([]ConfigEvent, int64, err
 // Returns ErrCompacted when the start revision was compacted, nil on ctx
 // cancellation, or the first handler/watch error.
 func (e *EtcdClient) WatchConfigs(ctx context.Context, fromRev int64, handler ConfigEventHandler) error {
+	// Per-call context ensures the etcd watch is cancelled when this call returns,
+	// preventing watch accumulation when the caller restarts the watch in a loop.
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	opts := []clientv3.OpOption{clientv3.WithPrefix()}
 	if fromRev > 0 {
 		opts = append(opts, clientv3.WithRev(fromRev+1))
 	}
 
-	watchChan := e.client.Watch(ctx, "configs/", opts...)
+	watchChan := e.client.Watch(watchCtx, "configs/", opts...)
 	logrus.Infof("Started watching configs/ from revision %d", fromRev)
 
 	for watchResp := range watchChan {

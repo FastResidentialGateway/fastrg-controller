@@ -389,8 +389,12 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 	defer nmm.mu.Unlock()
 
 	// Check if already monitoring this node
-	if _, exists := nmm.monitors[nodeUUID]; exists {
-		logrus.Infof("Already monitoring node %s, restarting...", nodeUUID)
+	if existing, exists := nmm.monitors[nodeUUID]; exists {
+		if existing.nodeIP == nodeIP {
+			// Same node and IP — gRPC connection is still valid, no restart needed.
+			return nil
+		}
+		logrus.Infof("Node %s IP changed %s -> %s, restarting monitoring", nodeUUID, existing.nodeIP, nodeIP)
 		nmm.stopMonitoringLocked(nodeUUID)
 	}
 

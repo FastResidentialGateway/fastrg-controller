@@ -161,10 +161,17 @@ func (p *Projection) sleep(ctx context.Context) {
 // buildRow extracts the queryable columns from an HSI config value and keeps the
 // full value as JSONB.
 func buildRow(node, user string, value []byte, modRevision int64) db.HSIConfigRow {
+	// Guard: an empty or non-JSON value would cause PostgreSQL JSONB to reject
+	// the row ("invalid input syntax for type json"), breaking the entire watch
+	// loop. Store null instead so the projection can advance past the bad key.
+	configJSON := value
+	if len(value) == 0 || !json.Valid(value) {
+		configJSON = []byte("null")
+	}
 	row := db.HSIConfigRow{
 		NodeUUID:     node,
 		UserID:       user,
-		ConfigJSON:   value,
+		ConfigJSON:   configJSON,
 		DesireStatus: "disconnect",
 		ModRevision:  modRevision,
 	}
