@@ -76,7 +76,7 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 	// Prepare node data to be stored
 	nodeData := map[string]interface{}{
 		"node_uuid":      req.NodeUuid,
-		"ip":             req.Ip,
+		"node_ip":        req.Ip,
 		"version":        req.Version,
 		"location":       req.Location,
 		"registered_at":  time.Now().Unix(),
@@ -209,7 +209,7 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 	nodeIP := req.GetIp()
 	if nodeIP == "" {
 		// Try to get IP from existing node data
-		if ip, ok := nodeData["ip"].(string); ok && ip != "" {
+		if ip, ok := nodeData["node_ip"].(string); ok && ip != "" {
 			nodeIP = ip
 		}
 	}
