@@ -174,7 +174,6 @@ export default function NodeCard({node, onNodeUnregistered}){
       <ul>
         {nodeData.location && <li><strong>{t('nodes.location')}:</strong> {nodeData.location}</li>}
         {nodeData.node_ip && <li><strong>{t('nodes.nodeIp')}:</strong> {nodeData.node_ip}</li>}
-        {nodeData.ip && <li><strong>{t('nodes.ip')}:</strong> {nodeData.ip}</li>}
         {nodeData.version && <li><strong>{t('nodes.version')}:</strong> {nodeData.version}</li>}
         {nodeData.host_os && <li><strong>{t('nodes.hostOs')}:</strong> {nodeData.host_os}</li>}
         {nodeData.uptime != null && nodeData.last_seen_time && (() => {
