@@ -70,6 +70,16 @@ type NodeMetrics struct {
 	perPPPoESessionRxBytes          *prometheus.GaugeVec
 	perPPPoESessionTxPackets        *prometheus.GaugeVec
 	perPPPoESessionTxBytes          *prometheus.GaugeVec
+	lcoreBusyCycles                 *prometheus.GaugeVec
+	lcoreTotalCycles                *prometheus.GaugeVec
+	heapTotalBytes                  *prometheus.GaugeVec
+	heapUsedBytes                   *prometheus.GaugeVec
+	heapFreeBytes                   *prometheus.GaugeVec
+	heapLargestFreeBlockBytes       *prometheus.GaugeVec
+	mempoolSize                     *prometheus.GaugeVec
+	mempoolAvailCount               *prometheus.GaugeVec
+	mempoolInUseCount               *prometheus.GaugeVec
+	hugepagePinnedBytes             *prometheus.GaugeVec
 }
 
 // NodeMonitorManager manages all node monitors
@@ -336,6 +346,79 @@ func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 			},
 			[]string{"node_uuid", "user_id"},
 		),
+		// Lcore usage counters are cumulative cycle counts; busyness (%) is derived
+		// at query time via rate(busy_cycles) / rate(total_cycles), matching the
+		// "expose raw counters, let PromQL compute deltas" pattern used for NIC stats.
+		lcoreBusyCycles: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_lcore_busy_cycles_total",
+				Help: "Cumulative busy TSC cycles per lcore (iterations that processed packets/events)",
+			},
+			[]string{"node_uuid", "lcore_id", "role"},
+		),
+		lcoreTotalCycles: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_lcore_total_cycles_total",
+				Help: "Cumulative total TSC cycles per lcore (all polling iterations)",
+			},
+			[]string{"node_uuid", "lcore_id", "role"},
+		),
+		heapTotalBytes: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_heap_total_bytes",
+				Help: "Total DPDK heap size on hugepages per NUMA socket",
+			},
+			[]string{"node_uuid", "socket_id"},
+		),
+		heapUsedBytes: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_heap_used_bytes",
+				Help: "Allocated (in-use) DPDK heap bytes per NUMA socket",
+			},
+			[]string{"node_uuid", "socket_id"},
+		),
+		heapFreeBytes: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_heap_free_bytes",
+				Help: "Free DPDK heap bytes per NUMA socket",
+			},
+			[]string{"node_uuid", "socket_id"},
+		),
+		heapLargestFreeBlockBytes: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_heap_largest_free_block_bytes",
+				Help: "Largest contiguous free block in the DPDK heap per NUMA socket (lower indicates fragmentation)",
+			},
+			[]string{"node_uuid", "socket_id"},
+		),
+		mempoolSize: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_mempool_size",
+				Help: "Total element capacity of a DPDK mempool",
+			},
+			[]string{"node_uuid", "pool"},
+		),
+		mempoolAvailCount: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_mempool_avail_count",
+				Help: "Available (free) element count of a DPDK mempool",
+			},
+			[]string{"node_uuid", "pool"},
+		),
+		mempoolInUseCount: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_mempool_in_use_count",
+				Help: "In-use element count of a DPDK mempool",
+			},
+			[]string{"node_uuid", "pool"},
+		),
+		hugepagePinnedBytes: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "fastrg_node_hugepage_pinned_bytes",
+				Help: "Total hugepage memory locked by DPDK in bytes",
+			},
+			[]string{"node_uuid"},
+		),
 	}
 
 	// Register metrics with Prometheus
@@ -375,6 +458,16 @@ func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 	prometheus.MustRegister(metrics.perPPPoESessionRxBytes)
 	prometheus.MustRegister(metrics.perPPPoESessionTxPackets)
 	prometheus.MustRegister(metrics.perPPPoESessionTxBytes)
+	prometheus.MustRegister(metrics.lcoreBusyCycles)
+	prometheus.MustRegister(metrics.lcoreTotalCycles)
+	prometheus.MustRegister(metrics.heapTotalBytes)
+	prometheus.MustRegister(metrics.heapUsedBytes)
+	prometheus.MustRegister(metrics.heapFreeBytes)
+	prometheus.MustRegister(metrics.heapLargestFreeBlockBytes)
+	prometheus.MustRegister(metrics.mempoolSize)
+	prometheus.MustRegister(metrics.mempoolAvailCount)
+	prometheus.MustRegister(metrics.mempoolInUseCount)
+	prometheus.MustRegister(metrics.hugepagePinnedBytes)
 
 	return &NodeMonitorManager{
 		monitors: make(map[string]*NodeMonitor),
@@ -480,6 +573,20 @@ func (nmm *NodeMonitorManager) deleteNodeMetrics(nodeUUID string) {
 		nmm.metrics.txErrors.DeleteLabelValues(nodeUUID, nicIndex)
 		nmm.metrics.rxDropped.DeleteLabelValues(nodeUUID, nicIndex)
 	}
+
+	// System resource metrics carry dynamic labels (lcore_id, socket_id, pool),
+	// so delete every series matching this node_uuid.
+	nodeMatch := prometheus.Labels{"node_uuid": nodeUUID}
+	nmm.metrics.lcoreBusyCycles.DeletePartialMatch(nodeMatch)
+	nmm.metrics.lcoreTotalCycles.DeletePartialMatch(nodeMatch)
+	nmm.metrics.heapTotalBytes.DeletePartialMatch(nodeMatch)
+	nmm.metrics.heapUsedBytes.DeletePartialMatch(nodeMatch)
+	nmm.metrics.heapFreeBytes.DeletePartialMatch(nodeMatch)
+	nmm.metrics.heapLargestFreeBlockBytes.DeletePartialMatch(nodeMatch)
+	nmm.metrics.mempoolSize.DeletePartialMatch(nodeMatch)
+	nmm.metrics.mempoolAvailCount.DeletePartialMatch(nodeMatch)
+	nmm.metrics.mempoolInUseCount.DeletePartialMatch(nodeMatch)
+	nmm.metrics.hugepagePinnedBytes.DeletePartialMatch(nodeMatch)
 }
 
 // monitorLoop is the main monitoring loop for a node
@@ -505,10 +612,13 @@ func (nm *NodeMonitor) collectMetrics() {
 	ctx, cancel := context.WithTimeout(nm.ctx, 5*time.Second)
 	defer cancel()
 
-	if err := nm.getNicCounter(ctx); err != nil {
-		logrus.WithError(err).Errorf("Failed to get NIC counters from node %s", nm.nodeUUID)
+	sysInfo, err := nm.fastrgClient.GetFastrgSystemStats(ctx, &emptypb.Empty{})
+	if err != nil {
+		logrus.WithError(err).Errorf("Failed to get system stats from node %s", nm.nodeUUID)
 		return
 	}
+	nm.recordNicCounter(sysInfo)
+	nm.recordSystemResourceStats(sysInfo)
 
 	if err := nm.getPPPoESessionStats(ctx); err != nil {
 		logrus.WithError(err).Errorf("Failed to get PPPoE session stats from node %s", nm.nodeUUID)
@@ -521,12 +631,7 @@ func (nm *NodeMonitor) collectMetrics() {
 	}
 }
 
-func (nm *NodeMonitor) getNicCounter(ctx context.Context) error {
-	sysInfo, err := nm.fastrgClient.GetFastrgSystemStats(ctx, &emptypb.Empty{})
-	if err != nil {
-		return err
-	}
-
+func (nm *NodeMonitor) recordNicCounter(sysInfo *fastrgnodepb.FastrgSystemStatsInfo) {
 	for i, stat := range sysInfo.Stats {
 		nicIndex := fmt.Sprintf("%d", i)
 		nm.metrics.rxPackets.WithLabelValues(nm.nodeUUID, nicIndex).Set(float64(stat.RxPackets))
@@ -554,8 +659,33 @@ func (nm *NodeMonitor) getNicCounter(ctx context.Context) error {
 		nm.metrics.unknownUserDropPackets.WithLabelValues(nm.nodeUUID, nicIndex).Set(float64(unknownStat.DroppedPackets))
 		nm.metrics.unknownUserDropBytes.WithLabelValues(nm.nodeUUID, nicIndex).Set(float64(unknownStat.DroppedBytes))
 	}
+}
 
-	return nil
+// recordSystemResourceStats records lcore usage, DPDK heap, mempool and hugepage
+// metrics carried in the same GetFastrgSystemStats response. Lcore cycle counts
+// are cumulative; the busyness ratio is computed downstream in PromQL.
+func (nm *NodeMonitor) recordSystemResourceStats(sysInfo *fastrgnodepb.FastrgSystemStatsInfo) {
+	for _, lu := range sysInfo.LcoreUsage {
+		lcoreID := fmt.Sprintf("%d", lu.LcoreId)
+		nm.metrics.lcoreBusyCycles.WithLabelValues(nm.nodeUUID, lcoreID, lu.Role).Set(float64(lu.BusyCycles))
+		nm.metrics.lcoreTotalCycles.WithLabelValues(nm.nodeUUID, lcoreID, lu.Role).Set(float64(lu.TotalCycles))
+	}
+
+	for _, hs := range sysInfo.HeapStats {
+		socketID := fmt.Sprintf("%d", hs.SocketId)
+		nm.metrics.heapTotalBytes.WithLabelValues(nm.nodeUUID, socketID).Set(float64(hs.TotalBytes))
+		nm.metrics.heapUsedBytes.WithLabelValues(nm.nodeUUID, socketID).Set(float64(hs.UsedBytes))
+		nm.metrics.heapFreeBytes.WithLabelValues(nm.nodeUUID, socketID).Set(float64(hs.FreeBytes))
+		nm.metrics.heapLargestFreeBlockBytes.WithLabelValues(nm.nodeUUID, socketID).Set(float64(hs.LargestFreeBlk))
+	}
+
+	for _, mp := range sysInfo.MempoolStats {
+		nm.metrics.mempoolSize.WithLabelValues(nm.nodeUUID, mp.Name).Set(float64(mp.Size))
+		nm.metrics.mempoolAvailCount.WithLabelValues(nm.nodeUUID, mp.Name).Set(float64(mp.AvailCount))
+		nm.metrics.mempoolInUseCount.WithLabelValues(nm.nodeUUID, mp.Name).Set(float64(mp.InUseCount))
+	}
+
+	nm.metrics.hugepagePinnedBytes.WithLabelValues(nm.nodeUUID).Set(float64(sysInfo.HugepagePinnedBytes))
 }
 
 func (nm *NodeMonitor) getPPPoESessionStats(ctx context.Context) error {
