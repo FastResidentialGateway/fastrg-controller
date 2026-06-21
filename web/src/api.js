@@ -115,6 +115,14 @@ export async function apiUnregisterNode(nodeUuid){
   return resp.data
 }
 
+export async function apiClearInactiveNodes(){
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: token } : {}
+  const resp = await axios.delete('/api/nodes/inactive', { headers })
+  if(resp.status !== 200) throw new Error('failed to clear inactive nodes')
+  return resp.data
+}
+
 // API for HSI configurations
 export async function getHSIUserIds(nodeId){
   const token = localStorage.getItem('token')

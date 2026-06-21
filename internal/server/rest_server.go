@@ -680,6 +680,58 @@ func (r *RestServer) UnregisterNode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Node unregistered successfully"})
 }
 
+// ClearInactiveNodesResponse is returned by the bulk inactive-node cleanup
+type ClearInactiveNodesResponse struct {
+	Message string `json:"message" example:"Inactive nodes cleared"`
+	Deleted int    `json:"deleted" example:"3"`
+}
+
+// ClearInactiveNodes removes every node currently marked inactive
+// @Summary      Clear all inactive nodes
+// @Description  Delete every node whose status is "inactive" (e.g. evicted after heartbeat timeout)
+// @Tags         Nodes
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  ClearInactiveNodesResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /nodes/inactive [delete]
+func (r *RestServer) ClearInactiveNodes(c *gin.Context) {
+	ctx := c.Request.Context()
+	resp, err := r.etcd.Client().Get(ctx, "nodes/", clientv3.WithPrefix())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list nodes"})
+		return
+	}
+
+	deleted := 0
+	for _, kv := range resp.Kvs {
+		var nodeData map[string]interface{}
+		if err := json.Unmarshal(kv.Value, &nodeData); err != nil {
+			logrus.WithError(err).Errorf("Failed to unmarshal node data for key %s", kv.Key)
+			continue
+		}
+
+		if status, _ := nodeData["status"].(string); status != "inactive" {
+			continue
+		}
+
+		if _, err := r.etcd.Client().Delete(ctx, string(kv.Key)); err != nil {
+			logrus.WithError(err).Errorf("Failed to delete inactive node %s", kv.Key)
+			continue
+		}
+
+		// Stop any lingering monitor for this node
+		if nodeUUID, ok := nodeData["node_uuid"].(string); ok && nodeUUID != "" && r.nodeMonitorMgr != nil {
+			r.nodeMonitorMgr.StopMonitoring(nodeUUID)
+		}
+		deleted++
+	}
+
+	logrus.Infof("Cleared %d inactive node(s)", deleted)
+	c.JSON(http.StatusOK, gin.H{"message": "Inactive nodes cleared", "deleted": deleted})
+}
+
 // ===== User Management =====
 
 // UsersListResponse represents the list of users
@@ -2077,6 +2129,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.POST("/logout", r.AuthMiddlewareWithBlacklist(), r.Logout)
 		api.POST("/verify-password", r.AuthMiddlewareWithBlacklist(), r.VerifyPassword)
 		api.GET("/nodes", r.AuthMiddlewareWithBlacklist(), r.ListNodes)
+		api.DELETE("/nodes/inactive", r.AuthMiddlewareWithBlacklist(), r.ClearInactiveNodes)
 		api.DELETE("/nodes/:uuid", r.AuthMiddlewareWithBlacklist(), r.UnregisterNode)
 		api.GET("/nodes/:nodeId/subscriber-count", r.AuthMiddlewareWithBlacklist(), r.GetNodeSubscriberCount)
 		api.PUT("/nodes/:nodeId/subscriber-count", r.AuthMiddlewareWithBlacklist(), r.UpdateNodeSubscriberCount)
