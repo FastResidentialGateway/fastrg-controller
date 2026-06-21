@@ -107,10 +107,11 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 
 	logrus.Infof("Node registered successfully: UUID=%s, IP=%s, Version=%s", req.NodeUuid, req.Ip, req.Version)
 
-	// Start monitoring the node
+	// Start monitoring the node; always fetch NIC model since the node itself restarted.
 	if err := s.nodeMonitorMgr.StartMonitoring(req.NodeUuid, req.Ip); err != nil {
 		logrus.WithError(err).Warnf("Failed to start monitoring node %s", req.NodeUuid)
-		// Don't fail the registration if monitoring fails
+	} else {
+		go s.nodeMonitorMgr.FetchInitialNicModel(req.NodeUuid, s.etcd)
 	}
 
 	return &controllerpb.NodeRegisterReply{
@@ -217,6 +218,12 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 		if err := s.nodeMonitorMgr.StartMonitoring(req.GetNodeUuid(), nodeIP); err != nil {
 			logrus.WithError(err).Warnf("Failed to start monitoring for node %s", req.GetNodeUuid())
 		}
+	}
+
+	// If nic_model_wan is absent (e.g. first heartbeat after controller restart),
+	// fetch it now rather than waiting for the next RegisterNode.
+	if _, ok := nodeData["nic_model_wan"]; !ok {
+		go s.nodeMonitorMgr.FetchInitialNicModel(req.GetNodeUuid(), s.etcd)
 	}
 
 	return &emptypb.Empty{}, nil

@@ -176,6 +176,15 @@ export default function NodeCard({node, onNodeUnregistered}){
         {nodeData.node_ip && <li><strong>{t('nodes.nodeIp')}:</strong> {nodeData.node_ip}</li>}
         {nodeData.version && <li><strong>{t('nodes.version')}:</strong> {nodeData.version}</li>}
         {nodeData.host_os && <li><strong>{t('nodes.hostOs')}:</strong> {nodeData.host_os}</li>}
+        {(nodeData.nic_model_wan || nodeData.nic_model_lan) && (
+          <li>
+            <strong>{t('nodes.nicModel')}:</strong>
+            <ul style={{ margin: '2px 0 0 0', paddingLeft: '16px' }}>
+              {nodeData.nic_model_wan && <li>WAN: {nodeData.nic_model_wan}</li>}
+              {nodeData.nic_model_lan && <li>LAN: {nodeData.nic_model_lan}</li>}
+            </ul>
+          </li>
+        )}
         {nodeData.uptime != null && nodeData.last_seen_time && (() => {
           const bootTime = new Date((Number(nodeData.last_seen_time) - Number(nodeData.uptime)) * 1000)
           const pad = n => String(n).padStart(2, '0')
