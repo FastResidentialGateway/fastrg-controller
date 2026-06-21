@@ -24,6 +24,8 @@ export default function NodeCard({node, onNodeUnregistered}){
     }
   }
 
+  const isInactive = nodeData.status === 'inactive';
+
   const handleUnregister = async () => {
     const nodeUuid = nodeData.uuid || nodeData.node_uuid;
     if (!nodeUuid) {
@@ -120,9 +122,24 @@ export default function NodeCard({node, onNodeUnregistered}){
 
   return (
     <>
-      <div className="node-card">
+      <div className="node-card" style={isInactive ? { opacity: 0.6, borderLeft: '4px solid #dc3545' } : undefined}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3>{nodeData.uuid || nodeData.node_uuid || node.key || 'unknown'}</h3>
+        <h3>
+          {nodeData.uuid || nodeData.node_uuid || node.key || 'unknown'}
+          {isInactive && (
+            <span style={{
+              marginLeft: '8px',
+              backgroundColor: '#dc3545',
+              color: 'white',
+              borderRadius: '4px',
+              padding: '2px 6px',
+              fontSize: '11px',
+              verticalAlign: 'middle'
+            }}>
+              {t('nodes.statusInactive')}
+            </span>
+          )}
+        </h3>
         <button 
           onClick={handleUnregister}
           style={{
@@ -197,7 +214,14 @@ export default function NodeCard({node, onNodeUnregistered}){
         {nodeData.registered_at && (
           <li><strong>{t('nodes.registered')}:</strong> {new Date(Number(nodeData.registered_at) * 1000).toLocaleString()}</li>
         )}
-        {nodeData.status && <li><strong>{t('nodes.status')}:</strong> {nodeData.status}</li>}
+        {nodeData.status && (
+          <li>
+            <strong>{t('nodes.status')}:</strong>{' '}
+            <span style={isInactive ? { color: '#dc3545', fontWeight: 'bold' } : { color: '#28a745', fontWeight: 'bold' }}>
+              {nodeData.status}
+            </span>
+          </li>
+        )}
       </ul>
     </div>
 

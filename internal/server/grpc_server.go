@@ -282,7 +282,13 @@ func (s *GrpcServer) checkAndUnregisterStaleNodes() {
 		timeSinceLastSeen := currentTime - int64(lastSeenTime)
 
 		if timeSinceLastSeen > HeartbeatTimeout {
-			// Node is stale, unregister it
+			// Already marked inactive in a previous cycle; skip so we don't
+			// repeatedly re-mark and re-log the same node every CheckInterval.
+			if status, _ := nodeData["status"].(string); status == "inactive" {
+				continue
+			}
+
+			// Node is stale, mark it inactive
 			nodeUUID := nodeData["node_uuid"]
 			if nodeUUID == nil {
 				// Try to extract from key
@@ -292,29 +298,36 @@ func (s *GrpcServer) checkAndUnregisterStaleNodes() {
 				}
 			}
 
-			logrus.Infof("Node %v is stale (last seen %d seconds ago), unregistering...", nodeUUID, timeSinceLastSeen)
+			logrus.Infof("Node %v is stale (last seen %d seconds ago), marking inactive...", nodeUUID, timeSinceLastSeen)
 
 			// Stop monitoring the node
 			s.nodeMonitorMgr.StopMonitoring(fmt.Sprintf("%v", nodeUUID))
 
-			// Update status to inactive before deletion (for audit trail)
+			// Mark the node inactive (a recovering node's Heartbeat will flip it
+			// back to "active"); keep the entry in etcd for audit/visibility.
 			nodeData["status"] = "inactive"
-			nodeData["unregistered_at"] = currentTime
-			nodeData["unregister_reason"] = "heartbeat_timeout"
+			nodeData["inactive_at"] = currentTime
+			nodeData["inactive_reason"] = "heartbeat_timeout"
 
-			// Delete the node from etcd
-			_, err = s.etcd.Client().Delete(ctx, string(kv.Key))
+			updatedNodeDataJSON, err := json.Marshal(nodeData)
 			if err != nil {
-				logrus.WithError(err).Errorf("Failed to delete stale node %v", nodeUUID)
+				logrus.WithError(err).Errorf("Failed to marshal inactive node %v", nodeUUID)
+				continue
+			}
+
+			// Persist the inactive status back to etcd
+			_, err = s.etcd.Client().Put(ctx, string(kv.Key), string(updatedNodeDataJSON))
+			if err != nil {
+				logrus.WithError(err).Errorf("Failed to mark stale node %v inactive", nodeUUID)
 			} else {
-				logrus.Infof("Successfully unregistered stale node: %v", nodeUUID)
+				logrus.Infof("Marked stale node inactive: %v", nodeUUID)
 				staleCount++
 			}
 		}
 	}
 
 	if staleCount > 0 {
-		logrus.Infof("Unregistered %d stale node(s) in this check cycle", staleCount)
+		logrus.Infof("Marked %d stale node(s) inactive in this check cycle", staleCount)
 	}
 }
 
