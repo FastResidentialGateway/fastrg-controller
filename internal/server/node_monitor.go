@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/storage"
 	"fastrg-controller/internal/utils"
 	fastrgnodepb "fastrg-controller/proto/fastrgnodepb"
 
@@ -476,7 +478,8 @@ func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 	}
 }
 
-// StartMonitoring starts monitoring a node
+// StartMonitoring starts monitoring a node. No-ops when monitoring is already
+// active for this node at the same IP.
 func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 	nmm.mu.Lock()
 	defer nmm.mu.Unlock()
@@ -686,6 +689,108 @@ func (nm *NodeMonitor) recordSystemResourceStats(sysInfo *fastrgnodepb.FastrgSys
 	}
 
 	nm.metrics.hugepagePinnedBytes.WithLabelValues(nm.nodeUUID).Set(float64(sysInfo.HugepagePinnedBytes))
+}
+
+// FetchInitialNicModel dials the registered node once to retrieve NIC model info
+// (nics[0]=WAN, nics[1]=LAN) and persists it into etcd. Called as a goroutine
+// after StartMonitoring so RegisterNode is not blocked.
+// If the gRPC call or etcd write ultimately fails after retries, "unknown" is stored.
+func (nmm *NodeMonitorManager) FetchInitialNicModel(nodeUUID string, etcd *storage.EtcdClient) {
+	if etcd == nil {
+		return
+	}
+
+	// Node gRPC server (port 50052) may not be ready immediately after RegisterNode.
+	const grpcMaxRetries = 5
+	const grpcRetryDelay = 3 * time.Second
+
+	var sysInfo *fastrgnodepb.FastrgSystemStatsInfo
+	for attempt := range grpcMaxRetries {
+		nmm.mu.RLock()
+		monitor, exists := nmm.monitors[nodeUUID]
+		nmm.mu.RUnlock()
+		if !exists {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var err error
+		sysInfo, err = monitor.fastrgClient.GetFastrgSystemStats(ctx, &emptypb.Empty{})
+		cancel()
+		if err == nil {
+			break
+		}
+		logrus.WithError(err).Warnf("FetchInitialNicModel: gRPC attempt %d/%d failed for node %s", attempt+1, grpcMaxRetries, nodeUUID)
+		if attempt < grpcMaxRetries-1 {
+			time.Sleep(grpcRetryDelay)
+		}
+	}
+
+	// Extract WAN (nics[0]) and LAN (nics[1]) model names.
+	wanModel := "unknown"
+	lanModel := "unknown"
+	if sysInfo != nil {
+		if len(sysInfo.Nics) > 0 && sysInfo.Nics[0].NicModel != "" {
+			wanModel = sysInfo.Nics[0].NicModel
+		}
+		if len(sysInfo.Nics) > 1 && sysInfo.Nics[1].NicModel != "" {
+			lanModel = sysInfo.Nics[1].NicModel
+		}
+	}
+
+	if err := nmm.writeNicModelsToEtcd(etcd, nodeUUID, wanModel, lanModel); err != nil {
+		logrus.WithError(err).Warnf("FetchInitialNicModel: etcd write failed for node %s, storing unknown", nodeUUID)
+		if err2 := nmm.writeNicModelsToEtcd(etcd, nodeUUID, "unknown", "unknown"); err2 != nil {
+			logrus.WithError(err2).Errorf("FetchInitialNicModel: failed to store fallback unknown for node %s", nodeUUID)
+		}
+	}
+}
+
+// writeNicModelsToEtcd updates nic_model_wan and nic_model_lan in the node's etcd
+// entry, retrying up to 3 times on transient failures.
+func (nmm *NodeMonitorManager) writeNicModelsToEtcd(etcd *storage.EtcdClient, nodeUUID, wanModel, lanModel string) error {
+	const maxRetries = 3
+	const retryDelay = 2 * time.Second
+
+	var lastErr error
+	for attempt := range maxRetries {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		lastErr = nmm.doWriteNicModels(ctx, etcd, nodeUUID, wanModel, lanModel)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		logrus.WithError(lastErr).Warnf("writeNicModelsToEtcd: attempt %d/%d failed for node %s", attempt+1, maxRetries, nodeUUID)
+		if attempt < maxRetries-1 {
+			time.Sleep(retryDelay)
+		}
+	}
+	return lastErr
+}
+
+func (nmm *NodeMonitorManager) doWriteNicModels(ctx context.Context, etcd *storage.EtcdClient, nodeUUID, wanModel, lanModel string) error {
+	etcdKey := fmt.Sprintf("nodes/%s", nodeUUID)
+	resp, err := etcd.Client().Get(ctx, etcdKey)
+	if err != nil {
+		return err
+	}
+	if len(resp.Kvs) == 0 {
+		return fmt.Errorf("node %s not found in etcd", nodeUUID)
+	}
+
+	var nodeData map[string]interface{}
+	if err := json.Unmarshal(resp.Kvs[0].Value, &nodeData); err != nil {
+		return err
+	}
+	nodeData["nic_model_wan"] = wanModel
+	nodeData["nic_model_lan"] = lanModel
+
+	updated, err := json.Marshal(nodeData)
+	if err != nil {
+		return err
+	}
+	_, err = etcd.Client().Put(ctx, etcdKey, string(updated))
+	return err
 }
 
 func (nm *NodeMonitor) getPPPoESessionStats(ctx context.Context) error {
