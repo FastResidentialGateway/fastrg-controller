@@ -117,29 +117,60 @@ spec:
       labels:
         app: fastrg-controller
     spec:
+      serviceAccountName: {{ include "fastrg-controller.serviceAccountName" . }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      affinity:
+        # Soft anti-affinity: prefer spreading the replicas across nodes, but
+        # still schedule on clusters with fewer nodes than replicas.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: fastrg-controller
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: fastrg-controller
         image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         ports:
         - containerPort: {{ .Values.controller.service.httpsPort }}
-          hostPort: {{ .Values.controller.service.httpsPort }}
           name: https
         - containerPort: {{ .Values.controller.service.logHttpsPort }}
-          hostPort: {{ .Values.controller.service.logHttpsPort }}
           name: log-https
         - containerPort: {{ .Values.controller.service.httpPort }}
-          hostPort: {{ .Values.controller.service.httpPort }}
           name: http
         - containerPort: {{ .Values.controller.service.grpcPort }}
-          hostPort: {{ .Values.controller.service.grpcPort }}
           name: grpc
           protocol: TCP
         - containerPort: {{ .Values.controller.service.prometheusPort }}
-          hostPort: {{ .Values.controller.service.prometheusPort }}
           name: prometheus
           protocol: TCP
         env:
+        # Leader election identity (downward API): only the lease holder runs
+        # the singleton background workers (projection / stale eviction /
+        # per-node scraping); all replicas serve REST/gRPC + the Kafka consumer.
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: ETCD_ENDPOINTS
           value: {{- if eq .Values.etcd.type "internal" }} "etcd-endpoint:2379" {{- else }} "{{- range $index, $endpoint := .Values.etcd.external.endpoints }}{{- if $index }},{{- end }}{{ $endpoint.ip }}:{{ $endpoint.port }}{{- end }}" {{- end }}
         - name: CERT_FILE

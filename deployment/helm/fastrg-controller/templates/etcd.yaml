@@ -72,7 +72,6 @@ spec:
         ports:
         - name: client
           containerPort: {{ .Values.etcd.internal.service.clientPort }}
-          hostPort: {{ .Values.etcd.internal.service.hostPort }}
           protocol: TCP
         - name: peer
           containerPort: {{ .Values.etcd.internal.service.peerPort }}
