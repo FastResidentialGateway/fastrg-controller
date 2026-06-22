@@ -9,10 +9,10 @@ keywords:
   - router
   - gateway
   - controller
-home: https://github.com/w180112/fastrg-controller
+home: https://github.com/FastResidentialGateway/fastrg-controller
 sources:
-  - https://github.com/w180112/fastrg-controller
+  - https://github.com/FastResidentialGateway/fastrg-controller
 maintainers:
   - name: FastRG Team
-    email: support@fastrg.io
+    email: w180112@gmail.com
 dependencies: []
