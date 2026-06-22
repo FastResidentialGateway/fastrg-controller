@@ -1,35 +1,45 @@
 # FastRG Controller Kubernetes Deployment
 
-This directory contains Kubernetes deployment configurations for FastRG Controller, including native YAML files and Helm Charts.
+This directory contains Kubernetes deployment configurations for FastRG
+Controller. There are **three** ways to deploy, picked by environment:
+
+| Path | Topology | Use it for |
+|------|----------|-----------|
+| [`quickstart_k8s/`](quickstart_k8s/) | single-node **kind**, all backends internal, **1 replica**, `hostPort` | local dev / demo / CI |
+| [`k8s/`](k8s/) | **HA** plain YAML: **3 replicas**, no hostPort, etcd/PostgreSQL/Kafka **external** | production (raw manifests) |
+| [`helm/fastrg-controller/`](helm/fastrg-controller/) | same **HA** topology as `k8s/`, packaged | production (Helm) |
+
+The two HA paths run **only the stateless controller** in the cluster; etcd,
+PostgreSQL and Kafka live outside it. Only the etcd-elected leader replica runs
+the singleton background workers (projection / stale-node eviction / per-node
+scraping); see [`k8s/README.md`](k8s/README.md).
 
 ## Directory Structure
 
 ```
 deployment/
-├── k8s/                              # Native Kubernetes YAML files
-│   ├── deploy.sh                     # Deployment script (quick start)
-│   ├── undeploy.sh                   # Cleanup script
-│   ├── test-env.sh                   # Kind test environment management
-│   ├── kind-config.yml               # Kind cluster configuration (extraPortMappings)
-│   ├── etcd-internal.yml             # etcd StatefulSet + Services (internal)
-│   ├── etcd-external.yml             # etcd external endpoint (Service + Endpoints)
-│   ├── postgresql-internal.yml       # PostgreSQL StatefulSet + Service (internal)
-│   ├── postgresql-external.yml       # PostgreSQL external endpoint (Service + Endpoints)
-│   ├── kafka-internal.yml            # Kafka StatefulSet + Services (internal, KRaft mode)
-│   ├── kafka-external.yml            # Kafka external endpoint (Service + Endpoints)
-│   └── fastrg_controller.yml         # FastRG Controller Deployment + Service
-└── helm/                             # Helm Chart
+├── quickstart_k8s/                   # Kind quickstart (single replica, all-internal, hostPort)
+│   ├── deploy.sh / undeploy.sh / test-env.sh
+│   ├── kind-config.yml               # Kind cluster (extraPortMappings)
+│   ├── {etcd,postgresql,kafka}-{internal,external}.yml
+│   ├── ingress.yml                   # LoadBalancer (Cilium)
+│   └── fastrg_controller.yml         # Controller Deployment + Service (1 replica)
+├── k8s/                              # HA plain YAML (3 replicas, external backends)
+│   ├── deploy.sh / undeploy.sh
+│   ├── namespace.yml / rbac.yml
+│   ├── controller.yml                # Deployment (3 replicas, no hostPort) + ClusterIP service
+│   ├── controller-loadbalancer.yml   # External LoadBalancer
+│   ├── controller-pdb.yml            # PodDisruptionBudget
+│   ├── {etcd,postgresql,kafka}-external.yml   # external Service + Endpoints
+│   ├── cilium-lb-pool.yml            # optional Cilium LB-IPAM
+│   └── README.md
+└── helm/                             # Helm Chart (HA defaults)
     └── fastrg-controller/
-        ├── Chart.yaml                # Chart metadata
-        ├── values.yaml               # Default configuration values
+        ├── Chart.yaml / values.yaml
         └── templates/
-            ├── _helpers.tpl          # Helm helper functions
-            ├── namespace.yaml        # Namespace definition
-            ├── etcd.yaml             # etcd resources (internal/external)
-            ├── postgresql.yaml       # PostgreSQL resources (internal/external)
-            ├── kafka.yaml            # Kafka resources (internal/external)
-            ├── controller.yaml       # Controller Deployment + Services
-            ├── rbac.yaml             # RBAC configuration
+            ├── _helpers.tpl / namespace.yaml / rbac.yaml
+            ├── etcd.yaml / postgresql.yaml / kafka.yaml   # internal/external
+            ├── controller.yaml       # Deployment (3 replicas) + Services
             └── extras.yaml           # PDB and HPA
 ```
 
