@@ -30,7 +30,7 @@ import (
 // @termsOfService  http://swagger.io/terms/
 
 // @contact.name   API Support
-// @contact.url    https://github.com/w180112/fastrg-controller
+// @contact.url    https://github.com/FastResidentialGateway/fastrg-controller
 // @contact.email  w180112@gmail.com
 
 // @license.name  BSD-3
