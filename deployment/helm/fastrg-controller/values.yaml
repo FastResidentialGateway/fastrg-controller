@@ -13,7 +13,12 @@ global:
 
 # FastRG Controller configuration
 controller:
-  replicaCount: 3
+  # NOTE: containers below declare hostPort (8443/8444/8080/50051/55688).
+  # A hostPort can only be bound by one pod per node, so replicaCount must not
+  # exceed the number of cluster nodes (single-node kind in CI => 1). Running
+  # more replicas than nodes leaves the extras stuck Pending (FailedScheduling),
+  # which prevents the Deployment from ever reaching condition=available.
+  replicaCount: 1
   
   image:
     repository: fastrg-controller
