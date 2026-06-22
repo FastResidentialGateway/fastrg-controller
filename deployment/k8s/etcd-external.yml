@@ -1,0 +1,33 @@
+# External etcd (runs OUTSIDE the cluster, e.g. on a dedicated data host).
+# The controller always dials the stable in-cluster name `etcd-endpoint`; only
+# this Service+Endpoints pair changes between internal/external deployments.
+# Replace the IP below with your etcd host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-endpoint
+  namespace: fastrg-system
+  labels:
+    app: etcd
+spec:
+  type: ClusterIP
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+    protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: etcd-endpoint
+  namespace: fastrg-system
+  labels:
+    app: etcd
+subsets:
+- addresses:
+  - ip: 192.168.10.215   # <-- external etcd host
+  ports:
+  - name: client
+    port: 2379
+    protocol: TCP

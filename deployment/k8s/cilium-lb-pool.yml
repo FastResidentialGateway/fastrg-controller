@@ -1,0 +1,26 @@
+# OPTIONAL — only when using Cilium LB-IPAM for the LoadBalancer VIP.
+# Skip this file if your cluster uses MetalLB or a cloud LoadBalancer.
+#
+# Adjust the CIDR/range to the address block Cilium may hand out on your L2
+# network, then ensure L2 announcement (or BGP) is configured for it.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: fastrg-lb-pool
+spec:
+  allowFirstLastIPs: "Yes"
+  blocks:
+  # Replace with your reserved LoadBalancer address range/block.
+  - cidr: 192.168.10.240/29
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: fastrg-l2
+spec:
+  nodeSelector: {}
+  loadBalancerIPs: true
+  externalIPs: true
+  # Replace with the node network interface that should answer ARP for the VIP.
+  interfaces:
+  - eth0

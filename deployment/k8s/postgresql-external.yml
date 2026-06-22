@@ -1,0 +1,32 @@
+# External PostgreSQL (runs OUTSIDE the cluster, e.g. on a dedicated data host).
+# The controller dials the stable in-cluster name `postgresql-endpoint`
+# (see DATABASE_URL in controller.yml). Replace the IP below with your DB host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-endpoint
+  namespace: fastrg-system
+  labels:
+    app: postgresql
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+    protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgresql-endpoint
+  namespace: fastrg-system
+  labels:
+    app: postgresql
+subsets:
+- addresses:
+  - ip: 192.168.10.215   # <-- external PostgreSQL host
+  ports:
+  - name: postgres
+    port: 5432
+    protocol: TCP

@@ -1,0 +1,15 @@
+# Keep at least 2 of the 3 controller replicas available during voluntary
+# disruptions (node drains, rollouts), so the leader-elected background workers
+# always have a candidate to fail over to.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fastrg-controller-pdb
+  namespace: fastrg-system
+  labels:
+    app: fastrg-controller
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: fastrg-controller

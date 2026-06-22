@@ -1,0 +1,138 @@
+# FastRG Controller — HA deployment (stateless, 3 replicas).
+#
+# Differences from deployment/quickstart_k8s/fastrg_controller.yml:
+#   - 3 replicas instead of 1
+#   - NO hostPort (replicas are decoupled from nodes; reachability is via the
+#     ClusterIP service below and the LoadBalancer in controller-loadbalancer.yml)
+#   - runs as the fastrg-controller-sa ServiceAccount (see rbac.yml) so it can
+#     hold the leader-election Lease
+#   - POD_NAME / POD_NAMESPACE injected via the downward API for leader election
+#   - soft pod anti-affinity to spread replicas across nodes
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastrg-controller
+  namespace: fastrg-system
+  labels:
+    app: fastrg-controller
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fastrg-controller
+  template:
+    metadata:
+      labels:
+        app: fastrg-controller
+    spec:
+      serviceAccountName: fastrg-controller-sa
+      affinity:
+        podAntiAffinity:
+          # Prefer (not require) spreading replicas across nodes. Soft so the
+          # Deployment still schedules on clusters with fewer nodes than replicas.
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: fastrg-controller
+      containers:
+      - name: fastrg-controller
+        # Replace with your registry image; the kind quickstart loads a local
+        # image, but a real cluster must pull from a registry.
+        image: fastrg-controller:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8443
+          name: https
+        - containerPort: 8444
+          name: log-https
+        - containerPort: 8080
+          name: http
+        - containerPort: 50051
+          name: grpc
+          protocol: TCP
+        - containerPort: 55688
+          name: prometheus
+          protocol: TCP
+        env:
+        # --- Leader election identity (downward API) ---
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # --- Backends (all external, resolved via the *-endpoint services) ---
+        - name: ETCD_ENDPOINTS
+          value: "etcd-endpoint:2379"
+        - name: DATABASE_URL
+          value: "postgres://fastrg:fastrg@postgresql-endpoint:5432/fastrg?sslmode=disable"
+        - name: KAFKA_BROKERS
+          value: "kafka-endpoint:9092"
+        - name: KAFKA_TOPIC
+          value: "fastrg.node.events"
+        - name: KAFKA_GROUP
+          value: "fastrg-controller"
+        # --- TLS / misc ---
+        - name: CERT_FILE
+          value: "/app/certs/server.crt"
+        - name: KEY_FILE
+          value: "/app/certs/server.key"
+        - name: PROMETHEUS_LISTEN_IP
+          value: "0.0.0.0"
+        readinessProbe:
+          tcpSocket:
+            port: 8443
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8443
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+# Internal ClusterIP service: in-cluster reachability + Prometheus scrape target.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastrg-controller-service
+  namespace: fastrg-system
+  labels:
+    app: fastrg-controller
+spec:
+  type: ClusterIP
+  selector:
+    app: fastrg-controller
+  ports:
+  - name: https
+    port: 8443
+    targetPort: 8443
+  - name: log-https
+    port: 8444
+    targetPort: 8444
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: grpc
+    port: 50051
+    targetPort: 50051
+    protocol: TCP
+  - name: prometheus
+    port: 55688
+    targetPort: 55688
+    protocol: TCP
