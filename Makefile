@@ -190,26 +190,26 @@ docker-clean:
 # Deploy using native Kubernetes YAML
 k8s-deploy:
 	@echo "Deploying with native Kubernetes YAML..."
-	deployment/k8s/deploy.sh --etcd-type internal -n fastrg-system --install-cilium 
+	deployment/quickstart_k8s/deploy.sh --etcd-type internal -n fastrg-system --install-cilium 
 
 # Delete Kubernetes resources
 k8s-delete:
 	@echo "Deleting Kubernetes resources..."
-	deployment/k8s/undeploy.sh --etcd-type internal -n fastrg-system
+	deployment/quickstart_k8s/undeploy.sh --etcd-type internal -n fastrg-system
 	@echo "Resources deleted"
 
 k8s-create-test-env:
 	@echo "Deploying test environment with native Kubernetes YAML..."
-	deployment/k8s/test-env.sh create --name fastrg-cluster
+	deployment/quickstart_k8s/test-env.sh create --name fastrg-cluster
 
 k8s-delete-test-env:
 	@echo "Deleting test environment Kubernetes resources..."
-	deployment/k8s/test-env.sh delete --name fastrg-cluster
+	deployment/quickstart_k8s/test-env.sh delete --name fastrg-cluster
 
 # Install using Helm chart
 helm-install:
 	@echo "Installing FastRG Controller using Helm..."
-	deployment/k8s/deploy.sh -n fastrg-system --cilium-only
+	deployment/quickstart_k8s/deploy.sh -n fastrg-system --cilium-only
 	helm install fastrg-controller deployment/helm/fastrg-controller/
 # To use external etcd, uncomment the following lines and comment the above line
 #helm install fastrg-controller deployment/helm/fastrg-controller/ \
@@ -228,7 +228,7 @@ helm-upgrade:
 helm-uninstall:
 	@echo "Uninstalling FastRG Controller Helm release..."
 	helm uninstall fastrg-controller
-	deployment/k8s/undeploy.sh -y --cilium-only
+	deployment/quickstart_k8s/undeploy.sh -y --cilium-only
 	@echo "Uninstallation complete"
 
 # Helm template (dry run)

@@ -127,9 +127,10 @@ stable `JWT_SECRET`.
 
 ## 7. Option B — Kubernetes
 
-The controller manifests are in `deployment/k8s/` (plain) and
-`deployment/helm/fastrg-controller/` (Helm). They already include **optional**
-`DATABASE_URL` / `KAFKA_*` env wiring — uncomment (k8s) or set values (Helm):
+The controller manifests are in `deployment/quickstart_k8s/` (plain, single-node
+kind quickstart) and `deployment/helm/fastrg-controller/` (Helm). They already
+include **optional** `DATABASE_URL` / `KAFKA_*` env wiring — uncomment (k8s) or
+set values (Helm):
 
 ```yaml
 # deployment/helm/fastrg-controller/values.yaml

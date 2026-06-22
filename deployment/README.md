@@ -92,7 +92,7 @@ make k8s-create-test-env
 make k8s-deploy
 
 # 3. Run connectivity tests only (after deployment)
-deployment/k8s/deploy.sh --test-only -n fastrg-system
+deployment/quickstart_k8s/deploy.sh --test-only -n fastrg-system
 ```
 
 #### fastrg-node `config.cfg`
@@ -273,7 +273,7 @@ kubectl exec -n fastrg-system etcd-0 -- etcdctl endpoint health
 kubectl get svc -n fastrg-system
 
 # Re-run connectivity tests
-deployment/k8s/deploy.sh --test-only -n fastrg-system
+deployment/quickstart_k8s/deploy.sh --test-only -n fastrg-system
 
 # etcd backup
 kubectl exec -n fastrg-system etcd-0 -- \

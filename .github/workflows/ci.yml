@@ -112,7 +112,7 @@ jobs:
         sleep 30
     - name: Verify deployment
       run: |
-        deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
+        deployment/quickstart_k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
         export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
@@ -156,7 +156,7 @@ jobs:
         sleep 30
     - name: Verify deployment
       run: |
-        deployment/k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
+        deployment/quickstart_k8s/deploy.sh --test-only || echo "⚠️ Service tests failed, but deployment completed"
         HOST_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
         export ETCD_ENDPOINTS="$HOST_IP:2378"
         echo "ETCD_ENDPOINTS is set to $ETCD_ENDPOINTS"
