@@ -52,7 +52,7 @@ render() {
 echo ">> Namespace"
 render namespace.yml | sed "s/name: fastrg-system/name: ${NAMESPACE}/g" | kubectl apply -f -
 
-echo ">> RBAC (ServiceAccount + Role[leases] + RoleBinding)"
+echo ">> RBAC (ServiceAccount + Role + RoleBinding)"
 render rbac.yml | kubectl apply -f -
 
 echo ">> External backend endpoints (etcd / PostgreSQL / Kafka)"

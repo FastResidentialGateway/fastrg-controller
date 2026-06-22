@@ -1,10 +1,9 @@
 # ServiceAccount + Role + RoleBinding for the FastRG Controller.
 #
-# The leases permission is required for HA leader election: with replicaCount > 1
-# all controller pods serve REST/gRPC, but only the lease holder runs the
-# singleton background workers (etcd->PostgreSQL projection, stale-node eviction,
-# per-node stats scraping). Without this the controller cannot create/renew its
-# coordination.k8s.io Lease and leader election fails closed.
+# HA leader election uses etcd (not a Kubernetes Lease), so NO coordination
+# permissions are needed: with replicaCount > 1 all pods serve REST/gRPC, but
+# only the etcd-elected leader runs the singleton background workers
+# (etcd->PostgreSQL projection, stale-node eviction, per-node stats scraping).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,11 +20,7 @@ metadata:
   labels:
     app.kubernetes.io/name: fastrg-controller
 rules:
-  # Leader election lease (single Lease object in this namespace).
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Read-only access used by the existing helpers.
+  # Read-only access (parity with the Helm chart Role).
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     verbs: ["get", "list", "watch"]

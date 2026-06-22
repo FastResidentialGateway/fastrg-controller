@@ -26,7 +26,7 @@ touches `*-external.yml`, never the Deployment.
 | File | Purpose |
 |------|---------|
 | `namespace.yml` | `fastrg-system` namespace |
-| `rbac.yml` | ServiceAccount + Role (**leases** for leader election) + RoleBinding |
+| `rbac.yml` | ServiceAccount + Role (read-only, parity with Helm) + RoleBinding |
 | `etcd-external.yml` / `postgresql-external.yml` / `kafka-external.yml` | external backend Service+Endpoints |
 | `controller.yml` | Deployment (3 replicas, no hostPort, anti-affinity, downward API) + ClusterIP service |
 | `controller-loadbalancer.yml` | external LoadBalancer (provider-agnostic) |
@@ -38,10 +38,10 @@ touches `*-external.yml`, never the Deployment.
 
 All 3 replicas serve REST/gRPC. The singleton background workers
 (etcd→PostgreSQL projection, stale-node eviction, per-node stats scraping) run
-**only on the lease holder**; the Kafka consumer runs on every replica (one
-consumer group balances partitions). This is why `rbac.yml` grants
-`coordination.k8s.io/leases` and `controller.yml` injects `POD_NAME` /
-`POD_NAMESPACE`.
+**only on the elected leader**; the Kafka consumer runs on every replica (one
+consumer group balances partitions). Leadership is elected via **etcd** (the
+controller already depends on etcd), so no Kubernetes Lease / RBAC is involved;
+`controller.yml` injects `POD_NAME` as the election identity.
 
 ## Before deploying
 

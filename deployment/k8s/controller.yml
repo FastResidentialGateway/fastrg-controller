@@ -4,9 +4,8 @@
 #   - 3 replicas instead of 1
 #   - NO hostPort (replicas are decoupled from nodes; reachability is via the
 #     ClusterIP service below and the LoadBalancer in controller-loadbalancer.yml)
-#   - runs as the fastrg-controller-sa ServiceAccount (see rbac.yml) so it can
-#     hold the leader-election Lease
-#   - POD_NAME / POD_NAMESPACE injected via the downward API for leader election
+#   - runs as the fastrg-controller-sa ServiceAccount (see rbac.yml)
+#   - POD_NAME injected via the downward API as the etcd leader-election identity
 #   - soft pod anti-affinity to spread replicas across nodes
 apiVersion: apps/v1
 kind: Deployment
@@ -57,15 +56,11 @@ spec:
           name: prometheus
           protocol: TCP
         env:
-        # --- Leader election identity (downward API) ---
+        # --- Leader-election identity (downward API; etcd-based election) ---
         - name: POD_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
         # --- Backends (all external, resolved via the *-endpoint services) ---
         - name: ETCD_ENDPOINTS
           value: "etcd-endpoint:2379"

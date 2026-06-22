@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -29,7 +30,8 @@ type NodeMonitor struct {
 	cancel       context.CancelFunc
 	grpcConn     *grpc.ClientConn
 	fastrgClient fastrgnodepb.FastrgServiceClient
-	db           *db.DB // Optional: for syncing PPPoE status to database (stateless recovery)
+	db           *db.DB              // Optional: for syncing PPPoE status to database (stateless recovery)
+	mgr          *NodeMonitorManager // back-reference for the leadership check
 }
 
 // NodeMonitorManager manages all node monitors
@@ -37,7 +39,18 @@ type NodeMonitorManager struct {
 	mu       sync.RWMutex
 	monitors map[string]*NodeMonitor
 	db       *db.DB // Optional: for syncing PPPoE status to database
+	// leader is true only on the elected leader replica. On-demand REST queries
+	// run on every replica (so monitors/gRPC conns exist everywhere), but the
+	// background poll-and-write loop runs only on the leader to avoid 3x node
+	// load and duplicate pppoe_status writes.
+	leader atomic.Bool
 }
+
+// SetLeader records whether this replica currently holds leadership.
+func (nmm *NodeMonitorManager) SetLeader(v bool) { nmm.leader.Store(v) }
+
+// IsLeader reports whether this replica currently holds leadership.
+func (nmm *NodeMonitorManager) IsLeader() bool { return nmm.leader.Load() }
 
 // NewNodeMonitorManager creates a new NodeMonitorManager.
 // database parameter is optional (can be nil) for stateless recovery of PPPoE status.
@@ -87,6 +100,7 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 		grpcConn:     conn,
 		fastrgClient: fastrgClient,
 		db:           nmm.db,
+		mgr:          nmm,
 	}
 
 	// Store monitor
@@ -141,6 +155,12 @@ func (nm *NodeMonitor) monitorLoop() {
 			logrus.Infof("Stopping monitoring loop for node %s", nm.nodeUUID)
 			return
 		case <-ticker.C:
+			// Only the leader polls nodes and writes pppoe_status; non-leader
+			// replicas keep the monitor (and its gRPC conn) alive solely for
+			// on-demand REST queries.
+			if nm.mgr != nil && !nm.mgr.IsLeader() {
+				continue
+			}
 			nm.syncNodeState()
 		}
 	}
