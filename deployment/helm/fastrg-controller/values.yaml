@@ -60,9 +60,12 @@ controller:
     # If generate is false, provide existing certificates
     existingSecret: ""
     
-  # Storage configuration
+  # Storage configuration.
+  # Disabled for HA: a ReadWriteOnce log PVC cannot be shared by multiple
+  # replicas, and logs are already mirrored to stderr -> use central logging
+  # (kubectl logs, or a Loki/EFK aggregator) instead of a per-pod log volume.
   persistence:
-    enabled: true
+    enabled: false
     size: 5Gi
     storageClass: ""  # Uses global.storageClass if empty
     
