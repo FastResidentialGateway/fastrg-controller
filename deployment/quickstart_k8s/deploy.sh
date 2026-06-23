@@ -233,8 +233,11 @@ deploy_etcd() {
     # Wait for ETCD to be ready
     log_info "Waiting for ETCD to be ready..."
     if [ "$ETCD_TYPE" = "internal" ]; then
-        # For internal ETCD, wait for the StatefulSet to be ready
-        kubectl wait --for=condition=ready pod -l app=etcd -n "$namespace" --timeout=240s
+        # For internal ETCD, wait for the StatefulSet to be ready.
+        # rollout status waits on the StatefulSet object (already created), so it
+        # avoids the "no matching resources found" race that `kubectl wait pod`
+        # hits when the pod object does not exist yet.
+        kubectl rollout status statefulset/etcd -n "$namespace" --timeout=240s
     fi
     log_success "ETCD deployment completed"
 }
@@ -379,7 +382,7 @@ deploy_postgresql() {
         sed "s/namespace: default/namespace: $namespace/g" "${SCRIPT_PATH}/postgresql-internal.yml" > /tmp/postgresql-ns.yml
         kubectl apply -f /tmp/postgresql-ns.yml
         log_info "Waiting for PostgreSQL to be ready..."
-        kubectl wait --for=condition=ready pod -l app=postgresql -n "$namespace" --timeout=120s
+        kubectl rollout status statefulset/postgresql -n "$namespace" --timeout=120s
         log_success "PostgreSQL deployment completed"
     else
         log_info "Configuring external PostgreSQL endpoint..."
@@ -399,7 +402,7 @@ deploy_kafka() {
             "${SCRIPT_PATH}/kafka-internal.yml" > /tmp/kafka-ns.yml
         kubectl apply -f /tmp/kafka-ns.yml
         log_info "Waiting for Kafka to be ready..."
-        kubectl wait --for=condition=ready pod -l app=kafka -n "$namespace" --timeout=120s
+        kubectl rollout status statefulset/kafka -n "$namespace" --timeout=120s
         log_success "Kafka deployment completed"
     else
         log_info "Configuring external Kafka endpoint..."
