@@ -59,7 +59,19 @@ controller:
     keyFile: "/app/certs/server.key"
     # If generate is false, provide existing certificates
     existingSecret: ""
-    
+
+  # Secrets injected into the controller (JWT signing key + database DSN).
+  secrets:
+    # Use a pre-created Secret instead of one rendered from these values.
+    # It must contain keys: jwt-secret, and database-url (when a DB is used).
+    existingSecret: ""
+    # Shared JWT signing key. MUST be identical across all replicas, otherwise a
+    # token issued by one pod is rejected by another. PLACEHOLDER — override for
+    # production, e.g. --set controller.secrets.jwtSecret="$(openssl rand -base64 32)".
+    jwtSecret: "change-me-please-set-a-real-jwt-secret"
+    # database-url is built automatically from the postgresql.* settings (see the
+    # databaseUrl helper); override postgresql.external.url to change it.
+
   # Storage configuration.
   # Disabled for HA: a ReadWriteOnce log PVC cannot be shared by multiple
   # replicas, and logs are already mirrored to stderr -> use central logging

@@ -167,6 +167,12 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # Shared JWT signing key from a Secret (same across all replicas).
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastrg-controller.secretName" . }}
+              key: jwt-secret
         - name: ETCD_ENDPOINTS
           value: {{- if eq .Values.etcd.type "internal" }} "etcd-endpoint:2379" {{- else }} "{{- range $index, $endpoint := .Values.etcd.external.endpoints }}{{- if $index }},{{- end }}{{ $endpoint.ip }}:{{ $endpoint.port }}{{- end }}" {{- end }}
         - name: CERT_FILE
@@ -175,12 +181,13 @@ spec:
           value: {{ .Values.controller.tls.keyFile | quote }}
         - name: PROMETHEUS_LISTEN_IP
           value: {{ .Values.controller.config.prometheusListenIP | quote }}
-        {{- if eq .Values.postgresql.type "internal" }}
+        {{- if ne .Values.postgresql.type "none" }}
+        # Database DSN from the Secret (credentials kept out of the pod spec).
         - name: DATABASE_URL
-          value: "postgres://{{ .Values.postgresql.internal.auth.username }}:{{ .Values.postgresql.internal.auth.password }}@postgresql-endpoint:{{ .Values.postgresql.internal.service.port }}/{{ .Values.postgresql.internal.auth.database }}?sslmode=disable"
-        {{- else if and (eq .Values.postgresql.type "external") .Values.postgresql.external.url }}
-        - name: DATABASE_URL
-          value: {{ .Values.postgresql.external.url | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastrg-controller.secretName" . }}
+              key: database-url
         {{- end }}
         {{- if eq .Values.kafka.type "internal" }}
         - name: KAFKA_BROKERS

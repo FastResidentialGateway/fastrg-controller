@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 for f in controller-pdb.yml controller-loadbalancer.yml controller.yml \
-         kafka-external.yml postgresql-external.yml etcd-external.yml rbac.yml; do
+         kafka-external.yml postgresql-external.yml etcd-external.yml secret.yml rbac.yml; do
   sed "s/namespace: fastrg-system/namespace: ${NAMESPACE}/g" "${SCRIPT_PATH}/${f}" \
     | kubectl delete --ignore-not-found -f - || true
 done

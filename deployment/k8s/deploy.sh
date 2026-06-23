@@ -55,6 +55,14 @@ render namespace.yml | sed "s/name: fastrg-system/name: ${NAMESPACE}/g" | kubect
 echo ">> RBAC (ServiceAccount + Role + RoleBinding)"
 render rbac.yml | kubectl apply -f -
 
+echo ">> Secrets (JWT signing key + DB DSN)"
+if kubectl get secret fastrg-controller-secrets -n "${NAMESPACE}" >/dev/null 2>&1; then
+  echo "   secret 'fastrg-controller-secrets' already exists — leaving it unchanged"
+else
+  echo "   WARNING: seeding secret from secret.yml PLACEHOLDER values — change them for production!"
+  render secret.yml | kubectl apply -f -
+fi
+
 echo ">> External backend endpoints (etcd / PostgreSQL / Kafka)"
 for f in etcd-external.yml postgresql-external.yml kafka-external.yml; do
   render "$f" | kubectl apply -f -

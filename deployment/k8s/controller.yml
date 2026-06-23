@@ -61,11 +61,20 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # --- Secrets (shared JWT key + DB DSN; see secret.yml) ---
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: fastrg-controller-secrets
+              key: jwt-secret
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: fastrg-controller-secrets
+              key: database-url
         # --- Backends (all external, resolved via the *-endpoint services) ---
         - name: ETCD_ENDPOINTS
           value: "etcd-endpoint:2379"
-        - name: DATABASE_URL
-          value: "postgres://fastrg:fastrg@postgresql-endpoint:5432/fastrg?sslmode=disable"
         - name: KAFKA_BROKERS
           value: "kafka-endpoint:9092"
         - name: KAFKA_TOPIC

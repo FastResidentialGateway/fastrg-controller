@@ -27,6 +27,7 @@ touches `*-external.yml`, never the Deployment.
 |------|---------|
 | `namespace.yml` | `fastrg-system` namespace |
 | `rbac.yml` | ServiceAccount + Role (read-only, parity with Helm) + RoleBinding |
+| `secret.yml` | shared `jwt-secret` + `database-url` (template — replace placeholders) |
 | `etcd-external.yml` / `postgresql-external.yml` / `kafka-external.yml` | external backend Service+Endpoints |
 | `controller.yml` | Deployment (3 replicas, no hostPort, anti-affinity, downward API) + ClusterIP service |
 | `controller-loadbalancer.yml` | external LoadBalancer (provider-agnostic) |
@@ -48,7 +49,12 @@ controller already depends on etcd), so no Kubernetes Lease / RBAC is involved;
 1. Set the controller image in `controller.yml` (a real registry, not the kind
    local image).
 2. Point the three `*-external.yml` at your data host (or pass `--data-host IP`).
-3. If using Cilium LB-IPAM, edit `cilium-lb-pool.yml` and deploy with
+3. Set real secrets: edit `secret.yml` (`jwt-secret` + `database-url`) or
+   pre-create the `fastrg-controller-secrets` Secret. `deploy.sh` seeds it from
+   the placeholder values only if it does not already exist (and never
+   overwrites an existing one). The `jwt-secret` **must be identical across all
+   replicas** — that is the whole point of putting it in a shared Secret.
+4. If using Cilium LB-IPAM, edit `cilium-lb-pool.yml` and deploy with
    `--cilium-pool`.
 
 ## Deploy
