@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-endpoint
+  namespace: default
+spec:
+  ports:
+  - port: 2379
+    targetPort: 2379
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: etcd-endpoint
+  namespace: default
+subsets:
+- addresses:
+  - ip: 192.168.10.12
+  ports:
+  - port: 2379
+    protocol: TCP

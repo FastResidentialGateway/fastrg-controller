@@ -51,6 +51,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Name of the Secret holding jwt-secret / database-url. Uses an existing Secret
+when controller.secrets.existingSecret is set, otherwise the chart-managed one.
+*/}}
+{{- define "fastrg-controller.secretName" -}}
+{{- if .Values.controller.secrets.existingSecret -}}
+{{- .Values.controller.secrets.existingSecret -}}
+{{- else -}}
+{{- printf "%s-secrets" (include "fastrg-controller.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Compute the PostgreSQL DSN (internal builds from postgresql-endpoint; external
+uses the provided URL). Empty when postgresql.type is "none".
+*/}}
+{{- define "fastrg-controller.databaseUrl" -}}
+{{- if eq .Values.postgresql.type "internal" -}}
+postgres://{{ .Values.postgresql.internal.auth.username }}:{{ .Values.postgresql.internal.auth.password }}@postgresql-endpoint:{{ .Values.postgresql.internal.service.port }}/{{ .Values.postgresql.internal.auth.database }}?sslmode=disable
+{{- else if and (eq .Values.postgresql.type "external") .Values.postgresql.external.url -}}
+{{ .Values.postgresql.external.url }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "fastrg-controller.serviceAccountName" -}}

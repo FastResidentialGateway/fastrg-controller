@@ -243,6 +243,11 @@ func (s *GrpcServer) monitorStaleNodes() {
 			logrus.Infof("Stopping stale node monitor")
 			return
 		case <-ticker.C:
+			// Stale-node eviction writes to etcd; run it only on the leader so
+			// replicas don't redundantly re-mark the same nodes inactive.
+			if !s.nodeMonitorMgr.IsLeader() {
+				continue
+			}
 			s.checkAndUnregisterStaleNodes()
 		}
 	}

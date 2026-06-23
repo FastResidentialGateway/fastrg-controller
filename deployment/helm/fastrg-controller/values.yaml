@@ -13,12 +13,12 @@ global:
 
 # FastRG Controller configuration
 controller:
-  # NOTE: containers below declare hostPort (8443/8444/8080/50051/55688).
-  # A hostPort can only be bound by one pod per node, so replicaCount must not
-  # exceed the number of cluster nodes (single-node kind in CI => 1). Running
-  # more replicas than nodes leaves the extras stuck Pending (FailedScheduling),
-  # which prevents the Deployment from ever reaching condition=available.
-  replicaCount: 1
+  # HA: 3 stateless replicas. No hostPort is declared, so replicas are decoupled
+  # from node count; access is via the ClusterIP / LoadBalancer services. Only
+  # the leader-elected replica runs the singleton background workers (projection
+  # / stale-node eviction / per-node scraping) — see rbac.yaml (leases) and the
+  # POD_NAME/POD_NAMESPACE downward API in controller.yaml.
+  replicaCount: 3
   
   image:
     repository: fastrg-controller
@@ -33,6 +33,10 @@ controller:
     httpsPort: 8443
     logHttpsPort: 8444
     prometheusPort: 55688
+    # hostPort is OFF for HA (it pins a pod to a node and caps replicas at the
+    # node count). Enable only for single-node kind testing where the verify
+    # step reaches the controller at host_ip:<port> via kind extraPortMappings.
+    hostPortEnabled: false
     
   # LoadBalancer service configuration (optional)
   loadBalancer:
@@ -59,10 +63,25 @@ controller:
     keyFile: "/app/certs/server.key"
     # If generate is false, provide existing certificates
     existingSecret: ""
-    
-  # Storage configuration
+
+  # Secrets injected into the controller (JWT signing key + database DSN).
+  secrets:
+    # Use a pre-created Secret instead of one rendered from these values.
+    # It must contain keys: jwt-secret, and database-url (when a DB is used).
+    existingSecret: ""
+    # Shared JWT signing key. MUST be identical across all replicas, otherwise a
+    # token issued by one pod is rejected by another. PLACEHOLDER — override for
+    # production, e.g. --set controller.secrets.jwtSecret="$(openssl rand -base64 32)".
+    jwtSecret: "change-me-please-set-a-real-jwt-secret"
+    # database-url is built automatically from the postgresql.* settings (see the
+    # databaseUrl helper); override postgresql.external.url to change it.
+
+  # Storage configuration.
+  # Disabled for HA: a ReadWriteOnce log PVC cannot be shared by multiple
+  # replicas, and logs are already mirrored to stderr -> use central logging
+  # (kubectl logs, or a Loki/EFK aggregator) instead of a per-pod log volume.
   persistence:
-    enabled: true
+    enabled: false
     size: 5Gi
     storageClass: ""  # Uses global.storageClass if empty
     
@@ -101,8 +120,9 @@ controller:
 
 # etcd configuration
 etcd:
-  # Deploy internal etcd or use external etcd service
-  type: internal  # internal or external
+  # Deploy internal etcd or use external etcd service.
+  # HA default: external (etcd runs outside the cluster on a dedicated host).
+  type: external  # internal or external
   
   # Internal etcd configuration (when type: internal)
   internal:
@@ -119,6 +139,9 @@ etcd:
       clientPort: 2379
       peerPort: 2380
       hostPort: 2378
+      # OFF by default; enable only for single-node kind testing so the verify
+      # harness can reach etcd at host_ip:2378 via kind extraPortMappings.
+      hostPortEnabled: false
       
     config:
       name: "node1"
@@ -177,15 +200,16 @@ etcd:
       port: 2379
     # For ClusterIP type with manual endpoints (like etcd-external.yml)
     endpoints:
-      - ip: "192.168.10.12"
+      - ip: "192.168.10.215"   # external etcd host
         port: 2379
-      # - ip: "192.168.10.13"
+      # - ip: "192.168.10.216"
       #   port: 2379
 
 # PostgreSQL configuration
 postgresql:
-  # Deploy internal PostgreSQL or use external database
-  type: internal  # internal | external | none
+  # Deploy internal PostgreSQL or use external database.
+  # HA default: external (PostgreSQL runs outside the cluster).
+  type: external  # internal | external | none
 
   # Internal PostgreSQL configuration (when type: internal)
   internal:
@@ -233,12 +257,14 @@ postgresql:
 
   # External PostgreSQL configuration (when type: external)
   external:
-    url: ""  # Full DSN: "postgres://user:pass@host:5432/db?sslmode=disable"
+    # Full DSN. Replace host/credentials with your external PostgreSQL.
+    url: "postgres://fastrg:fastrg@192.168.10.215:5432/fastrg?sslmode=disable"
 
 # Kafka configuration
 kafka:
-  # Deploy internal Kafka or use external Kafka cluster
-  type: internal  # internal | external | none
+  # Deploy internal Kafka or use external Kafka cluster.
+  # HA default: external (Kafka runs outside the cluster, alongside etcd/pg).
+  type: external  # internal | external | none
 
   # Common topic/group settings (used regardless of internal/external)
   topic: "fastrg.node.events"
@@ -277,7 +303,7 @@ kafka:
 
   # External Kafka configuration (when type: external)
   external:
-    brokers: ""  # e.g. "kafka1:9092,kafka2:9092"
+    brokers: "192.168.10.215:9092"  # e.g. "kafka1:9092,kafka2:9092"
 
 # Service account configuration
 serviceAccount:
@@ -296,8 +322,8 @@ affinity: {}
 
 # Pod disruption budget
 podDisruptionBudget:
-  enabled: false
-  minAvailable: 1
+  enabled: true
+  minAvailable: 2
 
 # Horizontal Pod Autoscaler
 autoscaling:
