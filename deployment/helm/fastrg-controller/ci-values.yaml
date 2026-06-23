@@ -1,0 +1,24 @@
+# CI-only overrides — run the HA chart on a single-node kind cluster exactly the
+# way the existing verify step expects (reach the controller/etcd at
+# host_ip:<port> through kind extraPortMappings).
+#
+# Production installs use the chart DEFAULTS (HA: external backends, 3 replicas,
+# no hostPort). Do NOT use this file for real deployments.
+etcd:
+  type: internal
+  internal:
+    service:
+      hostPortEnabled: true   # expose etcd at host_ip:2378 for the test harness
+
+postgresql:
+  type: internal
+
+kafka:
+  type: internal
+
+controller:
+  replicaCount: 1             # hostPort on a single node allows only one pod
+  image:
+    pullPolicy: Never         # kind loads the locally-built image
+  service:
+    hostPortEnabled: true     # expose 8443/8080/8444/50051/55688 on the node

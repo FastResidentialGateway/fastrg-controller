@@ -148,15 +148,30 @@ spec:
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         ports:
         - containerPort: {{ .Values.controller.service.httpsPort }}
+          {{- if .Values.controller.service.hostPortEnabled }}
+          hostPort: {{ .Values.controller.service.httpsPort }}
+          {{- end }}
           name: https
         - containerPort: {{ .Values.controller.service.logHttpsPort }}
+          {{- if .Values.controller.service.hostPortEnabled }}
+          hostPort: {{ .Values.controller.service.logHttpsPort }}
+          {{- end }}
           name: log-https
         - containerPort: {{ .Values.controller.service.httpPort }}
+          {{- if .Values.controller.service.hostPortEnabled }}
+          hostPort: {{ .Values.controller.service.httpPort }}
+          {{- end }}
           name: http
         - containerPort: {{ .Values.controller.service.grpcPort }}
+          {{- if .Values.controller.service.hostPortEnabled }}
+          hostPort: {{ .Values.controller.service.grpcPort }}
+          {{- end }}
           name: grpc
           protocol: TCP
         - containerPort: {{ .Values.controller.service.prometheusPort }}
+          {{- if .Values.controller.service.hostPortEnabled }}
+          hostPort: {{ .Values.controller.service.prometheusPort }}
+          {{- end }}
           name: prometheus
           protocol: TCP
         env:

@@ -218,6 +218,16 @@ helm-install:
 #        --set etcd.external.endpoints[0].port=2379
 	@echo "Installation complete. Check status with: helm status fastrg-controller"
 
+# Install on a single-node kind cluster for CI: internal backends + hostPort so
+# the verify step can reach the controller/etcd at host_ip:<port> (the chart
+# defaults are HA/external/no-hostPort and would not work on kind).
+helm-install-ci:
+	@echo "Installing FastRG Controller (CI / kind overrides) using Helm..."
+	deployment/quickstart_k8s/deploy.sh -n fastrg-system --cilium-only
+	helm install fastrg-controller deployment/helm/fastrg-controller/ \
+		-f deployment/helm/fastrg-controller/ci-values.yaml
+	@echo "CI installation complete."
+
 # Upgrade Helm release
 helm-upgrade:
 	@echo "Upgrading FastRG Controller Helm release..."

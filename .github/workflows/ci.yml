@@ -105,7 +105,7 @@ jobs:
         make k8s-create-test-env
     - name: Deploy service
       run: |
-        make helm-install
+        make helm-install-ci
     - name: Wait for deployment to be ready
       run: |
         kubectl wait --for=condition=available --timeout=360s deployment/fastrg-controller -n fastrg-system || true

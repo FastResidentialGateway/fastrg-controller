@@ -33,6 +33,10 @@ controller:
     httpsPort: 8443
     logHttpsPort: 8444
     prometheusPort: 55688
+    # hostPort is OFF for HA (it pins a pod to a node and caps replicas at the
+    # node count). Enable only for single-node kind testing where the verify
+    # step reaches the controller at host_ip:<port> via kind extraPortMappings.
+    hostPortEnabled: false
     
   # LoadBalancer service configuration (optional)
   loadBalancer:
@@ -135,6 +139,9 @@ etcd:
       clientPort: 2379
       peerPort: 2380
       hostPort: 2378
+      # OFF by default; enable only for single-node kind testing so the verify
+      # harness can reach etcd at host_ip:2378 via kind extraPortMappings.
+      hostPortEnabled: false
       
     config:
       name: "node1"
