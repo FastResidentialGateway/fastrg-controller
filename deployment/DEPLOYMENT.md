@@ -127,9 +127,23 @@ stable `JWT_SECRET`.
 
 ## 7. Option B — Kubernetes
 
-The controller manifests are in `deployment/k8s/` (plain) and
-`deployment/helm/fastrg-controller/` (Helm). They already include **optional**
-`DATABASE_URL` / `KAFKA_*` env wiring — uncomment (k8s) or set values (Helm):
+Three manifest sets, picked by environment (see [deployment/README.md](README.md)):
+
+- **`deployment/quickstart_k8s/`** — single-node kind quickstart: 1 replica, all
+  backends in-cluster, `hostPort`. For local dev / demo / CI only.
+- **`deployment/k8s/`** — HA plain YAML: 3 stateless controller replicas, no
+  hostPort, etcd/PostgreSQL/Kafka external. Production.
+- **`deployment/helm/fastrg-controller/`** — the same HA topology, packaged.
+  Production.
+
+In the HA layouts the cluster runs **only the controller**; etcd, PostgreSQL and
+Kafka are external (point the `*-external.yml` / Helm `*.external.*` values at
+your hosts). Running 3 replicas is safe because only the **etcd-elected leader**
+runs the singleton workers (projection / stale-node eviction / per-node
+scraping); the Kafka consumer runs on every replica (one consumer group).
+
+The manifests already include **optional** `DATABASE_URL` / `KAFKA_*` env wiring —
+uncomment (k8s) or set values (Helm):
 
 ```yaml
 # deployment/helm/fastrg-controller/values.yaml

@@ -1,8 +1,13 @@
+# External Kafka (runs OUTSIDE the cluster, alongside etcd/PostgreSQL on a
+# dedicated host or a separate broker). The controller dials the stable
+# in-cluster name `kafka-endpoint` (see KAFKA_BROKERS in controller.yml).
+# Replace the IP below with your broker host. For a multi-broker cluster, list
+# every broker IP under `addresses` and point KAFKA_BROKERS at this service.
 apiVersion: v1
 kind: Service
 metadata:
   name: kafka-endpoint
-  namespace: default
+  namespace: fastrg-system
   labels:
     app: kafka
 spec:
@@ -17,10 +22,13 @@ apiVersion: v1
 kind: Endpoints
 metadata:
   name: kafka-endpoint
-  namespace: default
+  namespace: fastrg-system
+  labels:
+    app: kafka
 subsets:
 - addresses:
-  - ip: 192.168.10.12  # Replace with external Kafka broker IP
+  - ip: 192.168.10.215   # <-- external Kafka broker host
   ports:
-  - port: 9092
+  - name: broker
+    port: 9092
     protocol: TCP

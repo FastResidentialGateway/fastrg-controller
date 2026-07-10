@@ -1,0 +1,45 @@
+# ServiceAccount + Role + RoleBinding for the FastRG Controller.
+#
+# HA leader election uses etcd (not a Kubernetes Lease), so NO coordination
+# permissions are needed: with replicaCount > 1 all pods serve REST/gRPC, but
+# only the etcd-elected leader runs the singleton background workers
+# (etcd->PostgreSQL projection, stale-node eviction, per-node stats scraping).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fastrg-controller-sa
+  namespace: fastrg-system
+  labels:
+    app.kubernetes.io/name: fastrg-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fastrg-controller-role
+  namespace: fastrg-system
+  labels:
+    app.kubernetes.io/name: fastrg-controller
+rules:
+  # Read-only access (parity with the Helm chart Role).
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fastrg-controller-rolebinding
+  namespace: fastrg-system
+  labels:
+    app.kubernetes.io/name: fastrg-controller
+subjects:
+  - kind: ServiceAccount
+    name: fastrg-controller-sa
+    namespace: fastrg-system
+roleRef:
+  kind: Role
+  name: fastrg-controller-role
+  apiGroup: rbac.authorization.k8s.io

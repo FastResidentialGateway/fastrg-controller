@@ -17,6 +17,7 @@ import (
 	_ "fastrg-controller/docs"
 	"fastrg-controller/internal/db"
 	"fastrg-controller/internal/kafka"
+	"fastrg-controller/internal/leader"
 	"fastrg-controller/internal/projection"
 	"fastrg-controller/internal/server"
 	"fastrg-controller/internal/storage"
@@ -133,9 +134,10 @@ func main() {
 		}
 		if database != nil {
 			defer database.Close()
-			go projection.New(etcd, database).Run(ctx)
-			logrus.Info("Started config projection (etcd -> PostgreSQL)")
 
+			// The Kafka consumer runs on every replica: a single consumer group
+			// (KAFKA_GROUP) balances partitions across them, so this is safe and
+			// HA without leader election.
 			if brokers := kafka.Brokers(); brokers != nil {
 				go kafka.NewConsumer(brokers, database, etcd).Run(ctx)
 			} else {
@@ -154,6 +156,25 @@ func main() {
 	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
 	// Pass database for stateless recovery of PPPoE status
 	nmm := server.NewNodeMonitorManager(database)
+
+	// Leader election (etcd-based): every replica serves REST/gRPC and runs the
+	// Kafka consumer, but only the leader runs the singleton background workers —
+	// the etcd->PostgreSQL projection (single writer of the config tables),
+	// stale-node eviction, and per-node stats scraping — so they are not
+	// duplicated across replicas. A single instance wins immediately.
+	go leader.Run(ctx, etcd.Client(), "fastrg-controller/leader", func(leaderCtx context.Context) {
+		logrus.Infof("Became leader (%s): starting projection + node-state workers", leader.Identity())
+		nmm.SetLeader(true)
+		if database != nil {
+			go projection.New(etcd, database).Run(leaderCtx)
+			logrus.Info("Started config projection (etcd -> PostgreSQL)")
+		}
+		go func() {
+			<-leaderCtx.Done()
+			nmm.SetLeader(false)
+			logrus.Info("Lost leadership: stopped projection + node-state workers")
+		}()
+	})
 
 	// CLI-facing config gRPC service (shares same port as NodeManagement)
 	configSvc := server.NewConfigGrpcServer(etcd, []byte(server.GetJWTSecret()))
