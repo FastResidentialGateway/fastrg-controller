@@ -164,16 +164,19 @@ What it currently verifies:
 
 ### Phase 4: Node Failure & Recovery
 
-Scenario: inspect currently registered nodes and verify controller/database
-visibility. This phase does not currently create a real network partition.
+Scenario: bring a **real** fastrg node up against the e2e controller, drive it to
+an established PPPoE session, and verify the controller observes and holds that
+state.
 
-What it currently verifies:
+What it verifies:
 
-- controller starts healthy
-- registered nodes exist under `nodes/` in etcd, or the phase skips with a warn
-- selected node registration is readable
-- `pppoe_status` table is queryable
-- recovery expectations are documented in output
+- controller, etcd, and PostgreSQL start healthy
+- the node's HSI/DNS/user-count config is seeded into etcd and the real node
+  process is started against the e2e controller
+- the node registers with the controller (`nodes/<uuid>` appears in etcd)
+- at least one PPPoE session reaches `Data phase` (projected into `pppoe_status`)
+- the session stays in `Data phase` across an observation window (no flap)
+- the node registration stays live afterwards (heartbeats keep `nodes/<uuid>` fresh)
 
 ## Helpers
 
@@ -248,8 +251,10 @@ ssh root@192.168.10.212 \
 
 ## Known Limits
 
-- The all-phases path continues after a failed phase and reports a warning.
-- Phase 4 is a smoke check, not a real node network-partition test.
+- The all-phases path runs every phase and fails the run (non-zero exit) if any
+  phase fails.
+- Phase 4 brings up a real fastrg node and drives a real PPPoE session, so it
+  needs a reachable node host (`NODE_HOST`).
 - Direct phase execution is useful for local debugging, but the main supported
   remote path is through `run_e2e_test.sh`.
 - The controller image/container on the controller host must be rebuilt before

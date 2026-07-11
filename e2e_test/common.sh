@@ -81,6 +81,16 @@ is_service_up() {
     compose ps "$service" 2>/dev/null | grep -q "Up\|healthy" && return 0 || return 1
 }
 
+# True if the controller's HTTPS API layer answers at all (any HTTP status),
+# proving process/listener liveness — a stronger check than container "Up"
+# state. HTTP code 000 means the connection was refused (server not answering).
+controller_http_alive() {
+    local code
+    code=$(curl -s -k -o /dev/null -m 5 -w '%{http_code}' \
+        "https://${CONTROLLER_HOST:-localhost}:28443/api/health" 2>/dev/null || echo 000)
+    [ "$code" != "000" ]
+}
+
 # Stop a service
 stop_service() {
     local service=$1
@@ -299,7 +309,7 @@ pppoe_connected_count() {
 }
 
 export -f log_info log_success log_warn log_error compose compose_quiet
-export -f wait_for_service is_service_up stop_service start_service
+export -f wait_for_service is_service_up controller_http_alive stop_service start_service
 export -f etcd_get db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
 export -f api_get node_status config_get pppoe_status
 export -f wait_for verify_config_sync kafka_lag

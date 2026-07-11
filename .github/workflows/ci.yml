@@ -52,15 +52,14 @@ jobs:
       run: |
         make test
     # Integration tests against the etcd + PostgreSQL service containers above.
-    # internal/projection joins once its stale e2e assertion is fixed; kafka e2e
-    # (internal/kafka/*_e2e_test.go) runs locally against the kind stack.
-    # See Readme.md Testing.
+    # Kafka e2e (internal/kafka/*_e2e_test.go) needs a broker and runs locally
+    # against the kind stack; see Readme.md Testing.
     - name: Run integration tests (etcd + PostgreSQL)
       env:
         TEST_DATABASE_URL: postgres://fastrg:fastrg@localhost:5432/fastrg?sslmode=disable
         TEST_ETCD_ENDPOINTS: localhost:2379
       run: |
-        go test -count=1 -cover ./internal/db/ ./internal/server/
+        go test -count=1 -cover ./internal/db/ ./internal/server/ ./internal/projection/
   docker-build:
     runs-on: ubuntu-latest
     steps:

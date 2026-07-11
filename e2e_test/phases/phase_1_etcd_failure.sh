@@ -58,14 +58,18 @@ test_etcd_failure() {
     fi
     log_success "etcd is confirmed DOWN"
 
-    # Step 5: Controller should still serve (using cached data)
+    # Step 5: Controller process + HTTPS API must stay alive during the etcd outage
     log_info "Step 5: Verifying controller is still operational"
     sleep 5
     if ! is_service_up "controller"; then
-        log_error "Controller went down when etcd is unavailable"
+        log_error "Controller container went down when etcd is unavailable"
         return 1
     fi
-    log_success "Controller still operational (serving cached data)"
+    if ! controller_http_alive; then
+        log_error "Controller HTTPS API stopped answering when etcd is unavailable"
+        return 1
+    fi
+    log_success "Controller still operational (HTTPS API answering)"
 
     # Step 6: Restart etcd
     log_info "Step 6: Restarting etcd..."

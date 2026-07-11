@@ -14,9 +14,10 @@ import (
 )
 
 // TestProjectionEndToEnd drives a real etcd + PostgreSQL: it seeds a config,
-// runs the projection, mutates and deletes the config, and asserts the current
-// and history tables track every change. Skipped unless both TEST_ETCD_ENDPOINTS
-// and TEST_DATABASE_URL are set.
+// runs the projection, mutates and deletes the config, and asserts every change
+// is recorded in hsi_config_history (the projection is history-only;
+// hsi_config_current is written by the Kafka CONFIG_APPLY_OK handler). Skipped
+// unless both TEST_ETCD_ENDPOINTS and TEST_DATABASE_URL are set.
 func TestProjectionEndToEnd(t *testing.T) {
 	etcdEndpoints := os.Getenv("TEST_ETCD_ENDPOINTS")
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -66,42 +67,34 @@ func TestProjectionEndToEnd(t *testing.T) {
 	proj := New(etcd, database)
 	go proj.Run(ctx)
 
-	currentDesire := func() (string, bool) {
-		var d string
-		err := pool.QueryRow(ctx,
-			`SELECT desire_status FROM hsi_config_current WHERE node_uuid='node1' AND user_id='2'`).Scan(&d)
-		if err != nil {
-			return "", false
+	// The projection is history-only, so track hsi_config_history (not current).
+	hasHistory := func(cond string) bool {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM hsi_config_history WHERE node_uuid='node1' AND user_id='2' AND `+cond,
+		).Scan(&n); err != nil {
+			return false
 		}
-		return d, true
+		return n > 0
 	}
 
-	// After reconcile: current row present with desire_status=connect.
-	waitFor(t, func() bool { d, ok := currentDesire(); return ok && d == "connect" },
-		"initial reconcile to project the seeded config")
+	// After reconcile: the seeded config (desire connect) is recorded.
+	waitFor(t, func() bool { return hasHistory(`action='upsert' AND desire_status='connect'`) },
+		"initial reconcile to record the seeded config in history")
 
-	// Live update via watch.
+	// Live update via watch: desire flips to disconnect.
 	if _, err := cli.Put(ctx, key, `{"config":{"user_id":"2","desire_status":"disconnect"},"metadata":{"resourceVersion":"2","updatedBy":"admin"}}`); err != nil {
 		t.Fatalf("update put: %v", err)
 	}
-	waitFor(t, func() bool { d, ok := currentDesire(); return ok && d == "disconnect" },
-		"live update to reach the current table")
+	waitFor(t, func() bool { return hasHistory(`action='upsert' AND desire_status='disconnect'`) },
+		"live update to be recorded in history")
 
-	// Live delete via watch.
+	// Live delete via watch: a delete row is recorded.
 	if _, err := cli.Delete(ctx, key); err != nil {
 		t.Fatalf("etcd delete: %v", err)
 	}
-	waitFor(t, func() bool { _, ok := currentDesire(); return !ok },
-		"delete to remove the current row")
-
-	// History captured the live update + delete (reconcile does not log history).
-	var hist int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM hsi_config_history`).Scan(&hist); err != nil {
-		t.Fatalf("count history: %v", err)
-	}
-	if hist < 2 {
-		t.Fatalf("history rows = %d, want >= 2 (update + delete)", hist)
-	}
+	waitFor(t, func() bool { return hasHistory(`action='delete'`) },
+		"delete to be recorded in history")
 
 	// Checkpoint advanced.
 	if rev, ok, _ := database.GetWatchProgress(ctx, "configs"); !ok || rev == 0 {
