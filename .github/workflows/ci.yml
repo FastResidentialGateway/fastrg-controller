@@ -32,17 +32,35 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      etcd:
+        image: quay.io/coreos/etcd:v3.5.16
+        env:
+          ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+          ETCD_ADVERTISE_CLIENT_URLS: http://0.0.0.0:2379
+        ports:
+          - 2379:2379
+        options: >-
+          --health-cmd "etcdctl endpoint health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
     - uses: actions/checkout@v7
     - name: Setup build environment
       uses: ./.github/actions/setup-build-env
-    - name: Run tests
+    - name: Run tests (unit; integration tests self-skip without TEST_* env)
       run: |
         make test
-    - name: Run DB integration tests (throwaway PostgreSQL)
+    # Integration tests against the etcd + PostgreSQL service containers above.
+    # internal/projection joins once its stale e2e assertion is fixed; kafka e2e
+    # (internal/kafka/*_e2e_test.go) runs locally against the kind stack.
+    # See Readme.md Testing.
+    - name: Run integration tests (etcd + PostgreSQL)
       env:
         TEST_DATABASE_URL: postgres://fastrg:fastrg@localhost:5432/fastrg?sslmode=disable
-      run: make test-db
+        TEST_ETCD_ENDPOINTS: localhost:2379
+      run: |
+        go test -count=1 -cover ./internal/db/ ./internal/server/
   docker-build:
     runs-on: ubuntu-latest
     steps:

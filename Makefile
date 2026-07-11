@@ -140,10 +140,12 @@ generate-test-certs:
 clean-test-certs:
 	@$(MAKE) clean-dev-certs
 
-# Main Test Target
+# Main Test Target — runs every Go package. Integration tests self-skip when
+# their TEST_* env vars are unset (see internal/{db,server,projection,kafka}),
+# so this stays runnable without etcd/PostgreSQL/Kafka.
 test:
 	go clean -testcache
-	go test -count=1 -v ./internal/utils/
+	go test -count=1 ./...
 	@$(MAKE) -C tools test
 
 # DB integration tests (need a throwaway PostgreSQL). Skipped when
@@ -157,6 +159,14 @@ test-db:
 # Test Help
 test-help:
 	@$(MAKE) -C tools help
+
+# Coverage across internal packages. Integration paths (server/projection/kafka)
+# only count when TEST_ETCD_ENDPOINTS / TEST_DATABASE_URL / TEST_KAFKA_BROKERS are
+# set (e.g. `kubectl port-forward` to the kind stack — see Readme.md Testing).
+cover:
+	go clean -testcache
+	go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./internal/...
+	@go tool cover -func=coverage.out | tail -1
 
 # =========== Docker & Container Management ==========
 # Build Docker image
