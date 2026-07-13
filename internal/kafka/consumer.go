@@ -184,10 +184,10 @@ func (c *Consumer) Run(ctx context.Context) {
 			continue
 		}
 
-		// Retry the same message with exponential backoff. If the DB is
+		// Retry the same message with exponential backoff. If the DB or etcd is
 		// unavailable, keep retrying this message without committing the offset.
-		// If PostgreSQL is reachable and returned a SQL error, persist the
-		// message to DLQ before committing the offset.
+		// If the failure is eligible for dead-lettering, persist the message to
+		// DLQ before committing the offset.
 		const maxRetries = 5
 		backoff := 100 * time.Millisecond
 		failed := false
@@ -195,8 +195,12 @@ func (c *Consumer) Run(ctx context.Context) {
 			if err := c.handle(ctx, m.Value); err != nil {
 				failed = true
 
-				if isDatabaseUnavailable(err) {
-					logrus.WithError(err).Warn("kafka: database unavailable, retrying same message")
+				if isDatabaseUnavailable(err) || isEtcdUnavailable(err) {
+					source := "etcd"
+					if isDatabaseUnavailable(err) {
+						source = "database"
+					}
+					logrus.WithError(err).Warnf("kafka: %s unavailable, retrying same message", source)
 					c.sleep(ctx)
 					continue
 				}
@@ -284,6 +288,37 @@ func wrapDatabaseError(err error) error {
 		return nil
 	}
 	return databaseOperationError{err: err}
+}
+
+// isEtcdUnavailable identifies failures from etcd operations. All etcd
+// failures exposed by handle are retried because a later attempt may succeed
+// and the handler's database writes and guarded CAS are idempotent.
+func isEtcdUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var etcdErr etcdOperationError
+	return errors.As(err, &etcdErr)
+}
+
+type etcdOperationError struct {
+	err error
+}
+
+func (e etcdOperationError) Error() string {
+	return e.err.Error()
+}
+
+func (e etcdOperationError) Unwrap() error {
+	return e.err
+}
+
+func wrapEtcdError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return etcdOperationError{err: err}
 }
 
 // waitForTopicReady blocks until the Kafka topic has at least 1 partition or
@@ -378,7 +413,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 				resp, err := c.etcd.Client().Get(ctx, etcdKey)
 				if err != nil {
 					logrus.WithError(err).Error("kafka: failed to read current config from etcd after CONFIG_APPLY_OK")
-					return err
+					return wrapEtcdError(err)
 				}
 				if len(resp.Kvs) > 0 {
 					kv := resp.Kvs[0]
@@ -438,7 +473,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 				if rbErr != nil {
 					if !errors.Is(rbErr, errRollbackSuperseded) {
 						logrus.WithError(rbErr).Error("kafka: failed to roll back config in etcd")
-						return rbErr
+						return wrapEtcdError(rbErr)
 					}
 
 					entry := logrus.WithError(rbErr).WithFields(logrus.Fields{
