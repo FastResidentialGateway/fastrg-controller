@@ -9,9 +9,11 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,87 @@ const (
 	defaultGroupID = "fastrg-controller"
 	retryBackoff   = 2 * time.Second
 )
+
+var errRollbackSuperseded = errors.New("rollback skipped because the current config supersedes the failed version")
+
+type rollbackSkipError struct {
+	reason string
+	warn   bool
+}
+
+func (e *rollbackSkipError) Error() string {
+	return fmt.Sprintf("%s: %s", errRollbackSuperseded, e.reason)
+}
+
+func (e *rollbackSkipError) Unwrap() error {
+	return errRollbackSuperseded
+}
+
+func skipRollback(reason string, warn bool) error {
+	return &rollbackSkipError{reason: reason, warn: warn}
+}
+
+func configResourceVersion(value []byte) (uint64, error) {
+	var envelope struct {
+		Metadata *struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(value, &envelope); err != nil {
+		return 0, fmt.Errorf("decode config JSON: %w", err)
+	}
+	if envelope.Metadata == nil || envelope.Metadata.ResourceVersion == "" {
+		return 0, errors.New("metadata.resourceVersion is missing")
+	}
+
+	rv, err := strconv.ParseUint(envelope.Metadata.ResourceVersion, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse metadata.resourceVersion %q: %w", envelope.Metadata.ResourceVersion, err)
+	}
+	return rv, nil
+}
+
+// guardedRollbackMutation decides whether the current etcd value is still the
+// single write immediately following the last node-confirmed version. It must
+// run inside storage.CAS so a concurrent write causes a retry with the newest
+// value and therefore a fresh guard evaluation.
+//
+// This is a transitional resourceVersion-only guard. A delete followed by a
+// recreate can reset resourceVersion to 1 and is indistinguishable from the
+// original first failed create; the event schema needs an applied revision to
+// close that remaining cross-repository race.
+func guardedRollbackMutation(prevConfig *db.HSIConfigRow, current []byte) (storage.CASResult, error) {
+	if current == nil {
+		return storage.CASResult{}, skipRollback("config key no longer exists", false)
+	}
+
+	curRV, err := configResourceVersion(current)
+	if err != nil {
+		return storage.CASResult{}, skipRollback("cannot establish current resourceVersion: "+err.Error(), true)
+	}
+
+	var okRV uint64
+	if prevConfig != nil {
+		okRV, err = configResourceVersion(prevConfig.ConfigJSON)
+		if err != nil {
+			return storage.CASResult{}, skipRollback("cannot establish last successful resourceVersion: "+err.Error(), true)
+		}
+	}
+
+	// Written this way instead of comparing with okRV+1 so MaxUint64 cannot
+	// wrap around and accidentally authorize a rollback.
+	if curRV > okRV && curRV-okRV == 1 {
+		if prevConfig == nil {
+			return storage.CASResult{Delete: true}, nil
+		}
+		return storage.CASResult{Value: prevConfig.ConfigJSON}, nil
+	}
+
+	return storage.CASResult{}, skipRollback(
+		fmt.Sprintf("current resourceVersion %d is not the failed successor of last successful resourceVersion %d", curRV, okRV),
+		false,
+	)
+}
 
 // Consumer reads NodeEvent messages from Kafka and writes them to PostgreSQL.
 type Consumer struct {
@@ -325,29 +408,33 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			if c.etcd == nil {
 				logrus.Warnf("kafka: etcd not configured, skipping rollback write for node=%s user=%s",
 					ev.GetNodeUuid(), ev.GetUserId())
-			} else if prevConfig != nil {
-				// Restore the last successful config to etcd using CAS
-				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
-				if rbErr := c.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
-					// Always overwrite with the last successful version (ignore current revision)
-					return storage.CASResult{Value: []byte(prevConfig.ConfigJSON)}, nil
-				}); rbErr != nil {
-					logrus.WithError(rbErr).Error("kafka: failed to restore config to etcd")
-					return rbErr
-				}
-				logrus.Infof("kafka: config rolled back to last successful version in etcd for node=%s user=%s",
-					ev.GetNodeUuid(), ev.GetUserId())
 			} else {
-				// No successful previous version: delete from etcd
-				if rbErr := c.etcd.CAS(ctx, fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId()),
-					func(current []byte) (storage.CASResult, error) {
-						return storage.CASResult{Delete: true}, nil
-					}); rbErr != nil {
-					logrus.WithError(rbErr).Error("kafka: failed to delete invalid config from etcd")
-					return rbErr
+				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+				rbErr := c.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+					return guardedRollbackMutation(prevConfig, current)
+				})
+				if rbErr != nil {
+					if !errors.Is(rbErr, errRollbackSuperseded) {
+						logrus.WithError(rbErr).Error("kafka: failed to roll back config in etcd")
+						return rbErr
+					}
+
+					entry := logrus.WithError(rbErr).WithFields(logrus.Fields{
+						"node": ev.GetNodeUuid(),
+						"user": ev.GetUserId(),
+					})
+					var skipErr *rollbackSkipError
+					if errors.As(rbErr, &skipErr) && skipErr.warn {
+						entry.Warn("kafka: skipped config rollback because resourceVersion metadata is unusable")
+					}
+					entry.Info("kafka: skipped config rollback because the failed version is no longer current")
+				} else if prevConfig == nil {
+					logrus.Infof("kafka: invalid config deleted from etcd for node=%s user=%s (no successful version)",
+						ev.GetNodeUuid(), ev.GetUserId())
+				} else {
+					logrus.Infof("kafka: config rolled back to last successful version in etcd for node=%s user=%s",
+						ev.GetNodeUuid(), ev.GetUserId())
 				}
-				logrus.Infof("kafka: invalid config deleted from etcd for node=%s user=%s (no successful version)",
-					ev.GetNodeUuid(), ev.GetUserId())
 			}
 
 			// Record the failure in DB history
