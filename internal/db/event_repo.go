@@ -110,17 +110,17 @@ func (d *DB) SendToDLQ(ctx context.Context, topic string, partition int, offset 
 }
 
 // InsertNodeEvent appends a node event, ignoring duplicates (same node, user,
-// type and event_time) so at-least-once redelivery is idempotent. inserted is
-// false when the event was a duplicate.
+// type, event_time and correlation_id) so at-least-once redelivery is
+// idempotent. inserted is false when the event was a duplicate.
 func (d *DB) InsertNodeEvent(ctx context.Context, row NodeEventRow) (inserted bool, err error) {
 	tag, err := d.pool.Exec(ctx, `
 		INSERT INTO node_events
 			(node_uuid, user_id, event_type, action, success, module, error_code, error_message, context, correlation_id, event_time)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (node_uuid, user_id, event_type, event_time) DO NOTHING`,
+		ON CONFLICT (node_uuid, user_id, event_type, event_time, correlation_id) DO NOTHING`,
 		row.NodeUUID, row.UserID, row.EventType, nullStr(row.Action), row.Success,
 		nullStr(row.Module), nullStr(row.ErrorCode), nullStr(row.ErrorMessage),
-		nullStr(row.Context), nullStr(row.CorrelationID), row.EventTime,
+		nullStr(row.Context), row.CorrelationID, row.EventTime,
 	)
 	if err != nil {
 		return false, err
