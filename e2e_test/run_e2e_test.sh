@@ -354,20 +354,28 @@ main() {
 
     printf "\n"
 
-    # Run specified phase or all phases
+    # Run specified phase or all phases. Any phase failure fails the whole run.
+    local rc=0
     if [[ -n "$PHASE_TO_RUN" ]]; then
-        run_phase "$PHASE_TO_RUN"
+        run_phase "$PHASE_TO_RUN" || rc=1
     else
         for phase in 1 2 3 4; do
             if ! run_phase "$phase"; then
-                log_warn "Phase ${phase} failed"
+                log_error "Phase ${phase} failed"
+                rc=1
             fi
         done
     fi
 
     print_header "Test Summary"
-    log_success "E2E tests completed"
+    if [[ $rc -ne 0 ]]; then
+        log_error "E2E tests FAILED"
+    else
+        log_success "E2E tests completed"
+    fi
+    return $rc
 }
 
-# Run main
+# Run main; propagate its pass/fail as the process exit code.
 main "$@"
+exit $?

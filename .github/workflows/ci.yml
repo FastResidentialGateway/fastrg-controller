@@ -32,17 +32,37 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      etcd:
+        # No health check: etcd images since v3.5.5 are distroless (no /bin/sh),
+        # and docker --health-cmd is always run via `sh -c`, so any health
+        # command reports unhealthy regardless of server state. The container
+        # is up well before the test steps reach the integration tests.
+        image: quay.io/coreos/etcd:v3.5.16
+        env:
+          ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+          ETCD_ADVERTISE_CLIENT_URLS: http://0.0.0.0:2379
+        ports:
+          - 2379:2379
     steps:
     - uses: actions/checkout@v7
     - name: Setup build environment
       uses: ./.github/actions/setup-build-env
-    - name: Run tests
+    # go test needs the gitignored generated code (docs/ from swag, the proto
+    # packages); reuse the same generation path the build job exercises.
+    - name: Generate code (protobuf + swagger)
+      run: make build-backend
+    - name: Run tests (unit; integration tests self-skip without TEST_* env)
       run: |
-        make test
-    - name: Run DB integration tests (throwaway PostgreSQL)
+        make test-go
+    # Integration tests against the etcd + PostgreSQL service containers above.
+    # Kafka e2e (internal/kafka/*_e2e_test.go) needs a broker and runs locally
+    # against the kind stack; see Readme.md Testing.
+    - name: Run integration tests (etcd + PostgreSQL)
       env:
         TEST_DATABASE_URL: postgres://fastrg:fastrg@localhost:5432/fastrg?sslmode=disable
-      run: make test-db
+        TEST_ETCD_ENDPOINTS: localhost:2379
+      run: |
+        go test -count=1 -cover ./internal/db/ ./internal/server/ ./internal/projection/
   docker-build:
     runs-on: ubuntu-latest
     steps:
@@ -77,6 +97,10 @@ jobs:
     - uses: actions/checkout@v7
     - name: Setup build environment
       uses: ./.github/actions/setup-build-env
+    # The smoke suite's gRPC check go-runs tools/test_grpc, which imports the
+    # gitignored generated controllerpb stubs — generate them first.
+    - name: Generate code (protobuf + swagger)
+      run: make build-backend
     - name: Download Docker image artifact
       uses: actions/download-artifact@v8
       with:
@@ -124,6 +148,10 @@ jobs:
     - uses: actions/checkout@v7
     - name: Setup build environment
       uses: ./.github/actions/setup-build-env
+    # The smoke suite's gRPC check go-runs tools/test_grpc, which imports the
+    # gitignored generated controllerpb stubs — generate them first.
+    - name: Generate code (protobuf + swagger)
+      run: make build-backend
     - name: Download Docker image artifact
       uses: actions/download-artifact@v8
       with:

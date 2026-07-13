@@ -95,10 +95,14 @@ test_database_failure() {
     log_info "Step 7: Verifying controller remains healthy during DB outage"
     sleep 5
     if ! is_service_up "controller"; then
-        log_error "Controller went down when database is unavailable"
+        log_error "Controller container went down when database is unavailable"
         return 1
     fi
-    log_success "Controller remains healthy during DB outage"
+    if ! controller_http_alive; then
+        log_error "Controller HTTPS API stopped answering when database is unavailable"
+        return 1
+    fi
+    log_success "Controller remains healthy (HTTPS API answering) during DB outage"
 
     # Step 8: Restart database
     log_info "Step 8: Restarting database..."

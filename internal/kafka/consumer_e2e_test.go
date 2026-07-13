@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fastrg-controller/internal/db"
+	"fastrg-controller/internal/storage"
 	eventsv1 "fastrg-controller/proto/eventsv1"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,12 +22,22 @@ import (
 func TestConsumerEndToEnd(t *testing.T) {
 	brokers := os.Getenv("TEST_KAFKA_BROKERS")
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	if brokers == "" || dsn == "" {
-		t.Skip("TEST_KAFKA_BROKERS / TEST_DATABASE_URL not set; skipping Kafka e2e")
+	etcdEndpoints := os.Getenv("TEST_ETCD_ENDPOINTS")
+	if brokers == "" || dsn == "" || etcdEndpoints == "" {
+		t.Skip("TEST_KAFKA_BROKERS / TEST_DATABASE_URL / TEST_ETCD_ENDPOINTS not set; skipping Kafka e2e")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Real etcd client so the CONFIG_APPLY_FAIL rollback path actually runs
+	// (passing nil here previously short-circuited the whole rollback/CAS logic).
+	t.Setenv("ETCD_ENDPOINTS", etcdEndpoints)
+	etcd, err := storage.NewEtcdClient()
+	if err != nil {
+		t.Fatalf("etcd connect: %v", err)
+	}
+	defer etcd.Close()
 
 	// Unique topic + group per run so repeated runs against the same broker are
 	// fully isolated (no stale committed offsets or group-member rebalance waits).
@@ -47,10 +58,18 @@ func TestConsumerEndToEnd(t *testing.T) {
 		t.Fatalf("assert pool: %v", err)
 	}
 	defer pool.Close()
-	for _, tbl := range []string{"pppoe_status", "node_events"} {
+	for _, tbl := range []string{"pppoe_status", "node_events", "hsi_config_current", "hsi_config_history"} {
 		if _, err := pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
+	}
+
+	// Seed a config for (n1, user 2) in etcd. The CONFIG_APPLY_FAIL event below has
+	// no prior successful version in history, so the consumer's rollback must
+	// DELETE it — this exercises the etcd CAS rollback path end to end.
+	if _, err := etcd.Client().Put(ctx, "configs/n1/hsi/2",
+		`{"config":{"user_id":"2","vlan_id":"999"},"metadata":{"resourceVersion":"1"}}`); err != nil {
+		t.Fatalf("seed etcd config: %v", err)
 	}
 
 	// Produce three events (auto-creating the topic).
@@ -100,8 +119,8 @@ func TestConsumerEndToEnd(t *testing.T) {
 		t.Fatalf("produce: %v", err)
 	}
 
-	// Run the consumer.
-	go NewConsumer([]string{brokers}, database, nil).Run(ctx)
+	// Run the consumer with the real etcd client.
+	go NewConsumer([]string{brokers}, database, etcd).Run(ctx)
 
 	// PPPoE status projected.
 	waitFor(t, 25*time.Second, func() bool {
@@ -123,6 +142,13 @@ func TestConsumerEndToEnd(t *testing.T) {
 	if len(rt) != 1 || rt[0].Module != "pppd" {
 		t.Fatalf("runtime-error event wrong: %+v", rt)
 	}
+
+	// The CONFIG_APPLY_FAIL for (n1,2) had no prior successful version, so the
+	// rollback must have DELETED the seeded config from etcd.
+	waitFor(t, 25*time.Second, func() bool {
+		resp, err := etcd.Client().Get(ctx, "configs/n1/hsi/2")
+		return err == nil && len(resp.Kvs) == 0
+	}, "etcd config to be rolled back (deleted) after CONFIG_APPLY_FAIL")
 }
 
 func writeWithRetry(ctx context.Context, w *kafkago.Writer, msgs []kafkago.Message) error {

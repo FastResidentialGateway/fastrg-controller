@@ -49,7 +49,7 @@ help:
 .PHONY: build build-backend build-frontend build-all clean create-node \
 	create-node-custom create-multiple-nodes create-test-nodes \
 	list-nodes-etcd list-nodes-api generate-test-certs clean-test-certs \
-	test test-help help docker-build docker-run docker-stop docker-clean
+	test test-go test-help help docker-build docker-run docker-stop docker-clean
 
 # =========== Build targets ==========
 build: build-all
@@ -140,11 +140,17 @@ generate-test-certs:
 clean-test-certs:
 	@$(MAKE) clean-dev-certs
 
-# Main Test Target
-test:
-	go clean -testcache
-	go test -count=1 -v ./internal/utils/
+# Main Test Target — runs every Go package. Integration tests self-skip when
+# their TEST_* env vars are unset (see internal/{db,server,projection,kafka}),
+# so this stays runnable without etcd/PostgreSQL/Kafka.
+test: test-go
 	@$(MAKE) -C tools test
+
+# Go tests only (no tools/ smoke suite) — used by CI, where the smoke suite's
+# self-managed etcd would collide with the job's etcd service container.
+test-go:
+	go clean -testcache
+	go test -count=1 ./...
 
 # DB integration tests (need a throwaway PostgreSQL). Skipped when
 # TEST_DATABASE_URL is unset (see internal/db/*_test.go), so plain `make test`
@@ -157,6 +163,14 @@ test-db:
 # Test Help
 test-help:
 	@$(MAKE) -C tools help
+
+# Coverage across internal packages. Integration paths (server/projection/kafka)
+# only count when TEST_ETCD_ENDPOINTS / TEST_DATABASE_URL / TEST_KAFKA_BROKERS are
+# set (e.g. `kubectl port-forward` to the kind stack — see Readme.md Testing).
+cover:
+	go clean -testcache
+	go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./internal/...
+	@go tool cover -func=coverage.out | tail -1
 
 # =========== Docker & Container Management ==========
 # Build Docker image
