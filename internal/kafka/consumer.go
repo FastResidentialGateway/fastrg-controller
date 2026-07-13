@@ -235,10 +235,10 @@ func (c *Consumer) Run(ctx context.Context) {
 	}
 }
 
-// isDatabaseUnavailable distinguishes transient connectivity/pool failures from
-// SQL errors returned by a reachable PostgreSQL server. Reachable SQL errors can
-// still be dead-lettered into kafka_dlq; unavailable DB errors cannot, because
-// kafka_dlq is stored in the same PostgreSQL instance.
+// isDatabaseUnavailable distinguishes transient connectivity, resource, and
+// transaction failures from permanent SQL errors. Permanent SQL errors can be
+// dead-lettered into kafka_dlq; transient DB errors cannot, because kafka_dlq is
+// stored in the same PostgreSQL instance.
 func isDatabaseUnavailable(err error) bool {
 	if err == nil {
 		return false
@@ -250,7 +250,21 @@ func isDatabaseUnavailable(err error) bool {
 	}
 
 	var pgErr *pgconn.PgError
-	return !errors.As(err, &pgErr)
+	if !errors.As(err, &pgErr) {
+		return true
+	}
+
+	return isTransientSQLState(pgErr.Code)
+}
+
+func isTransientSQLState(code string) bool {
+	if code == "40001" || code == "40P01" {
+		return true
+	}
+
+	return strings.HasPrefix(code, "08") ||
+		strings.HasPrefix(code, "53") ||
+		strings.HasPrefix(code, "57")
 }
 
 type databaseOperationError struct {
