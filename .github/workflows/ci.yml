@@ -47,9 +47,13 @@ jobs:
     - uses: actions/checkout@v7
     - name: Setup build environment
       uses: ./.github/actions/setup-build-env
+    # go test needs the gitignored generated code (docs/ from swag, the proto
+    # packages); reuse the same generation path the build job exercises.
+    - name: Generate code (protobuf + swagger)
+      run: make build-backend
     - name: Run tests (unit; integration tests self-skip without TEST_* env)
       run: |
-        make test
+        make test-go
     # Integration tests against the etcd + PostgreSQL service containers above.
     # Kafka e2e (internal/kafka/*_e2e_test.go) needs a broker and runs locally
     # against the kind stack; see Readme.md Testing.
