@@ -341,7 +341,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 
 	case *eventsv1.NodeEvent_ConfigApplyResult:
 		success := p.ConfigApplyResult.GetSuccess()
-		_, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
+		inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
 			NodeUUID:      ev.GetNodeUuid(),
 			UserID:        ev.GetUserId(),
 			EventType:     eventTypeString(ev.GetType()),
@@ -354,6 +354,14 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		})
 		if err != nil {
 			return wrapDatabaseError(err)
+		}
+		if !inserted {
+			logrus.WithFields(logrus.Fields{
+				"node":           ev.GetNodeUuid(),
+				"user":           ev.GetUserId(),
+				"event_type":     eventTypeString(ev.GetType()),
+				"correlation_id": ev.GetCorrelationId(),
+			}).Info("kafka: duplicate node event ignored")
 		}
 
 		// If config apply succeeded, update hsi_config_current to mark this version
@@ -462,7 +470,7 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		return nil
 
 	case *eventsv1.NodeEvent_RuntimeError:
-		_, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
+		inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
 			NodeUUID:      ev.GetNodeUuid(),
 			UserID:        ev.GetUserId(),
 			EventType:     eventTypeString(ev.GetType()),
@@ -473,6 +481,14 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 			CorrelationID: ev.GetCorrelationId(),
 			EventTime:     eventTime,
 		})
+		if err == nil && !inserted {
+			logrus.WithFields(logrus.Fields{
+				"node":           ev.GetNodeUuid(),
+				"user":           ev.GetUserId(),
+				"event_type":     eventTypeString(ev.GetType()),
+				"correlation_id": ev.GetCorrelationId(),
+			}).Info("kafka: duplicate node event ignored")
+		}
 		return wrapDatabaseError(err)
 
 	default:
