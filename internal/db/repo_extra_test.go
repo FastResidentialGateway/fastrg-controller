@@ -42,14 +42,13 @@ func TestGetLastSuccessfulConfig(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 	ctx := context.Background()
-	d, err := New(ctx, dsn)
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "last_successful")
+	defer cleanup()
+	d, err := New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer d.Close()
-	if _, err := d.pool.Exec(ctx, "TRUNCATE hsi_config_history"); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
 
 	const node, user = "n-succ", "7"
 	if got, err := d.GetLastSuccessfulConfig(ctx, node, user); err != nil || got != nil {

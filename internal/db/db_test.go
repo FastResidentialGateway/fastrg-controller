@@ -16,18 +16,13 @@ func TestConfigRepo(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	d, err := New(ctx, dsn)
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "config_repo")
+	defer cleanup()
+	d, err := New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("New (connect + migrate): %v", err)
 	}
 	defer d.Close()
-
-	// Clean slate.
-	for _, tbl := range []string{"hsi_config_current", "hsi_config_history", "etcd_watch_progress"} {
-		if _, err := d.pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
-			t.Fatalf("truncate %s: %v", tbl, err)
-		}
-	}
 
 	now := time.Now().UTC().Truncate(time.Second)
 	row := HSIConfigRow{
