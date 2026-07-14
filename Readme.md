@@ -84,6 +84,8 @@ The FastRG system must work with an etcd cluster for configuration storage. You 
     - All metrics name are prefixed with `fastrg_`, please use panels in Grafana dashboard to search them.
 - Please make sure all above ports are enabled in the firewall settings to allow proper communication.
 
+The controller uses a single-operator account model and does not provide public registration. Provision the first account at deployment time with `tools/create_user`. An authenticated user can create additional accounts through `POST /api/users`.
+
 ## Quick Start and test the FastRG Controller
 ### To build the binary, run:
 ```bash

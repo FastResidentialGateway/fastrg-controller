@@ -21,7 +21,7 @@ export function useAuth() {
         setIsAuthenticated(hasToken)
 
         // If token was removed, redirect to login if not already there
-        if (!hasToken && window.location.pathname !== '/' && window.location.pathname !== '/register') {
+        if (!hasToken && window.location.pathname !== '/') {
           window.location.href = '/'
         }
       }

@@ -33,7 +33,7 @@ axios.interceptors.response.use(
         localStorage.removeItem('token')
 
         // Show a user-friendly message
-        if (window.location.pathname !== '/' && window.location.pathname !== '/register') {
+        if (window.location.pathname !== '/') {
           // Only show alert if we're not already on login page
           setTimeout(() => {
             alert('您的登入已過期，請重新登入')
@@ -42,7 +42,7 @@ axios.interceptors.response.use(
 
         // Redirect to login page
         // Use window.location to ensure we can redirect from anywhere
-        if (window.location.pathname !== '/' && window.location.pathname !== '/register') {
+        if (window.location.pathname !== '/') {
           window.location.href = '/'
         }
 
@@ -67,12 +67,6 @@ export async function apiLogin(username, password){
     // Re-throw the error with the response intact so Login.jsx can check the status
     throw error
   }
-}
-
-export async function apiRegister(username, password){
-  const resp = await axios.post('/api/register', { username, password })
-  if(resp.status !== 200) throw new Error('registration failed')
-  return resp.data
 }
 
 export async function fetchNodes(){
