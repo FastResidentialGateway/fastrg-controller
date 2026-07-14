@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -493,61 +494,6 @@ func (r *RestServer) VerifyPassword(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password verified"})
-}
-
-// Register creates a new user account
-// @Summary      Register new user
-// @Description  Create a new user account with username and password
-// @Tags         Authentication
-// @Accept       json
-// @Produce      json
-// @Param        request  body      LoginRequest  true  "Registration credentials"
-// @Success      200      {object}  MessageResponse
-// @Failure      400      {object}  ErrorResponse
-// @Failure      409      {object}  ErrorResponse  "Username already exists"
-// @Failure      500      {object}  ErrorResponse
-// @Router       /register [post]
-func (r *RestServer) Register(c *gin.Context) {
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-		return
-	}
-
-	// Basic validation
-	if req.Username == "" || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Username and password are required"})
-		return
-	}
-
-	// Check if user already exists
-	existingPassword, err := r.getUserPassword(req.Username)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing user"})
-		return
-	}
-	if existingPassword != "" {
-		c.JSON(http.StatusConflict, gin.H{"error": "Username already exists"})
-		return
-	}
-
-	// Create new user (reuse AddUser logic)
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
-		return
-	}
-
-	_, err = r.etcd.Client().Put(context.Background(), "users/"+req.Username, string(hash))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "User registered successfully"})
 }
 
 // Logout invalidates the current user's token
@@ -2118,8 +2064,7 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "DNS record deleted successfully"})
 }
 
-func (r *RestServer) StartRestServer(addr string) error {
-	gin.SetMode(gin.ReleaseMode)
+func (r *RestServer) newRouter() *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.SetTrustedProxies(nil)
@@ -2140,7 +2085,6 @@ func (r *RestServer) StartRestServer(addr string) error {
 		api.GET("/health", r.EtcdHealthCheck)
 
 		api.POST("/login", r.Login)
-		api.POST("/register", r.Register) // Public registration endpoint
 		api.POST("/logout", r.AuthMiddlewareWithBlacklist(), r.Logout)
 		api.POST("/verify-password", r.AuthMiddlewareWithBlacklist(), r.VerifyPassword)
 		api.GET("/nodes", r.AuthMiddlewareWithBlacklist(), r.ListNodes)
@@ -2190,10 +2134,22 @@ func (r *RestServer) StartRestServer(addr string) error {
 	router.GET("/", func(c *gin.Context) {
 		c.File("./web/build/index.html")
 	})
-	// Unmatched routes return index.html to let the frontend Router handle SPA paths
+	// Unmatched API routes must remain HTTP 404; frontend paths fall back to the
+	// index page so the SPA router can handle them.
 	router.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+			return
+		}
 		c.File("./web/build/index.html")
 	})
+
+	return router
+}
+
+func (r *RestServer) StartRestServer(addr string) error {
+	gin.SetMode(gin.ReleaseMode)
+	router := r.newRouter()
 
 	// ---- Start HTTPS server ----
 	certFile := os.Getenv("CERT_FILE")

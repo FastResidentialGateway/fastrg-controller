@@ -8,7 +8,6 @@ export const translations = {
     'nav.failedEvents': '失敗事件',
     'nav.logout': '登出',
     'nav.login': '登入',
-    'nav.register': '註冊',
 
     // Common
     'common.loading': '載入中...',
@@ -32,24 +31,6 @@ export const translations = {
     'login.failed': '登入失敗',
     'login.invalidCredentials': '帳號或密碼錯誤，請重新輸入',
     'login.networkError': '登入失敗，請稍後再試',
-
-    // Register Page
-    'register.title': '註冊',
-    'register.username': '使用者名稱',
-    'register.password': '密碼',
-    'register.confirmPassword': '確認密碼',
-    'register.button': '註冊',
-    'register.success': '註冊成功',
-    'register.successTitle': '註冊成功！',
-    'register.successMessage': '您的帳號已建立。將在 2 秒後跳轉至登入頁面...',
-    'register.goToLogin': '前往登入',
-    'register.failed': '註冊失敗',
-    'register.passwordMismatch': '密碼不相符',
-    'register.fillBoth': '請填寫使用者名稱和密碼',
-    'register.usernamePlaceholder': '請輸入使用者名稱',
-    'register.passwordPlaceholder': '請輸入密碼',
-    'register.confirmPasswordPlaceholder': '請再次確認密碼',
-    'register.haveAccount': '已有帳號？前往登入',
 
     // Nodes Page
     'nodes.title': '節點',
@@ -338,7 +319,6 @@ export const translations = {
     'nav.failedEvents': 'Failed Events',
     'nav.logout': 'Logout',
     'nav.login': 'Login',
-    'nav.register': 'Register',
 
     // Common
     'common.loading': 'Loading...',
@@ -362,24 +342,6 @@ export const translations = {
     'login.failed': 'Login failed',
     'login.invalidCredentials': 'Invalid username or password, please try again',
     'login.networkError': 'Login failed, please try again later',
-
-    // Register Page
-    'register.title': 'Register',
-    'register.username': 'Username',
-    'register.password': 'Password',
-    'register.confirmPassword': 'Confirm Password',
-    'register.button': 'Register',
-    'register.success': 'Registration successful',
-    'register.successTitle': 'Registration Successful!',
-    'register.successMessage': 'Your account has been created. You will be redirected to the login page in 2 seconds...',
-    'register.goToLogin': 'Go to Login',
-    'register.failed': 'Registration failed',
-    'register.passwordMismatch': 'Passwords do not match',
-    'register.fillBoth': 'Please fill in both username and password',
-    'register.usernamePlaceholder': 'Please input username',
-    'register.passwordPlaceholder': 'Please input password',
-    'register.confirmPasswordPlaceholder': 'Please confirm password again',
-    'register.haveAccount': 'Already have an account? Go to Login',
 
     // Nodes Page
     'nodes.title': 'Nodes',

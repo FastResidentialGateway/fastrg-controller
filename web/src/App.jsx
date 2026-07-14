@@ -1,7 +1,6 @@
 import React from 'react'
 import { Routes, Route, Link, useNavigate } from 'react-router-dom'
 import Login from './pages/Login'
-import Register from './pages/Register'
 import Nodes from './pages/Nodes'
 import HSIConfig from './pages/HSIConfig'
 import FailedEvents from './pages/FailedEvents'
@@ -37,17 +36,13 @@ export default function App(){
               <button onClick={handleLogout} className="logout-btn">{t('nav.logout')}</button>
             </>
           ) : (
-            <>
-              <Link to="/">{t('nav.login')}</Link> | 
-              <Link to="/register">{t('nav.register')}</Link>
-            </>
+            <Link to="/">{t('nav.login')}</Link>
           )}
         </nav>
       </header>
       <main>
         <Routes>
           <Route path="/" element={<Login onLogin={login} />} />
-          <Route path="/register" element={<Register />} />
           <Route path="/nodes" element={
             <ProtectedRoute>
               <Nodes/>
