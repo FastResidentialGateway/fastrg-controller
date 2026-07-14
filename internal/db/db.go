@@ -1,7 +1,9 @@
-// Package db is the controller's PostgreSQL projection layer (plan B-1). It is
-// the read/history model of etcd config state: tables here are written only by
-// the config-watch projection (internal/projection), never by REST/gRPC
-// handlers directly, keeping a single write source (CQRS).
+// Package db implements the controller's optional PostgreSQL read model. The
+// config-watch projection appends pending/delete history rows and stores its
+// etcd watch checkpoint. The Kafka consumer writes node-confirmed current
+// config, success/failed history rows, PPPoE status, node events, and its DLQ.
+// REST and gRPC handlers write config only to etcd, never directly to these
+// tables.
 package db
 
 import (

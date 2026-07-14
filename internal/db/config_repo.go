@@ -4,24 +4,41 @@ import (
 	"context"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+const upsertCurrentSQL = `
+	INSERT INTO hsi_config_current
+		(node_uuid, user_id, config, desire_status, mod_revision, resource_version, updated_by, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	ON CONFLICT (node_uuid, user_id) DO UPDATE SET
+		config           = EXCLUDED.config,
+		desire_status    = EXCLUDED.desire_status,
+		mod_revision     = EXCLUDED.mod_revision,
+		resource_version = EXCLUDED.resource_version,
+		updated_by       = EXCLUDED.updated_by,
+		updated_at       = EXCLUDED.updated_at
+	WHERE hsi_config_current.mod_revision < EXCLUDED.mod_revision`
+
+const appendHistorySQL = `
+	INSERT INTO hsi_config_history
+		(node_uuid, user_id, action, config, desire_status, mod_revision, resource_version, updated_by, updated_at, status)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	ON CONFLICT (node_uuid, user_id, mod_revision, status) DO NOTHING`
+
+type configExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
 
 // UpsertCurrent writes the latest state for (node, user). The mod_revision guard
 // makes it safe against out-of-order delivery: an older revision (e.g. replayed
 // during reconcile) never overwrites a newer one already stored.
 func (d *DB) UpsertCurrent(ctx context.Context, row HSIConfigRow) error {
-	_, err := d.pool.Exec(ctx, `
-		INSERT INTO hsi_config_current
-			(node_uuid, user_id, config, desire_status, mod_revision, resource_version, updated_by, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (node_uuid, user_id) DO UPDATE SET
-			config           = EXCLUDED.config,
-			desire_status    = EXCLUDED.desire_status,
-			mod_revision     = EXCLUDED.mod_revision,
-			resource_version = EXCLUDED.resource_version,
-			updated_by       = EXCLUDED.updated_by,
-			updated_at       = EXCLUDED.updated_at
-		WHERE hsi_config_current.mod_revision < EXCLUDED.mod_revision`,
+	return upsertCurrent(ctx, d.pool, row)
+}
+
+func upsertCurrent(ctx context.Context, execer configExecer, row HSIConfigRow) error {
+	_, err := execer.Exec(ctx, upsertCurrentSQL,
 		row.NodeUUID, row.UserID, row.ConfigJSON, row.DesireStatus,
 		row.ModRevision, row.ResourceVersion, row.UpdatedBy, row.UpdatedAt,
 	)
@@ -68,15 +85,35 @@ func (d *DB) AppendHistory(ctx context.Context, row HSIConfigRow) error {
 // retries from creating duplicate history entries.
 // status values: 'pending' (awaiting node apply result), 'success', 'failed'
 func (d *DB) AppendHistoryWithStatus(ctx context.Context, row HSIConfigRow, status string) error {
-	_, err := d.pool.Exec(ctx, `
-		INSERT INTO hsi_config_history
-			(node_uuid, user_id, action, config, desire_status, mod_revision, resource_version, updated_by, updated_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (node_uuid, user_id, mod_revision, status) DO NOTHING`,
+	return appendHistoryWithStatus(ctx, d.pool, row, status)
+}
+
+func appendHistoryWithStatus(ctx context.Context, execer configExecer, row HSIConfigRow, status string) error {
+	_, err := execer.Exec(ctx, appendHistorySQL,
 		row.NodeUUID, row.UserID, row.Action, row.ConfigJSON, row.DesireStatus,
 		row.ModRevision, row.ResourceVersion, row.UpdatedBy, row.UpdatedAt, status,
 	)
 	return err
+}
+
+// UpsertCurrentWithHistory atomically updates the current config and appends
+// its history status. A failure in either write rolls back both changes.
+func (d *DB) UpsertCurrentWithHistory(ctx context.Context, row HSIConfigRow, status string) error {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := upsertCurrent(ctx, tx, row); err != nil {
+		return err
+	}
+	if err := appendHistoryWithStatus(ctx, tx, row, status); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // GetWatchProgress returns the last applied revision for a watcher. ok is false
