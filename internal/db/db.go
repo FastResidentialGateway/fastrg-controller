@@ -29,6 +29,11 @@ var migrationFS embed.FS
 // hexadecimal value is the ASCII encoding of "FastRG".
 const migrationAdvisoryLockKey int64 = 0x466173745247
 
+const (
+	connectRetryInitialDelay = 2 * time.Second
+	connectRetryMaxDelay     = 30 * time.Second
+)
+
 // DB wraps a pgx connection pool.
 type DB struct {
 	pool *pgxpool.Pool
@@ -95,6 +100,44 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return d, nil
+}
+
+// ConnectLoop keeps trying to establish the controller's optional PostgreSQL
+// read model until it succeeds or ctx is cancelled. Once connected, onReady is
+// called exactly once. The connection remains available until ctx is cancelled,
+// at which point its pool is closed and ConnectLoop returns.
+func ConnectLoop(ctx context.Context, dsn string, onReady func(*DB)) {
+	delay := connectRetryInitialDelay
+	for attempt := 1; ; attempt++ {
+		database, err := New(ctx, dsn)
+		if err == nil {
+			if ctx.Err() != nil {
+				database.Close()
+				return
+			}
+
+			logrus.Info("Connected to PostgreSQL; enabling database-backed components")
+			onReady(database)
+			<-ctx.Done()
+			database.Close()
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		logrus.WithError(err).Warnf(
+			"PostgreSQL not ready, retrying in %s (attempt %d)", delay, attempt,
+		)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		delay = min(delay*2, connectRetryMaxDelay)
+	}
 }
 
 // Close releases the connection pool.

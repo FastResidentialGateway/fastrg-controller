@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fastrg-controller/internal/db"
@@ -146,14 +147,23 @@ type RestServer struct {
 	etcd           *storage.EtcdClient
 	jwtSecret      []byte
 	nodeMonitorMgr *NodeMonitorManager
-	// db is the PostgreSQL projection. It is nil when no database is configured;
-	// the DB-backed endpoints (node events, PPPoE status) then return 503.
-	db *db.DB
+	// database is the PostgreSQL projection. It remains nil until an optional
+	// database is ready; the DB-backed endpoints then return 503.
+	database atomic.Pointer[db.DB]
 }
 
 func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager, database *db.DB) *RestServer {
-	return &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm, db: database}
+	r := &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm}
+	r.SetDatabase(database)
+	return r
 }
+
+// SetDatabase makes a PostgreSQL connection available to DB-backed handlers.
+// It is safe to call while the REST server is serving requests.
+func (r *RestServer) SetDatabase(database *db.DB) { r.database.Store(database) }
+
+// Database returns the currently available PostgreSQL connection, if any.
+func (r *RestServer) Database() *db.DB { return r.database.Load() }
 
 // EtcdHealthCheck returns the health status of the service
 // @Summary      Health check
@@ -1752,13 +1762,14 @@ type FailedEventsResponse struct {
 	Events []db.NodeEventRow `json:"events"`
 }
 
-// requireDB writes a 503 and returns false when no database is configured.
-func (r *RestServer) requireDB(c *gin.Context) bool {
-	if r.db == nil {
+// requireDB returns the current database, or writes a 503 when none is ready.
+func (r *RestServer) requireDB(c *gin.Context) *db.DB {
+	database := r.Database()
+	if database == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
-		return false
+		return nil
 	}
-	return true
+	return database
 }
 
 // GetFailedEvents returns node events for a specific node (from PostgreSQL).
@@ -1779,11 +1790,12 @@ func (r *RestServer) GetFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID is required"})
 		return
 	}
-	if !r.requireDB(c) {
+	database := r.requireDB(c)
+	if database == nil {
 		return
 	}
 
-	events, err := r.db.ListNodeEvents(c.Request.Context(), nodeId, c.Query("event_type"), 0)
+	events, err := database.ListNodeEvents(c.Request.Context(), nodeId, c.Query("event_type"), 0)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to list node events")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
@@ -1804,10 +1816,11 @@ func (r *RestServer) GetFailedEvents(c *gin.Context) {
 // @Failure      500         {object}  ErrorResponse
 // @Router       /failed-events [get]
 func (r *RestServer) GetAllFailedEvents(c *gin.Context) {
-	if !r.requireDB(c) {
+	database := r.requireDB(c)
+	if database == nil {
 		return
 	}
-	events, err := r.db.ListNodeEvents(c.Request.Context(), "", c.Query("event_type"), 0)
+	events, err := database.ListNodeEvents(c.Request.Context(), "", c.Query("event_type"), 0)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to list node events")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get node events"})
@@ -1843,11 +1856,12 @@ func (r *RestServer) DeleteFailedEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No ids provided"})
 		return
 	}
-	if !r.requireDB(c) {
+	database := r.requireDB(c)
+	if database == nil {
 		return
 	}
 
-	deleted, err := r.db.DeleteNodeEvents(c.Request.Context(), req.IDs)
+	deleted, err := database.DeleteNodeEvents(c.Request.Context(), req.IDs)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to delete node events")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete node events"})
@@ -1877,11 +1891,12 @@ func (r *RestServer) GetPPPoEStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
 		return
 	}
-	if !r.requireDB(c) {
+	database := r.requireDB(c)
+	if database == nil {
 		return
 	}
 
-	status, ok, err := r.db.GetPPPoEStatus(c.Request.Context(), nodeId, userId)
+	status, ok, err := database.GetPPPoEStatus(c.Request.Context(), nodeId, userId)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to get PPPoE status")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get PPPoE status"})

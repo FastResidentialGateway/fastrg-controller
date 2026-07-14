@@ -103,37 +103,23 @@ func main() {
 	}
 	defer etcd.Close()
 
-	// Optional PostgreSQL projection (CQRS): when a database is configured,
-	// watch configs/ and project changes into the current/history tables, and
-	// consume node events from Kafka into pppoe_status / node_events. The
-	// controller still serves entirely from etcd if the DB is absent or down.
-	var database *db.DB
+	// Start Prometheus metrics server
+	if err := server.StartPrometheusServer(); err != nil {
+		logrus.WithError(err).Error("failed to start Prometheus metrics server")
+	}
+
+	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
+	// Pass database for stateless recovery of PPPoE status
+	nmm := server.NewNodeMonitorManager(nil)
+	rest := server.NewRestServer(etcd, nmm, nil)
+
+	// Optional PostgreSQL read model. Connection attempts run in the background
+	// so every listener can start in etcd-only mode even when PostgreSQL is late.
+	// ConnectLoop publishes a database exactly once after migrations succeed.
 	if dsn := db.DSN(); dsn != "" {
-		// Retry with exponential backoff: PostgreSQL pod may not be ready when
-		// the controller starts in Kubernetes (race condition on pod scheduling).
-		const maxRetries = 10
-		delay := 2 * time.Second
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			var dbErr error
-			database, dbErr = db.New(ctx, dsn)
-			if dbErr == nil {
-				break
-			}
-			if attempt == maxRetries {
-				logrus.WithError(dbErr).Error("failed to connect PostgreSQL after retries; projection and Kafka consumer disabled")
-				database = nil
-				break
-			}
-			logrus.WithError(dbErr).Warnf("PostgreSQL not ready, retrying in %s (%d/%d)", delay, attempt, maxRetries)
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				database = nil
-			}
-			delay = min(delay*2, 30*time.Second)
-		}
-		if database != nil {
-			defer database.Close()
+		go db.ConnectLoop(ctx, dsn, func(database *db.DB) {
+			nmm.SetDatabase(database)
+			rest.SetDatabase(database)
 
 			// The Kafka consumer runs on every replica: a single consumer group
 			// (KAFKA_GROUP) balances partitions across them, so this is safe and
@@ -143,19 +129,10 @@ func main() {
 			} else {
 				logrus.Info("KAFKA_BROKERS not set; running without Kafka consumer")
 			}
-		}
+		})
 	} else {
 		logrus.Info("DATABASE_URL/POSTGRES_HOST not set; running without PostgreSQL projection")
 	}
-
-	// Start Prometheus metrics server
-	if err := server.StartPrometheusServer(); err != nil {
-		logrus.WithError(err).Error("failed to start Prometheus metrics server")
-	}
-
-	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
-	// Pass database for stateless recovery of PPPoE status
-	nmm := server.NewNodeMonitorManager(database)
 
 	// Leader election (etcd-based): every replica serves REST/gRPC and runs the
 	// Kafka consumer, but only the leader runs the singleton background workers —
@@ -163,12 +140,9 @@ func main() {
 	// stale-node eviction, and per-node stats scraping — so they are not
 	// duplicated across replicas. A single instance wins immediately.
 	go leader.Run(ctx, etcd.Client(), "fastrg-controller/leader", func(leaderCtx context.Context) {
-		logrus.Infof("Became leader (%s): starting projection + node-state workers", leader.Identity())
+		logrus.Infof("Became leader (%s): starting node-state workers", leader.Identity())
 		nmm.SetLeader(true)
-		if database != nil {
-			go projection.New(etcd, database).Run(leaderCtx)
-			logrus.Info("Started config projection (etcd -> PostgreSQL)")
-		}
+		go startProjectionWhenDatabaseReady(leaderCtx, etcd, nmm)
 		go func() {
 			<-leaderCtx.Done()
 			nmm.SetLeader(false)
@@ -199,10 +173,32 @@ func main() {
 	}
 
 	// start REST API (HTTPS)
-	rest := server.NewRestServer(etcd, nmm, database)
 	logrus.Infof("Starting HTTPS server on :%s", httpsPort)
 	if err := rest.StartRestServer(":" + httpsPort); err != nil {
 		logrus.WithError(err).Fatal("failed to start HTTPS server")
+	}
+}
+
+// startProjectionWhenDatabaseReady covers both event orders: an already-ready
+// database starts immediately after election, while a leader elected first
+// waits until ConnectLoop publishes the database. The wait and projection are
+// both bound to leaderCtx, so losing leadership stops either phase.
+func startProjectionWhenDatabaseReady(leaderCtx context.Context, etcd *storage.EtcdClient, nmm *server.NodeMonitorManager) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		if database := nmm.Database(); database != nil {
+			logrus.Info("Started config projection (etcd -> PostgreSQL)")
+			projection.New(etcd, database).Run(leaderCtx)
+			return
+		}
+
+		select {
+		case <-leaderCtx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

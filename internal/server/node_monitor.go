@@ -30,7 +30,6 @@ type NodeMonitor struct {
 	cancel       context.CancelFunc
 	grpcConn     *grpc.ClientConn
 	fastrgClient fastrgnodepb.FastrgServiceClient
-	db           *db.DB              // Optional: for syncing PPPoE status to database (stateless recovery)
 	mgr          *NodeMonitorManager // back-reference for the leadership check
 }
 
@@ -38,7 +37,7 @@ type NodeMonitor struct {
 type NodeMonitorManager struct {
 	mu       sync.RWMutex
 	monitors map[string]*NodeMonitor
-	db       *db.DB // Optional: for syncing PPPoE status to database
+	database atomic.Pointer[db.DB] // Optional: for syncing PPPoE status to database
 	// leader is true only on the elected leader replica. On-demand REST queries
 	// run on every replica (so monitors/gRPC conns exist everywhere), but the
 	// background poll-and-write loop runs only on the leader to avoid 3x node
@@ -55,11 +54,21 @@ func (nmm *NodeMonitorManager) IsLeader() bool { return nmm.leader.Load() }
 // NewNodeMonitorManager creates a new NodeMonitorManager.
 // database parameter is optional (can be nil) for stateless recovery of PPPoE status.
 func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
-	return &NodeMonitorManager{
+	nmm := &NodeMonitorManager{
 		monitors: make(map[string]*NodeMonitor),
-		db:       database,
 	}
+	nmm.SetDatabase(database)
+	return nmm
 }
+
+// SetDatabase makes a PostgreSQL connection available to current and future
+// node monitors. It is safe to call while monitor loops are running.
+func (nmm *NodeMonitorManager) SetDatabase(database *db.DB) {
+	nmm.database.Store(database)
+}
+
+// Database returns the currently available PostgreSQL connection, if any.
+func (nmm *NodeMonitorManager) Database() *db.DB { return nmm.database.Load() }
 
 // StartMonitoring starts monitoring a node. No-ops when monitoring is already
 // active for this node at the same IP.
@@ -99,7 +108,6 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 		cancel:       cancel,
 		grpcConn:     conn,
 		fastrgClient: fastrgClient,
-		db:           nmm.db,
 		mgr:          nmm,
 	}
 
@@ -290,12 +298,16 @@ func (nm *NodeMonitor) syncPPPoEStatus(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if nm.db == nil {
+	if nm.mgr == nil {
+		return nil
+	}
+	database := nm.mgr.Database()
+	if database == nil {
 		return nil
 	}
 	for _, hsi := range hsiInfo.HsiInfos {
 		userID := fmt.Sprint(hsi.UserId)
-		statusErr := nm.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
+		statusErr := database.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
 			NodeUUID:     nm.nodeUUID,
 			UserID:       userID,
 			Phase:        hsi.Status,
