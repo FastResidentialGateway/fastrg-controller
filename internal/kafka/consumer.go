@@ -22,18 +22,82 @@ import (
 	eventsv1 "fastrg-controller/proto/eventsv1"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	defaultTopic   = "fastrg.node.events"
-	defaultGroupID = "fastrg-controller"
-	retryBackoff   = 2 * time.Second
+	defaultTopic             = "fastrg.node.events"
+	defaultGroupID           = "fastrg-controller"
+	retryInterval            = 2 * time.Second
+	messageHandleTimeout     = 5 * time.Second
+	infraRetryInitialBackoff = 2 * time.Second
+	infraRetryMaxBackoff     = 30 * time.Second
+	stallErrorThreshold      = 60 * time.Second
 )
 
-var errRollbackSuperseded = errors.New("rollback skipped because the current config supersedes the failed version")
+var (
+	errRollbackSuperseded = errors.New("rollback skipped because the current config supersedes the failed version")
+
+	kafkaConsumerStallSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "fastrg_kafka_consumer_stall_seconds",
+		Help: "Seconds the Kafka consumer has continuously retried its current message because infrastructure is unavailable.",
+	})
+	kafkaConsumerInfraRetriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "fastrg_kafka_consumer_infra_retries_total",
+		Help: "Total Kafka message retries caused by unavailable infrastructure.",
+	}, []string{"source"})
+)
+
+type infraRetryBackoff struct {
+	current time.Duration
+}
+
+func newInfraRetryBackoff() *infraRetryBackoff {
+	return &infraRetryBackoff{current: infraRetryInitialBackoff}
+}
+
+func (b *infraRetryBackoff) Next() time.Duration {
+	delay := b.current
+	b.current = min(b.current*2, infraRetryMaxBackoff)
+	return delay
+}
+
+func (b *infraRetryBackoff) Reset() {
+	b.current = infraRetryInitialBackoff
+}
+
+type consumerStall struct {
+	startedAt time.Time
+}
+
+func (s *consumerStall) retry(source string, now time.Time) time.Duration {
+	if s.startedAt.IsZero() {
+		s.startedAt = now
+	}
+	elapsed := now.Sub(s.startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	kafkaConsumerStallSeconds.Set(elapsed.Seconds())
+	kafkaConsumerInfraRetriesTotal.WithLabelValues(source).Inc()
+	return elapsed
+}
+
+func (s *consumerStall) reset() {
+	s.startedAt = time.Time{}
+	kafkaConsumerStallSeconds.Set(0)
+}
+
+func stallLogLevel(elapsed time.Duration) logrus.Level {
+	if elapsed >= stallErrorThreshold {
+		return logrus.ErrorLevel
+	}
+	return logrus.WarnLevel
+}
 
 type rollbackSkipError struct {
 	reason string
@@ -158,6 +222,7 @@ func NewConsumer(brokers []string, database *db.DB, etcdClient *storage.EtcdClie
 // Run consumes until ctx is cancelled, then closes the reader.
 func (c *Consumer) Run(ctx context.Context) {
 	logrus.Info("Started Kafka consumer for node events")
+	defer kafkaConsumerStallSeconds.Set(0)
 
 	// Close the reader built at construction time and wait until the topic has
 	// at least one partition before re-joining the consumer group.  If the
@@ -190,9 +255,17 @@ func (c *Consumer) Run(ctx context.Context) {
 		// DLQ before committing the offset.
 		const maxRetries = 5
 		backoff := 100 * time.Millisecond
+		infraBackoff := newInfraRetryBackoff()
+		stall := consumerStall{}
 		failed := false
 		for attempt := 1; ctx.Err() == nil; {
-			if err := c.handle(ctx, m.Value); err != nil {
+			// Bound each attempt so clients that wait for an unavailable backend to
+			// reconnect return control to this retry loop. The outer consumer context
+			// still governs shutdown and no offset is committed on a timeout.
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, messageHandleTimeout)
+			err := c.handle(attemptCtx, m.Value)
+			cancelAttempt()
+			if err != nil {
 				failed = true
 
 				if isDatabaseUnavailable(err) || isEtcdUnavailable(err) {
@@ -200,11 +273,25 @@ func (c *Consumer) Run(ctx context.Context) {
 					if isDatabaseUnavailable(err) {
 						source = "database"
 					}
-					logrus.WithError(err).Warnf("kafka: %s unavailable, retrying same message", source)
-					c.sleep(ctx)
+					elapsed := stall.retry(source, time.Now())
+					entry := logrus.WithError(err).WithFields(logrus.Fields{
+						"source":        source,
+						"stall_seconds": elapsed.Seconds(),
+						"topic":         m.Topic,
+						"partition":     m.Partition,
+						"offset":        m.Offset,
+					})
+					if stallLogLevel(elapsed) == logrus.ErrorLevel {
+						entry.Error("kafka: infrastructure unavailable, retrying same message")
+					} else {
+						entry.Warn("kafka: infrastructure unavailable, retrying same message")
+					}
+					c.sleepFor(ctx, infraBackoff.Next())
 					continue
 				}
 
+				stall.reset()
+				infraBackoff.Reset()
 				logrus.WithError(err).Warnf("kafka: handle failed (attempt %d/%d), backing off %v",
 					attempt, maxRetries, backoff)
 				if attempt >= maxRetries {
@@ -220,6 +307,8 @@ func (c *Consumer) Run(ctx context.Context) {
 				}
 			}
 			// Success
+			stall.reset()
+			infraBackoff.Reset()
 			failed = false
 			break
 		}
@@ -228,6 +317,7 @@ func (c *Consumer) Run(ctx context.Context) {
 		if failed && ctx.Err() == nil {
 			logrus.Errorf("kafka: message failed after %d retries, sending to DLQ", maxRetries)
 			c.waitAndSendToDLQ(ctx, m)
+			stall.reset()
 		}
 		if ctx.Err() != nil {
 			return
@@ -344,9 +434,13 @@ func (c *Consumer) waitForTopicReady(ctx context.Context, brokers []string, topi
 }
 
 func (c *Consumer) sleep(ctx context.Context) {
+	c.sleepFor(ctx, retryInterval)
+}
+
+func (c *Consumer) sleepFor(ctx context.Context, delay time.Duration) {
 	select {
 	case <-ctx.Done():
-	case <-time.After(retryBackoff):
+	case <-time.After(delay):
 	}
 }
 
