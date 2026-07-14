@@ -10,6 +10,8 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -22,6 +24,11 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
+// migrationAdvisoryLockKey is the fixed PostgreSQL advisory-lock identifier
+// used by every FastRG Controller instance while applying migrations. The
+// hexadecimal value is the ASCII encoding of "FastRG".
+const migrationAdvisoryLockKey int64 = 0x466173745247
+
 // DB wraps a pgx connection pool.
 type DB struct {
 	pool *pgxpool.Pool
@@ -30,10 +37,11 @@ type DB struct {
 // DSN returns the configured PostgreSQL connection string, or "" when no
 // database is configured (in which case the controller runs without the
 // projection). DATABASE_URL takes precedence; otherwise it is assembled from
-// POSTGRES_* parts when POSTGRES_HOST is set.
+// POSTGRES_* parts when POSTGRES_HOST is set. DATABASE_URL is returned as-is;
+// callers providing it are responsible for supplying an already escaped URL.
 func DSN() string {
-	if url := os.Getenv("DATABASE_URL"); url != "" {
-		return url
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		return databaseURL
 	}
 	host := os.Getenv("POSTGRES_HOST")
 	if host == "" {
@@ -44,7 +52,14 @@ func DSN() string {
 	pass := envOr("POSTGRES_PASSWORD", "fastrg")
 	name := envOr("POSTGRES_DB", "fastrg")
 	sslmode := envOr("POSTGRES_SSLMODE", "disable")
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode)
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, pass),
+		Host:     net.JoinHostPort(host, port),
+		Path:     "/" + name,
+		RawQuery: "sslmode=" + url.QueryEscape(sslmode),
+	}
+	return u.String()
 }
 
 func envOr(key, def string) string {
@@ -90,7 +105,36 @@ func (d *DB) Close() {
 // migrate applies every embedded migration not yet recorded in
 // schema_migrations, in filename order, each inside its own transaction.
 func (d *DB) migrate(ctx context.Context) error {
-	if _, err := d.pool.Exec(ctx,
+	// PostgreSQL advisory locks belong to a session. Keep a dedicated pooled
+	// connection for the lock, every migration operation, and the unlock;
+	// separate pool calls could use different sessions or expose the locked
+	// session to unrelated work before migration completes.
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		// Unlock must still run when the caller's context is canceled after the
+		// lock was acquired. PostgreSQL also releases the lock if this session
+		// has already disconnected.
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var unlocked bool
+		if err := conn.QueryRow(unlockCtx,
+			`SELECT pg_advisory_unlock($1)`, migrationAdvisoryLockKey,
+		).Scan(&unlocked); err != nil {
+			logrus.Warnf("Failed to release DB migration advisory lock: %v", err)
+		} else if !unlocked {
+			logrus.Warn("DB migration advisory lock was not held during release")
+		}
+	}()
+
+	if _, err := conn.Exec(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 	); err != nil {
 		return err
@@ -110,7 +154,7 @@ func (d *DB) migrate(ctx context.Context) error {
 
 	for _, name := range names {
 		var exists bool
-		if err := d.pool.QueryRow(ctx,
+		if err := conn.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)`, name,
 		).Scan(&exists); err != nil {
 			return err
@@ -124,7 +168,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			return err
 		}
 
-		tx, err := d.pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return err
 		}
