@@ -20,6 +20,7 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 
 	proxyAddr := reserveTCPAddress(t)
 	proxyDSN := replaceDSNHost(t, baseDSN, proxyAddr)
+	proxyBackend := postgresBackendFromDSN(t, baseDSN)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -44,7 +45,7 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 	// Leave the proxy port closed long enough for the first connection attempt
 	// to fail, then begin forwarding to the throwaway PostgreSQL instance.
 	time.Sleep(time.Second)
-	proxy := startTCPProxy(t, proxyAddr, "localhost:15432")
+	proxy := startTCPProxy(t, proxyAddr, proxyBackend)
 
 	select {
 	case database := <-ready:
@@ -74,6 +75,38 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 	}
 }
 
+func TestPostgresBackendFromDSN(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{
+			name: "explicit port",
+			dsn:  "postgres://fastrg:fastrg@localhost:15432/fastrg?sslmode=disable",
+			want: "localhost:15432",
+		},
+		{
+			name: "default PostgreSQL port",
+			dsn:  "postgresql://fastrg:fastrg@postgres/fastrg?sslmode=disable",
+			want: "postgres:5432",
+		},
+		{
+			name: "IPv6 default PostgreSQL port",
+			dsn:  "postgres://fastrg:fastrg@[::1]/fastrg?sslmode=disable",
+			want: "[::1]:5432",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := postgresBackendFromDSN(t, tt.dsn); got != tt.want {
+				t.Fatalf("postgresBackendFromDSN() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func reserveTCPAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -98,6 +131,26 @@ func replaceDSNHost(t *testing.T, dsn, host string) string {
 	}
 	parsed.Host = host
 	return parsed.String()
+}
+
+func postgresBackendFromDSN(t *testing.T, dsn string) string {
+	t.Helper()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL backend: %v", err)
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL, got scheme %q", parsed.Scheme)
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		t.Fatal("TEST_DATABASE_URL must include a PostgreSQL hostname")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 type tcpProxy struct {
