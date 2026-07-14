@@ -36,7 +36,7 @@ func NewConfigGrpcServer(etcd *storage.EtcdClient, jwtSecret []byte) *ConfigGrpc
 // ── auth ──────────────────────────────────────────────────────────────────
 
 // callerFromCtx extracts and validates the JWT from gRPC metadata, returning
-// the username. Returns an Unauthenticated status error when missing or invalid.
+// the username. It also rejects tokens revoked through the REST logout endpoint.
 func (s *ConfigGrpcServer) callerFromCtx(ctx context.Context) (string, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -51,6 +51,19 @@ func (s *ConfigGrpcServer) callerFromCtx(ctx context.Context) (string, error) {
 	user, err := rs.getUserFromToken(vals[0])
 	if err != nil {
 		return "", status.Error(codes.Unauthenticated, "invalid token")
+	}
+
+	blacklistKey := fmt.Sprintf("token_blacklist/%s", vals[0])
+	blacklistCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := s.etcd.Client().Get(blacklistCtx, blacklistKey)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to check token blacklist")
+		return "", status.Error(codes.Unavailable, "authentication service unavailable")
+	}
+	if len(resp.Kvs) > 0 {
+		return "", status.Error(codes.Unauthenticated, "token has been revoked")
 	}
 	return user, nil
 }
