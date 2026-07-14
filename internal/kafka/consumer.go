@@ -428,15 +428,10 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 						Action:          db.ActionUpsert,
 						DesireStatus:    "",
 					}
-					if err := c.db.UpsertCurrent(ctx, row); err != nil {
-						logrus.WithError(err).Error("kafka: failed to update hsi_config_current after CONFIG_APPLY_OK")
-						return wrapDatabaseError(err)
-					}
-					// Record this success in history. Database operation is idempotent
-					// (AppendHistoryWithStatus uses ON CONFLICT to avoid duplicates if
-					// consumer retries after database restart).
-					if err := c.db.AppendHistoryWithStatus(ctx, row, "success"); err != nil {
-						logrus.WithError(err).Error("kafka: failed to record success in history after CONFIG_APPLY_OK")
+					// Update current state and record success atomically. The operation
+					// remains idempotent when the consumer retries the same event.
+					if err := c.db.UpsertCurrentWithHistory(ctx, row, "success"); err != nil {
+						logrus.WithError(err).Error("kafka: failed to update current config and success history after CONFIG_APPLY_OK")
 						return wrapDatabaseError(err)
 					}
 					logrus.Infof("kafka: config apply succeeded for node=%s user=%s, updated hsi_config_current",

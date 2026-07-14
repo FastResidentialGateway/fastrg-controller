@@ -1,9 +1,7 @@
-// Package projection is the single writer of the controller's PostgreSQL
-// config tables (plan B-2, CQRS). It watches the etcd configs/ prefix and
-// projects each change into hsi_config_current (latest state) and
-// hsi_config_history (audit log). REST/gRPC handlers only ever write etcd; the
-// controller's own etcd writes flow back here via the watch, so there is one
-// write path to the DB and no dual-write inconsistency.
+// Package projection watches the etcd configs/ prefix and appends config
+// changes to hsi_config_history as an audit log while maintaining a watch
+// checkpoint. The Kafka consumer manages hsi_config_current from node-confirmed
+// apply results. REST and gRPC handlers write config only to etcd.
 package projection
 
 import (
@@ -119,9 +117,8 @@ func (p *Projection) reconcile(ctx context.Context) (int64, error) {
 	return rev, nil
 }
 
-// handleEvent projects one live watch event into the current and history tables
-// and advances the checkpoint. Upserts are idempotent (mod_revision guard), so
-// at-least-once redelivery after a restart is safe.
+// handleEvent appends one live watch event to history and advances the
+// checkpoint. Duplicate history events are ignored by the idempotency key.
 func (p *Projection) handleEvent(ctx context.Context, ev storage.ConfigEvent) error {
 	node, user, ok := parseHSIKey(ev.Key)
 	if !ok {
