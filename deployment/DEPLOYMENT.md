@@ -35,7 +35,7 @@ environment variables below.
 | `KAFKA_TOPIC` | `fastrg.node.events` | Topic to consume node events from. |
 | `KAFKA_GROUP` | `fastrg-controller` | Consumer group id. |
 | `CERT_FILE` / `KEY_FILE` | `./certs/server.crt` / `.key` | TLS cert/key for the HTTPS listeners. |
-| `JWT_SECRET` | random per boot | Signing secret for API tokens. **Set a stable value in production** (otherwise tokens are invalidated on restart). |
+| `JWT_SECRET` | shared value in etcd | Signing secret for API tokens. When unset, replicas share `auth/jwt_secret` from etcd; set a stable value to keep the secret out of etcd. |
 | `GRPC_PORT` / `HTTPS_PORT` / `HTTP_REDIRECT_PORT` / `LOG_HTTPS_PORT` | `50051` / `8443` / `8080` / `8444` | Listener ports. |
 | `PROMETHEUS_LISTEN_IP` | `127.0.0.1` | Bind IP for the metrics server (port is fixed at `55688`). Set `0.0.0.0` in containers. |
 
@@ -120,8 +120,8 @@ docker compose down -v            # also drop etcd/postgres/kafka data
 ```
 
 The controller image self-generates a self-signed TLS cert at build time.
-For real use, mount your own cert/key and set `CERT_FILE`/`KEY_FILE`, and set a
-stable `JWT_SECRET`.
+For real use, mount your own cert/key and set `CERT_FILE`/`KEY_FILE`. Set a
+stable `JWT_SECRET` to keep the signing secret out of etcd.
 
 ---
 

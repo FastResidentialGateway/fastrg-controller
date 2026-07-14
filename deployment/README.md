@@ -186,7 +186,7 @@ helm install fastrg-controller deployment/helm/fastrg-controller/ \
 | `CERT_FILE` | `/app/certs/server.crt` | TLS certificate path |
 | `KEY_FILE` | `/app/certs/server.key` | TLS key path |
 | `PROMETHEUS_LISTEN_IP` | `127.0.0.1` | Prometheus metrics listen IP (`0.0.0.0` in K8s) |
-| `JWT_SECRET` | *(random per start)* | JWT signing secret — set a stable value in production |
+| `JWT_SECRET` | *(shared in etcd)* | JWT signing secret — when unset, replicas use `auth/jwt_secret`; set a stable value to keep it out of etcd |
 
 ## Helm Values Reference
 
@@ -261,7 +261,7 @@ etcd:
 
 ### JWT Secret
 
-The controller generates a random JWT secret on startup by default. Set a stable `JWT_SECRET` in production — otherwise all sessions are invalidated on pod restart.
+When `JWT_SECRET` is unset, the controller creates and reuses a cluster-shared secret at `auth/jwt_secret` in etcd. Set a stable `JWT_SECRET` to keep the signing secret out of etcd.
 
 ### TLS
 

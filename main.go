@@ -103,6 +103,11 @@ func main() {
 	}
 	defer etcd.Close()
 
+	jwtSecret, err := server.ResolveJWTSecret(ctx, etcd)
+	if err != nil {
+		logrus.WithError(err).Fatal("failed to resolve JWT secret")
+	}
+
 	// Start Prometheus metrics server
 	if err := server.StartPrometheusServer(); err != nil {
 		logrus.WithError(err).Error("failed to start Prometheus metrics server")
@@ -111,7 +116,7 @@ func main() {
 	// Create shared NodeMonitorManager (used by both gRPC and REST servers)
 	// Pass database for stateless recovery of PPPoE status
 	nmm := server.NewNodeMonitorManager(nil)
-	rest := server.NewRestServer(etcd, nmm, nil)
+	rest := server.NewRestServer(etcd, nmm, nil, jwtSecret)
 
 	// Optional PostgreSQL read model. Connection attempts run in the background
 	// so every listener can start in etcd-only mode even when PostgreSQL is late.
@@ -151,7 +156,7 @@ func main() {
 	})
 
 	// CLI-facing config gRPC service (shares same port as NodeManagement)
-	configSvc := server.NewConfigGrpcServer(etcd, []byte(server.GetJWTSecret()))
+	configSvc := server.NewConfigGrpcServer(etcd, jwtSecret)
 
 	var wg sync.WaitGroup
 

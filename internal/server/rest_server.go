@@ -51,7 +51,9 @@ var (
 	jwtSecretOnce   sync.Once
 )
 
-// GetJWTSecret returns the configured JWT secret, used by both REST and gRPC auth.
+// GetJWTSecret returns a process-local JWT secret for legacy paths and tests
+// that do not have etcd. Production wiring must use ResolveJWTSecret so every
+// replica shares the same value.
 // This is computed once and cached to ensure both REST and gRPC use the same value.
 func GetJWTSecret() string {
 	jwtSecretOnce.Do(func() {
@@ -153,8 +155,16 @@ type RestServer struct {
 	database atomic.Pointer[db.DB]
 }
 
-func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager, database *db.DB) *RestServer {
-	r := &RestServer{etcd: etcd, jwtSecret: []byte(getJWTSecret()), nodeMonitorMgr: nmm}
+// NewRestServer constructs the REST server with an explicitly resolved signing
+// secret. The optional form preserves the legacy no-etcd test path.
+func NewRestServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager, database *db.DB, jwtSecrets ...[]byte) *RestServer {
+	var secret []byte
+	if len(jwtSecrets) > 0 {
+		secret = append([]byte(nil), jwtSecrets[0]...)
+	} else {
+		secret = []byte(getJWTSecret())
+	}
+	r := &RestServer{etcd: etcd, jwtSecret: secret, nodeMonitorMgr: nmm}
 	r.SetDatabase(database)
 	return r
 }
