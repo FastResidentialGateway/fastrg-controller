@@ -40,23 +40,20 @@ func TestProjectionEndToEnd(t *testing.T) {
 		t.Fatalf("etcd cleanup: %v", err)
 	}
 
-	database, err := db.New(ctx, dsn)
+	scopedDSN, cleanup := createTask12ProjectionSchema(t, ctx, dsn)
+	defer cleanup()
+	database, err := db.New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("db connect: %v", err)
 	}
 	defer database.Close()
 
 	// Own pool for assertions (keeps db.DB's pool private).
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("assert pool: %v", err)
 	}
 	defer pool.Close()
-	for _, tbl := range []string{"hsi_config_current", "hsi_config_history", "etcd_watch_progress"} {
-		if _, err := pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
-			t.Fatalf("truncate %s: %v", tbl, err)
-		}
-	}
 
 	// Seed a config before the projection starts (exercises initial reconcile).
 	key := "configs/node1/hsi/2"

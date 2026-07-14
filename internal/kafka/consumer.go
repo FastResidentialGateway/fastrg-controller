@@ -416,19 +416,28 @@ func wrapEtcdError(err error) error {
 // topic exists, which would assign 0 partitions and silently drop all messages.
 func (c *Consumer) waitForTopicReady(ctx context.Context, brokers []string, topic string) {
 	for ctx.Err() == nil {
-		conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
-		if err != nil {
-			logrus.WithError(err).Warn("kafka: waiting for broker before joining consumer group")
-			c.sleep(ctx)
-			continue
+		var lastErr error
+		lastPartitionCount := 0
+		for _, broker := range brokers {
+			conn, err := kafka.DialContext(ctx, "tcp", broker)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			partitions, err := conn.ReadPartitions(topic)
+			conn.Close()
+			if err == nil && len(partitions) > 0 {
+				logrus.Infof("kafka: topic %q ready (%d partition(s)), joining consumer group", topic, len(partitions))
+				return
+			}
+			lastErr = err
+			lastPartitionCount = len(partitions)
 		}
-		partitions, err := conn.ReadPartitions(topic)
-		conn.Close()
-		if err == nil && len(partitions) > 0 {
-			logrus.Infof("kafka: topic %q ready (%d partition(s)), joining consumer group", topic, len(partitions))
-			return
+		if lastErr != nil {
+			logrus.WithError(lastErr).Warn("kafka: no broker could report a ready topic before joining consumer group")
+		} else {
+			logrus.Warnf("kafka: topic %q not yet available (partitions=%d), waiting", topic, lastPartitionCount)
 		}
-		logrus.Warnf("kafka: topic %q not yet available (partitions=%d), waiting", topic, len(partitions))
 		c.sleep(ctx)
 	}
 }

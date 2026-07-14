@@ -21,14 +21,13 @@ func TestSendToDLQReservedOffset(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 	ctx := context.Background()
-	d, err := New(ctx, dsn)
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "dlq_offset")
+	defer cleanup()
+	d, err := New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer d.Close()
-	if _, err := d.pool.Exec(ctx, "TRUNCATE kafka_dlq"); err != nil {
-		t.Fatalf("truncate kafka_dlq: %v", err)
-	}
 
 	// First park must succeed. This is the call that fails outright when the
 	// reserved word is unquoted in the INSERT column list.
@@ -84,14 +83,13 @@ func TestRollbackToLastSuccessfulIdempotent(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 	ctx := context.Background()
-	d, err := New(ctx, dsn)
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "rollback_idempotent")
+	defer cleanup()
+	d, err := New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer d.Close()
-	if _, err := d.pool.Exec(ctx, "TRUNCATE hsi_config_history"); err != nil {
-		t.Fatalf("truncate hsi_config_history: %v", err)
-	}
 
 	// First apply-failure for (node1, user 2): records one failed history row.
 	if err := d.RollbackToLastSuccessful(ctx, "node1", "2", "bad vlan"); err != nil {

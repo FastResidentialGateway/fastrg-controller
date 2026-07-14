@@ -2,8 +2,10 @@ package kafka
 
 import (
 	"context"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,23 +48,20 @@ func TestConsumerEndToEnd(t *testing.T) {
 	t.Setenv("KAFKA_TOPIC", topic)
 	t.Setenv("KAFKA_GROUP", "fastrg-controller-test."+suffix)
 
-	database, err := db.New(ctx, dsn)
+	scopedDSN, cleanup := createTask12KafkaSchema(t, ctx, dsn, "consumer_e2e")
+	defer cleanup()
+	database, err := db.New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
 	defer database.Close()
 
-	// Own pool for test setup (db.DB's pool is private).
-	pool, err := pgxpool.New(ctx, dsn)
+	// Own pool for assertions (db.DB's pool is private).
+	pool, err := pgxpool.New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("assert pool: %v", err)
 	}
 	defer pool.Close()
-	for _, tbl := range []string{"pppoe_status", "node_events", "hsi_config_current", "hsi_config_history"} {
-		if _, err := pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
-			t.Fatalf("truncate %s: %v", tbl, err)
-		}
-	}
 
 	// Seed a config for (n1, user 2) in etcd. The CONFIG_APPLY_FAIL event below has
 	// no prior successful version in history, so the consumer's rollback must
@@ -149,6 +148,93 @@ func TestConsumerEndToEnd(t *testing.T) {
 		resp, err := etcd.Client().Get(ctx, "configs/n1/hsi/2")
 		return err == nil && len(resp.Kvs) == 0
 	}, "etcd config to be rolled back (deleted) after CONFIG_APPLY_FAIL")
+}
+
+// TestConsumerSkipsUnavailableFirstBroker verifies topic discovery and
+// consumption continue through the configured broker list when the first
+// address refuses connections.
+func TestConsumerSkipsUnavailableFirstBroker(t *testing.T) {
+	brokers := os.Getenv("TEST_KAFKA_BROKERS")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	etcdEndpoints := os.Getenv("TEST_ETCD_ENDPOINTS")
+	if brokers == "" || dsn == "" || etcdEndpoints == "" {
+		t.Skip("TEST_KAFKA_BROKERS / TEST_DATABASE_URL / TEST_ETCD_ENDPOINTS not set; skipping Kafka e2e")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Setenv("ETCD_ENDPOINTS", etcdEndpoints)
+	etcd, err := storage.NewEtcdClient()
+	if err != nil {
+		t.Fatalf("etcd connect: %v", err)
+	}
+	defer etcd.Close()
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	topic := "fastrg.node.events.broker-fallback." + suffix
+	t.Setenv("KAFKA_TOPIC", topic)
+	t.Setenv("KAFKA_GROUP", "fastrg-controller-broker-fallback."+suffix)
+
+	scopedDSN, cleanup := createTask12KafkaSchema(t, ctx, dsn, "broker_fallback")
+	defer cleanup()
+	database, err := db.New(ctx, scopedDSN)
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer database.Close()
+
+	healthyBrokers := splitTestBrokers(brokers)
+	w := &kafkago.Writer{
+		Addr:                   kafkago.TCP(healthyBrokers...),
+		Topic:                  topic,
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           50 * time.Millisecond,
+	}
+	defer w.Close()
+	event := &eventsv1.NodeEvent{
+		NodeUuid: "broker-fallback", UserId: "0", Type: eventsv1.EventType_EVENT_TYPE_RUNTIME_ERROR,
+		Timestamp: time.Now().Unix(),
+		Payload: &eventsv1.NodeEvent_RuntimeError{RuntimeError: &eventsv1.RuntimeError{
+			Module: "broker-test", ErrorMessage: "fallback consumed",
+		}},
+	}
+	value, err := proto.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := writeWithRetry(ctx, w, []kafkago.Message{{Key: []byte(event.NodeUuid), Value: value}}); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	consumerBrokers := append([]string{reserveRefusedAddress(t)}, healthyBrokers...)
+	go NewConsumer(consumerBrokers, database, etcd).Run(ctx)
+	waitFor(t, 25*time.Second, func() bool {
+		rows, _ := database.ListNodeEvents(ctx, "broker-fallback", "RUNTIME_ERROR", 0)
+		return len(rows) == 1 && rows[0].Module == "broker-test"
+	}, "event consumption through the second broker")
+}
+
+func splitTestBrokers(brokers string) []string {
+	var result []string
+	for _, broker := range strings.Split(brokers, ",") {
+		if broker = strings.TrimSpace(broker); broker != "" {
+			result = append(result, broker)
+		}
+	}
+	return result
+}
+
+func reserveRefusedAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve refused broker address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release refused broker address: %v", err)
+	}
+	return address
 }
 
 func writeWithRetry(ctx context.Context, w *kafkago.Writer, msgs []kafkago.Message) error {

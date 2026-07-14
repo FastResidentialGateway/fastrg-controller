@@ -16,16 +16,13 @@ func TestEventRepo(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	d, err := New(ctx, dsn)
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "event_repo")
+	defer cleanup()
+	d, err := New(ctx, scopedDSN)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer d.Close()
-	for _, tbl := range []string{"pppoe_status", "node_events"} {
-		if _, err := d.pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
-			t.Fatalf("truncate %s: %v", tbl, err)
-		}
-	}
 
 	t0 := time.Now().UTC().Truncate(time.Second)
 

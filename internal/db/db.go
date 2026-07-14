@@ -81,6 +81,12 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	// PostgreSQL runtime parameters use milliseconds for a bare
+	// statement_timeout value. Bound every query to 30 seconds so a stuck
+	// statement cannot hang a worker until the process context is cancelled.
+	// Migrations use this pool too; they are currently millisecond-scale, so a
+	// future long-running migration must revisit this limit explicitly.
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "30000"
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
