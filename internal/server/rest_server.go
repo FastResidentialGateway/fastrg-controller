@@ -600,7 +600,8 @@ func (r *RestServer) ListNodes(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := r.etcd.Client().Get(ctx, "nodes/", clientv3.WithPrefix())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		logrus.WithError(err).Error("Failed to list nodes")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list nodes"})
 		return
 	}
 
@@ -732,7 +733,8 @@ func (r *RestServer) ListUsers(c *gin.Context) {
 	ctx := c.Request.Context()
 	resp, err := r.etcd.Client().Get(ctx, "users/", clientv3.WithPrefix())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		logrus.WithError(err).Error("Failed to list users")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list users"})
 		return
 	}
 
@@ -977,7 +979,7 @@ func (r *RestServer) GetHSIConfig(c *gin.Context) {
 	}
 
 	if len(resp.Kvs) == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "HSI config not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "HSI config not found"})
 		return
 	}
 
@@ -1455,7 +1457,8 @@ func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
 
 	result, found, err := r.nodeMonitorMgr.GetNodeDhcpLease(ctx, nodeId, userId)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DHCP lease info: %v", err)})
+		logrus.WithError(err).Error("Failed to get DHCP lease info")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DHCP lease info"})
 		return
 	}
 
@@ -1503,7 +1506,7 @@ func (r *RestServer) GetArpTable(c *gin.Context) {
 	result, found, err := r.nodeMonitorMgr.GetNodeArpTable(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeArpTable error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get ARP table: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get ARP table"})
 		return
 	}
 
@@ -1548,7 +1551,7 @@ func (r *RestServer) GetDnsCache(c *gin.Context) {
 	result, found, err := r.nodeMonitorMgr.GetNodeDnsCache(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeDnsCache error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DNS cache: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DNS cache"})
 		return
 	}
 
@@ -1593,13 +1596,17 @@ func (r *RestServer) GetPPPoEInfo(c *gin.Context) {
 	result, found, err := r.nodeMonitorMgr.GetNodePPPoEInfo(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodePPPoEInfo error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get PPPoE info: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get PPPoE info"})
 		return
 	}
 
 	if !found {
 		logrus.Warnf("GetNodePPPoEInfo: Node not found or not connected for nodeId=%s", nodeId)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+	if result == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "PPPoE session not found for user"})
 		return
 	}
 
@@ -1638,13 +1645,17 @@ func (r *RestServer) GetDhcpConfig(c *gin.Context) {
 	result, found, err := r.nodeMonitorMgr.GetNodeDhcpConfig(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeDhcpConfig error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DHCP config: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get DHCP config"})
 		return
 	}
 
 	if !found {
 		logrus.Warnf("GetNodeDhcpConfig: Node not found or not connected for nodeId=%s", nodeId)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
+		return
+	}
+	if result == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "DHCP config not found for user"})
 		return
 	}
 
