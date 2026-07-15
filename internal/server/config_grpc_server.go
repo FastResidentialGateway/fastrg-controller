@@ -52,6 +52,19 @@ func (s *ConfigGrpcServer) callerFromCtx(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", status.Error(codes.Unauthenticated, "invalid token")
 	}
+
+	blacklistKey := fmt.Sprintf("token_blacklist/%s", vals[0])
+	blacklistCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := s.etcd.Client().Get(blacklistCtx, blacklistKey)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to check token blacklist")
+		return "", status.Error(codes.Unavailable, "authentication service unavailable")
+	}
+	if len(resp.Kvs) > 0 {
+		return "", status.Error(codes.Unauthenticated, "token has been revoked")
+	}
 	return user, nil
 }
 
