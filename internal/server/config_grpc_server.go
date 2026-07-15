@@ -88,7 +88,8 @@ func casToStatus(err error) error {
 	if errors.Is(err, storage.ErrCASConflict) {
 		return status.Error(codes.Aborted, "concurrent update conflict, please retry")
 	}
-	return status.Error(codes.Internal, err.Error())
+	logrus.WithError(err).Error("CAS operation failed")
+	return status.Error(codes.Internal, "internal storage error")
 }
 
 // ── etcd helpers ──────────────────────────────────────────────────────────
@@ -452,7 +453,8 @@ func (s *ConfigGrpcServer) GetHSIConfig(ctx context.Context, req *controllerpb.G
 	}
 	resp, err := s.etcd.Client().Get(ctx, hsiKey(req.NodeId, req.UserId))
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		logrus.WithError(err).Error("Failed to read HSI config")
+		return nil, status.Error(codes.Internal, "failed to read HSI config")
 	}
 	if len(resp.Kvs) == 0 {
 		return nil, status.Error(codes.NotFound, "HSI config not found")
@@ -473,7 +475,8 @@ func (s *ConfigGrpcServer) ListHSIConfigs(ctx context.Context, req *controllerpb
 	}
 	resp, err := s.etcd.Client().Get(ctx, fmt.Sprintf("configs/%s/hsi/", req.NodeId), clientv3.WithPrefix())
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		logrus.WithError(err).Error("Failed to list HSI configs")
+		return nil, status.Error(codes.Internal, "failed to list HSI configs")
 	}
 	out := &controllerpb.ListHSIConfigsResponse{}
 	for _, kv := range resp.Kvs {
@@ -682,7 +685,8 @@ func (s *ConfigGrpcServer) ListDNSRecords(ctx context.Context, req *controllerpb
 	}
 	resp, err := s.etcd.Client().Get(ctx, dnsKey(req.NodeId, req.UserId))
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		logrus.WithError(err).Error("Failed to read DNS records")
+		return nil, status.Error(codes.Internal, "failed to read DNS records")
 	}
 	out := &controllerpb.ListDNSRecordsResponse{}
 	if len(resp.Kvs) > 0 {
