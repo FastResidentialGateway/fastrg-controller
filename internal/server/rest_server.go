@@ -51,6 +51,13 @@ var (
 	jwtSecretOnce   sync.Once
 )
 
+const requestOpTimeout = 5 * time.Second
+
+// boundedRequestCtx caps a handler operation while preserving request cancellation.
+func boundedRequestCtx(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), requestOpTimeout)
+}
+
 // GetJWTSecret returns a process-local JWT secret for legacy paths and tests
 // that do not have etcd. Production wiring must use ResolveJWTSecret so every
 // replica shares the same value.
@@ -758,7 +765,10 @@ func (r *RestServer) AddUser(c *gin.Context) {
 		return
 	}
 
-	_, err = r.etcd.Client().Put(context.Background(), "users/"+req.Username, string(hash))
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
+	_, err = r.etcd.Client().Put(ctx, "users/"+req.Username, string(hash))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save user"})
 		return
@@ -780,7 +790,10 @@ func (r *RestServer) AddUser(c *gin.Context) {
 // @Router       /users/{username} [delete]
 func (r *RestServer) DeleteUser(c *gin.Context) {
 	username := c.Param("username")
-	_, err := r.etcd.Client().Delete(context.Background(), "users/"+username)
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
+	_, err := r.etcd.Client().Delete(ctx, "users/"+username)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 		return
@@ -1389,7 +1402,9 @@ func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
 	result, found, err := r.nodeMonitorMgr.GetNodeDhcpLease(ctx, nodeId, userId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get DHCP lease info: %v", err)})
@@ -1434,7 +1449,9 @@ func (r *RestServer) GetArpTable(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
 	result, found, err := r.nodeMonitorMgr.GetNodeArpTable(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeArpTable error: %v", err)
@@ -1477,7 +1494,9 @@ func (r *RestServer) GetDnsCache(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
 	result, found, err := r.nodeMonitorMgr.GetNodeDnsCache(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeDnsCache error: %v", err)
@@ -1520,7 +1539,9 @@ func (r *RestServer) GetPPPoEInfo(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
 	result, found, err := r.nodeMonitorMgr.GetNodePPPoEInfo(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodePPPoEInfo error: %v", err)
@@ -1563,7 +1584,9 @@ func (r *RestServer) GetDhcpConfig(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx, cancel := boundedRequestCtx(c)
+	defer cancel()
+
 	result, found, err := r.nodeMonitorMgr.GetNodeDhcpConfig(ctx, nodeId, userId)
 	if err != nil {
 		logrus.Errorf("GetNodeDhcpConfig error: %v", err)
