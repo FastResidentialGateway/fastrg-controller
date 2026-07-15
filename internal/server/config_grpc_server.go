@@ -81,6 +81,17 @@ func validationToStatus(err error) error {
 	return status.Error(codes.InvalidArgument, err.Error())
 }
 
+func validateNodeIDToStatus(nodeID string) error {
+	return validationToStatus(validation.ValidateNodeID(nodeID))
+}
+
+func validateNodeAndUserIDsToStatus(nodeID, userID string) error {
+	if err := validateNodeIDToStatus(nodeID); err != nil {
+		return err
+	}
+	return validationToStatus(validation.ValidateUserID(userID))
+}
+
 func casToStatus(err error) error {
 	if err == nil {
 		return nil
@@ -267,8 +278,8 @@ func (s *ConfigGrpcServer) CreateHSIConfig(ctx context.Context, req *controllerp
 	if err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id is required")
+	if err := validateNodeIDToStatus(req.NodeId); err != nil {
+		return nil, err
 	}
 	p := req.GetConfig()
 	if p == nil {
@@ -284,6 +295,9 @@ func (s *ConfigGrpcServer) CreateHSIConfig(ctx context.Context, req *controllerp
 		DHCPSubnet:   p.GetDhcpSubnet(),
 		DHCPGateway:  p.GetDhcpGateway(),
 	})); err != nil {
+		return nil, err
+	}
+	if err := validationToStatus(validation.ValidateUserID(p.GetUserId())); err != nil {
 		return nil, err
 	}
 
@@ -344,8 +358,8 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 	if err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	p := req.GetConfig()
 	if p == nil {
@@ -361,6 +375,9 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 		DHCPSubnet:   p.GetDhcpSubnet(),
 		DHCPGateway:  p.GetDhcpGateway(),
 	})); err != nil {
+		return nil, err
+	}
+	if err := validationToStatus(validation.ValidateUserID(p.GetUserId())); err != nil {
 		return nil, err
 	}
 	if err := validationToStatus(validation.ValidateUserIDMatch(req.UserId, p.GetUserId())); err != nil {
@@ -425,8 +442,8 @@ func (s *ConfigGrpcServer) DeleteHSIConfig(ctx context.Context, req *controllerp
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	casErr := s.etcd.CAS(ctx, hsiKey(req.NodeId, req.UserId), func(current []byte) (storage.CASResult, error) {
 		if current == nil {
@@ -448,8 +465,8 @@ func (s *ConfigGrpcServer) GetHSIConfig(ctx context.Context, req *controllerpb.G
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	resp, err := s.etcd.Client().Get(ctx, hsiKey(req.NodeId, req.UserId))
 	if err != nil {
@@ -470,8 +487,8 @@ func (s *ConfigGrpcServer) ListHSIConfigs(ctx context.Context, req *controllerpb
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id is required")
+	if err := validateNodeIDToStatus(req.NodeId); err != nil {
+		return nil, err
 	}
 	resp, err := s.etcd.Client().Get(ctx, fmt.Sprintf("configs/%s/hsi/", req.NodeId), clientv3.WithPrefix())
 	if err != nil {
@@ -496,8 +513,8 @@ func (s *ConfigGrpcServer) DialPPPoE(ctx context.Context, req *controllerpb.PPPo
 	if err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	// Reuse the RestServer helper through a thin adapter.
 	rs := &RestServer{etcd: s.etcd}
@@ -516,8 +533,8 @@ func (s *ConfigGrpcServer) HangupPPPoE(ctx context.Context, req *controllerpb.PP
 	if err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	rs := &RestServer{etcd: s.etcd}
 	if err := rs.setDesireStatus(ctx, req.NodeId, req.UserId, caller, desireStatusDisconnect); err != nil {
@@ -537,8 +554,8 @@ func (s *ConfigGrpcServer) SetSubscriberCount(ctx context.Context, req *controll
 	if err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id is required")
+	if err := validateNodeIDToStatus(req.NodeId); err != nil {
+		return nil, err
 	}
 	if err := validationToStatus(validation.ValidateSubscriberCount(int(req.SubscriberCount))); err != nil {
 		return nil, err
@@ -568,8 +585,8 @@ func (s *ConfigGrpcServer) GetSubscriberCount(ctx context.Context, req *controll
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id is required")
+	if err := validateNodeIDToStatus(req.NodeId); err != nil {
+		return nil, err
 	}
 	n := s.fetchSubscriberCount(ctx, req.NodeId)
 	if n < 0 {
@@ -584,8 +601,8 @@ func (s *ConfigGrpcServer) AddOrUpdateDNSRecord(ctx context.Context, req *contro
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	r := req.GetRecord()
 	if r == nil {
@@ -635,8 +652,11 @@ func (s *ConfigGrpcServer) DeleteDNSRecord(ctx context.Context, req *controllerp
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" || req.Domain == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id, user_id and domain are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
+	}
+	if req.Domain == "" {
+		return nil, status.Error(codes.InvalidArgument, "domain is required")
 	}
 	casErr := s.etcd.CAS(ctx, dnsKey(req.NodeId, req.UserId), func(current []byte) (storage.CASResult, error) {
 		if current == nil {
@@ -680,8 +700,8 @@ func (s *ConfigGrpcServer) ListDNSRecords(ctx context.Context, req *controllerpb
 	if _, err := s.callerFromCtx(ctx); err != nil {
 		return nil, err
 	}
-	if req.NodeId == "" || req.UserId == "" {
-		return nil, status.Error(codes.InvalidArgument, "node_id and user_id are required")
+	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
+		return nil, err
 	}
 	resp, err := s.etcd.Client().Get(ctx, dnsKey(req.NodeId, req.UserId))
 	if err != nil {

@@ -328,6 +328,28 @@ func respondValidationError(c *gin.Context, err error) {
 	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 }
 
+// validatePathIDs rejects unsafe nodeId/userId route parameters before a
+// handler can use them to construct an etcd key or query another subsystem.
+func validatePathIDs() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if nodeID := c.Param("nodeId"); nodeID != "" {
+			if err := validation.ValidateNodeID(nodeID); err != nil {
+				respondValidationError(c, err)
+				c.Abort()
+				return
+			}
+		}
+		if userID := c.Param("userId"); userID != "" {
+			if err := validation.ValidateUserID(userID); err != nil {
+				respondValidationError(c, err)
+				c.Abort()
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
 // hsiConfigInput maps the REST HSIConfig into the transport-neutral validation
 // input.
 func hsiConfigInput(config HSIConfig) validation.HSIConfigInput {
@@ -622,14 +644,14 @@ func (r *RestServer) ListNodes(c *gin.Context) {
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        uuid  path      string  true  "Node UUID"
+// @Param        nodeId  path      string  true  "Node ID"
 // @Success      200   {object}  MessageResponse
 // @Failure      400   {object}  ErrorResponse
 // @Failure      404   {object}  ErrorResponse
 // @Failure      500   {object}  ErrorResponse
-// @Router       /nodes/{uuid} [delete]
+// @Router       /nodes/{nodeId} [delete]
 func (r *RestServer) UnregisterNode(c *gin.Context) {
-	nodeUuid := c.Param("uuid")
+	nodeUuid := c.Param("nodeId")
 	if nodeUuid == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Node UUID is required"})
 		return
@@ -1025,6 +1047,10 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		respondValidationError(c, err)
 		return
 	}
+	if err := validation.ValidateUserID(config.UserID); err != nil {
+		respondValidationError(c, err)
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -1133,6 +1159,10 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 
 	// Validate required fields
 	if err := validation.ValidateHSIConfig(hsiConfigInput(config)); err != nil {
+		respondValidationError(c, err)
+		return
+	}
+	if err := validation.ValidateUserID(config.UserID); err != nil {
 		respondValidationError(c, err)
 		return
 	}
@@ -1347,8 +1377,12 @@ func (r *RestServer) DialPPPoE(c *gin.Context) {
 		return
 	}
 
-	if req.NodeID == "" || req.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+	if err := validation.ValidateNodeID(req.NodeID); err != nil {
+		respondValidationError(c, err)
+		return
+	}
+	if err := validation.ValidateUserID(req.UserID); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1399,8 +1433,12 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 		return
 	}
 
-	if req.NodeID == "" || req.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID and User ID are required"})
+	if err := validation.ValidateNodeID(req.NodeID); err != nil {
+		respondValidationError(c, err)
+		return
+	}
+	if err := validation.ValidateUserID(req.UserID); err != nil {
+		respondValidationError(c, err)
 		return
 	}
 
@@ -1440,6 +1478,7 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  map[string]interface{}
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /config/{nodeId}/dhcp/lease/{userId} [get]
@@ -1485,6 +1524,7 @@ func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  ArpTableResult
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /config/{nodeId}/arp/{userId} [get]
@@ -1530,6 +1570,7 @@ func (r *RestServer) GetArpTable(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  DnsCacheResult
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /config/{nodeId}/dns-cache/{userId} [get]
@@ -1575,6 +1616,7 @@ func (r *RestServer) GetDnsCache(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  PPPoEInfo
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /config/{nodeId}/pppoe/{userId} [get]
@@ -1624,6 +1666,7 @@ func (r *RestServer) GetPPPoEInfo(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  DhcpConfig
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /config/{nodeId}/dhcp/{userId} [get]
@@ -1919,6 +1962,7 @@ func (r *RestServer) DeleteFailedEvents(c *gin.Context) {
 // @Param        nodeId  path      string  true  "Node ID"
 // @Param        userId  path      string  true  "User ID"
 // @Success      200     {object}  db.PPPoEStatusRow
+// @Failure      400     {object}  ErrorResponse
 // @Failure      404     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
 // @Router       /pppoe/status/{nodeId}/{userId} [get]
@@ -2172,6 +2216,7 @@ func (r *RestServer) newRouter() *gin.Engine {
 
 	// ---- API area ----
 	api := router.Group("/api")
+	api.Use(validatePathIDs())
 	{
 		// Health check endpoint (no authentication required)
 		api.GET("/health", r.EtcdHealthCheck)
@@ -2181,7 +2226,7 @@ func (r *RestServer) newRouter() *gin.Engine {
 		api.POST("/verify-password", r.AuthMiddlewareWithBlacklist(), r.VerifyPassword)
 		api.GET("/nodes", r.AuthMiddlewareWithBlacklist(), r.ListNodes)
 		api.DELETE("/nodes/inactive", r.AuthMiddlewareWithBlacklist(), r.ClearInactiveNodes)
-		api.DELETE("/nodes/:uuid", r.AuthMiddlewareWithBlacklist(), r.UnregisterNode)
+		api.DELETE("/nodes/:nodeId", r.AuthMiddlewareWithBlacklist(), r.UnregisterNode)
 		api.GET("/nodes/:nodeId/subscriber-count", r.AuthMiddlewareWithBlacklist(), r.GetNodeSubscriberCount)
 		api.PUT("/nodes/:nodeId/subscriber-count", r.AuthMiddlewareWithBlacklist(), r.UpdateNodeSubscriberCount)
 		api.POST("/users", r.AuthMiddlewareWithBlacklist(), r.AddUser)

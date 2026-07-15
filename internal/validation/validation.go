@@ -11,7 +11,13 @@ package validation
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+)
+
+var (
+	nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	userIDPattern = regexp.MustCompile(`^[0-9]+$`)
 )
 
 // Error is a validation failure. Conflict distinguishes a uniqueness clash
@@ -26,6 +32,39 @@ func (e *Error) Error() string { return e.Msg }
 
 func badRequest(format string, args ...interface{}) *Error {
 	return &Error{Msg: fmt.Sprintf(format, args...)}
+}
+
+// ValidateNodeID checks that a node identifier is safe to embed in an etcd
+// key while retaining the UUID and human-readable names used by FastRG.
+func ValidateNodeID(id string) error {
+	if id == "" {
+		return badRequest("Node ID is required")
+	}
+	if !nodeIDPattern.MatchString(id) {
+		return badRequest("Node ID must be 1-64 characters containing only letters, numbers, underscores, or hyphens")
+	}
+	return nil
+}
+
+// ValidateUserID checks that a user identifier has one canonical decimal
+// representation and fits in the uint32 range shared by the API contract.
+func ValidateUserID(id string) error {
+	if id == "" {
+		return badRequest("User ID is required")
+	}
+	if !userIDPattern.MatchString(id) {
+		return badRequest("User ID must contain only digits")
+	}
+	if id == "0" {
+		return badRequest("User ID must be greater than 0")
+	}
+	if id[0] == '0' {
+		return badRequest("User ID must not contain leading zeros")
+	}
+	if _, err := strconv.ParseUint(id, 10, 32); err != nil {
+		return badRequest("User ID must fit in uint32")
+	}
+	return nil
 }
 
 // HSIConfigInput is the transport-neutral view of an HSI config used for field
