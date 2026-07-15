@@ -51,7 +51,12 @@ var (
 	jwtSecretOnce   sync.Once
 )
 
-const requestOpTimeout = 5 * time.Second
+const (
+	requestOpTimeout = 5 * time.Second
+	// dummyPasswordHash is a pre-generated bcrypt.DefaultCost hash used to keep
+	// missing-user and wrong-password login paths equivalent in bcrypt work.
+	dummyPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+)
 
 // boundedRequestCtx caps a handler operation while preserving request cancellation.
 func boundedRequestCtx(c *gin.Context) (context.Context, context.CancelFunc) {
@@ -225,7 +230,7 @@ func (r *RestServer) generateToken(username string) (string, error) {
 func (r *RestServer) validateToken(tokenString string) (*jwt.Token, error) {
 	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return r.jwtSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 }
 
 // Extract username from token
@@ -446,7 +451,8 @@ func (r *RestServer) Login(c *gin.Context) {
 		return
 	}
 	if hashedPassword == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(req.Password))
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
@@ -747,6 +753,7 @@ func (r *RestServer) ListUsers(c *gin.Context) {
 // @Param        request  body      LoginRequest  true  "User credentials"
 // @Success      200      {object}  MessageResponse
 // @Failure      400      {object}  ErrorResponse
+// @Failure      409      {object}  ErrorResponse
 // @Failure      500      {object}  ErrorResponse
 // @Router       /users [post]
 func (r *RestServer) AddUser(c *gin.Context) {
@@ -756,6 +763,10 @@ func (r *RestServer) AddUser(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Username and password are required"})
 		return
 	}
 
@@ -768,9 +779,17 @@ func (r *RestServer) AddUser(c *gin.Context) {
 	ctx, cancel := boundedRequestCtx(c)
 	defer cancel()
 
-	_, err = r.etcd.Client().Put(ctx, "users/"+req.Username, string(hash))
+	key := "users/" + req.Username
+	txnResp, err := r.etcd.Client().Txn(ctx).
+		If(clientv3.Compare(clientv3.CreateRevision(key), "=", 0)).
+		Then(clientv3.OpPut(key, string(hash))).
+		Commit()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save user"})
+		return
+	}
+	if !txnResp.Succeeded {
+		c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
 		return
 	}
 
@@ -786,6 +805,8 @@ func (r *RestServer) AddUser(c *gin.Context) {
 // @Security     BearerAuth
 // @Param        username  path      string  true  "Username to delete"
 // @Success      200       {object}  MessageResponse
+// @Failure      404       {object}  ErrorResponse
+// @Failure      409       {object}  ErrorResponse
 // @Failure      500       {object}  ErrorResponse
 // @Router       /users/{username} [delete]
 func (r *RestServer) DeleteUser(c *gin.Context) {
@@ -793,9 +814,36 @@ func (r *RestServer) DeleteUser(c *gin.Context) {
 	ctx, cancel := boundedRequestCtx(c)
 	defer cancel()
 
-	_, err := r.etcd.Client().Delete(ctx, "users/"+username)
+	key := "users/" + username
+	userResp, err := r.etcd.Client().Get(ctx, key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read user"})
+		return
+	}
+	if len(userResp.Kvs) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	countResp, err := r.etcd.Client().Get(ctx, "users/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count users"})
+		return
+	}
+	if countResp.Count == 1 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Cannot delete the last user"})
+		return
+	}
+
+	// The count/delete race is accepted for this authenticated, single-operator
+	// management path; concurrent deletes can still remove the final users.
+	deleteResp, err := r.etcd.Client().Delete(ctx, key)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
+		return
+	}
+	if deleteResp.Deleted == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
