@@ -2307,7 +2307,10 @@ func NewHardenedTLSServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func (r *RestServer) StartRestServer(addr string) error {
+// StartRestServer begins serving HTTPS in the background and returns the
+// server handle for graceful Shutdown. Serve errors (other than
+// http.ErrServerClosed) are sent to errCh.
+func (r *RestServer) StartRestServer(addr string, errCh chan<- error) *http.Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := r.newRouter()
 
@@ -2320,7 +2323,14 @@ func (r *RestServer) StartRestServer(addr string) error {
 	if keyFile == "" {
 		keyFile = "./certs/server.key"
 	}
-	return NewHardenedTLSServer(addr, router).ListenAndServeTLS(certFile, keyFile)
+
+	srv := NewHardenedTLSServer(addr, router)
+	go func() {
+		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+	return srv
 }
 
 // Start HTTP redirect server

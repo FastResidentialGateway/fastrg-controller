@@ -5,11 +5,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -88,20 +89,22 @@ func main() {
 	logrus.SetOutput(output)
 	logrus.SetReportCaller(true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// SIGTERM/SIGINT cancels this ctx, which unwinds every background worker
+	// (ConnectLoop / leader.Run / Kafka consumer / projection). stop() also
+	// restores default signal behaviour so a second signal force-kills.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
-	srv := startLogServer(logDir)
-	defer func() {
-		srv.Shutdown(ctx)
-	}()
+	logSrv := startLogServer(logDir)
 
 	// connect to etcd
 	etcd, err := storage.NewEtcdClient()
 	if err != nil {
 		logrus.WithError(err).Fatal("failed to connect etcd")
 	}
-	defer etcd.Close()
+	// etcd.Close() is deliberately NOT deferred here: it must run last, after
+	// the background workers (leader resign / Kafka finish) have stopped using
+	// the connection. See the ordered shutdown at the end of main.
 
 	jwtSecret, err := server.ResolveJWTSecret(ctx, etcd)
 	if err != nil {
@@ -158,29 +161,71 @@ func main() {
 	// CLI-facing config gRPC service (shares same port as NodeManagement)
 	configSvc := server.NewConfigGrpcServer(etcd, jwtSecret)
 
-	var wg sync.WaitGroup
+	// serveErr carries a fatal listener failure from any background serve
+	// goroutine; either a signal (ctx.Done) or a serve error triggers shutdown.
+	serveErr := make(chan error, 1)
 
-	// start gRPC server
-	wg.Go(func() {
-		grpcSrv := server.NewGrpcServer(etcd, nmm)
-		logrus.Infof("Starting gRPC server on :%s", grpcPort)
-		grpcSrv.Start(":"+grpcPort, configSvc)
-	})
+	// start gRPC server (handle kept in main so Stop() can be called on shutdown)
+	grpcSrv := server.NewGrpcServer(etcd, nmm)
+	logrus.Infof("Starting gRPC server on :%s", grpcPort)
+	go grpcSrv.Start(":"+grpcPort, configSvc)
 
-	// start HTTP redirect servers
+	// start HTTP redirect server
 	logrus.Infof("Starting HTTP redirect server on :%s", httpPort)
-	if httpSrv, err := server.StartHTTPRedirectServer(":" + httpPort); err != nil {
+	httpSrv, err := server.StartHTTPRedirectServer(":" + httpPort)
+	if err != nil {
 		logrus.WithError(err).Error("failed to start HTTP redirect server")
-	} else {
-		defer func() {
-			httpSrv.Shutdown(ctx)
-		}()
+		httpSrv = nil
 	}
 
-	// start REST API (HTTPS)
+	// start REST API (HTTPS) in the background
 	logrus.Infof("Starting HTTPS server on :%s", httpsPort)
-	if err := rest.StartRestServer(":" + httpsPort); err != nil {
-		logrus.WithError(err).Fatal("failed to start HTTPS server")
+	restSrv := rest.StartRestServer(":"+httpsPort, serveErr)
+
+	// Block until a signal cancels ctx or a listener reports a fatal error.
+	var exitErr error
+	select {
+	case <-ctx.Done():
+		logrus.Info("Received shutdown signal; starting graceful shutdown")
+	case exitErr = <-serveErr:
+		logrus.WithError(exitErr).Error("listener failed; starting shutdown")
+	}
+
+	// Ordered shutdown. HTTP listeners drain first, then gRPC GracefulStop,
+	// then background workers are cancelled, and finally the etcd connection is
+	// closed (last, since leader resign / Kafka finish may still need it).
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+
+	if restSrv != nil {
+		if err := restSrv.Shutdown(shutdownCtx); err != nil {
+			logrus.WithError(err).Warn("HTTPS server shutdown error")
+		}
+	}
+	if httpSrv != nil {
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			logrus.WithError(err).Warn("HTTP redirect server shutdown error")
+		}
+	}
+	if logSrv != nil {
+		if err := logSrv.Shutdown(shutdownCtx); err != nil {
+			logrus.WithError(err).Warn("log HTTPS server shutdown error")
+		}
+	}
+
+	// gRPC GracefulStop + internal stale-node monitor cancel.
+	grpcSrv.Stop()
+
+	// Ensure background workers (leader/kafka/projection) are cancelled even if
+	// we got here via serveErr rather than a signal.
+	stop()
+
+	// etcd connection closed last.
+	etcd.Close()
+
+	logrus.Info("shutdown complete")
+	if exitErr != nil {
+		os.Exit(1)
 	}
 }
 
