@@ -294,27 +294,24 @@ func (nmm *NodeMonitorManager) writeNicModelsToEtcd(etcd *storage.EtcdClient, no
 
 func (nmm *NodeMonitorManager) doWriteNicModels(ctx context.Context, etcd *storage.EtcdClient, nodeUUID, wanModel, lanModel string) error {
 	etcdKey := fmt.Sprintf("nodes/%s", nodeUUID)
-	resp, err := etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		return err
-	}
-	if len(resp.Kvs) == 0 {
-		return fmt.Errorf("node %s not found in etcd", nodeUUID)
-	}
+	return etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		if current == nil {
+			return storage.CASResult{}, fmt.Errorf("node %s: %w", nodeUUID, errNodeNotRegistered)
+		}
 
-	var nodeData map[string]interface{}
-	if err := json.Unmarshal(resp.Kvs[0].Value, &nodeData); err != nil {
-		return err
-	}
-	nodeData["nic_model_wan"] = wanModel
-	nodeData["nic_model_lan"] = lanModel
+		var nodeData map[string]interface{}
+		if err := json.Unmarshal(current, &nodeData); err != nil {
+			return storage.CASResult{}, err
+		}
+		nodeData["nic_model_wan"] = wanModel
+		nodeData["nic_model_lan"] = lanModel
 
-	updated, err := json.Marshal(nodeData)
-	if err != nil {
-		return err
-	}
-	_, err = etcd.Client().Put(ctx, etcdKey, string(updated))
-	return err
+		updated, err := json.Marshal(nodeData)
+		if err != nil {
+			return storage.CASResult{}, err
+		}
+		return storage.CASResult{Value: updated}, nil
+	})
 }
 
 // syncPPPoEStatus pulls each subscriber's PPPoE phase from the node and upserts it
