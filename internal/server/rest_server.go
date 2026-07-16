@@ -2327,7 +2327,13 @@ func (r *RestServer) StartRestServer(addr string, errCh chan<- error) *http.Serv
 	srv := NewHardenedTLSServer(addr, router)
 	go func() {
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+			// errCh is buffered(1) and shared with other listeners (e.g. gRPC);
+			// first error wins, later ones are dropped so this goroutine never
+			// blocks during shutdown.
+			select {
+			case errCh <- err:
+			default:
+			}
 		}
 	}()
 	return srv
