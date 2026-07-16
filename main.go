@@ -168,7 +168,14 @@ func main() {
 	// start gRPC server (handle kept in main so Stop() can be called on shutdown)
 	grpcSrv := server.NewGrpcServer(etcd, nmm)
 	logrus.Infof("Starting gRPC server on :%s", grpcPort)
-	go grpcSrv.Start(":"+grpcPort, configSvc)
+	go func() {
+		if err := grpcSrv.Start(":"+grpcPort, configSvc); err != nil {
+			select {
+			case serveErr <- err:
+			default: // another listener already reported; first error wins
+			}
+		}
+	}()
 
 	// start HTTP redirect server
 	logrus.Infof("Starting HTTP redirect server on :%s", httpPort)

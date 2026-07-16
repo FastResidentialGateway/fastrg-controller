@@ -48,10 +48,10 @@ func NewGrpcServer(etcd *storage.EtcdClient, nmm *NodeMonitorManager) *GrpcServe
 	return server
 }
 
-func (s *GrpcServer) Start(addr string, configSvc *ConfigGrpcServer) {
+func (s *GrpcServer) Start(addr string, configSvc *ConfigGrpcServer) error {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
-		logrus.WithError(err).Warn("failed to listen")
+		return fmt.Errorf("grpc listen on %s: %w", addr, err)
 	}
 
 	s.grpcServer = grpc.NewServer()
@@ -59,9 +59,9 @@ func (s *GrpcServer) Start(addr string, configSvc *ConfigGrpcServer) {
 	controllerpb.RegisterConfigServiceServer(s.grpcServer, configSvc)
 
 	logrus.Infof("gRPC server listening at %v", addr)
-	if err := s.grpcServer.Serve(lis); err != nil {
-		logrus.WithError(err).Error("failed to serve")
-	}
+	// Serve returns nil after GracefulStop (normal shutdown); a non-nil error
+	// means the listener died unexpectedly and should trigger process shutdown.
+	return s.grpcServer.Serve(lis)
 }
 
 func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeRegisterRequest) (*controllerpb.NodeRegisterReply, error) {
