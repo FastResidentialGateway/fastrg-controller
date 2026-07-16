@@ -37,7 +37,10 @@ type NodeMonitor struct {
 type NodeMonitorManager struct {
 	mu       sync.RWMutex
 	monitors map[string]*NodeMonitor
-	database atomic.Pointer[db.DB] // Optional: for syncing PPPoE status to database
+	// nicFetchInFlight (guarded by mu) tracks nodes whose NIC-model fetch is
+	// running, so repeated heartbeats cannot stack duplicate fetch goroutines.
+	nicFetchInFlight map[string]struct{}
+	database         atomic.Pointer[db.DB] // Optional: for syncing PPPoE status to database
 	// leader is true only on the elected leader replica. On-demand REST queries
 	// run on every replica (so monitors/gRPC conns exist everywhere), but the
 	// background poll-and-write loop runs only on the leader to avoid 3x node
@@ -55,7 +58,8 @@ func (nmm *NodeMonitorManager) IsLeader() bool { return nmm.leader.Load() }
 // database parameter is optional (can be nil) for stateless recovery of PPPoE status.
 func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 	nmm := &NodeMonitorManager{
-		monitors: make(map[string]*NodeMonitor),
+		monitors:         make(map[string]*NodeMonitor),
+		nicFetchInFlight: make(map[string]struct{}),
 	}
 	nmm.SetDatabase(database)
 	return nmm
@@ -188,6 +192,25 @@ func (nm *NodeMonitor) syncNodeState() {
 	}
 }
 
+// beginNicFetch marks nodeUUID's NIC-model fetch as in flight. It returns
+// false when a fetch for the same node is already running.
+func (nmm *NodeMonitorManager) beginNicFetch(nodeUUID string) bool {
+	nmm.mu.Lock()
+	defer nmm.mu.Unlock()
+	if _, running := nmm.nicFetchInFlight[nodeUUID]; running {
+		return false
+	}
+	nmm.nicFetchInFlight[nodeUUID] = struct{}{}
+	return true
+}
+
+// endNicFetch clears the in-flight mark set by beginNicFetch.
+func (nmm *NodeMonitorManager) endNicFetch(nodeUUID string) {
+	nmm.mu.Lock()
+	defer nmm.mu.Unlock()
+	delete(nmm.nicFetchInFlight, nodeUUID)
+}
+
 // FetchInitialNicModel dials the registered node once to retrieve NIC model info
 // (nics[0]=WAN, nics[1]=LAN) and persists it into etcd. Called as a goroutine
 // after StartMonitoring so RegisterNode is not blocked.
@@ -196,6 +219,10 @@ func (nmm *NodeMonitorManager) FetchInitialNicModel(nodeUUID string, etcd *stora
 	if etcd == nil {
 		return
 	}
+	if !nmm.beginNicFetch(nodeUUID) {
+		return // a fetch for this node is already in flight
+	}
+	defer nmm.endNicFetch(nodeUUID)
 
 	// Node gRPC server (port 50052) may not be ready immediately after RegisterNode.
 	const grpcMaxRetries = 5

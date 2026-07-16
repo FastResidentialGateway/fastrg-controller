@@ -244,7 +244,7 @@ func startLogServer(logDir string) *http.Server {
 		keyFile = "./certs/server.key"
 	}
 
-	srv := &http.Server{Addr: ":" + logHTTPSPort}
+	srv := server.NewHardenedTLSServer(":"+logHTTPSPort, nil)
 	go func() {
 		logrus.Infof("Starting log HTTPS server on :%s", logHTTPSPort)
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
