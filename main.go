@@ -95,8 +95,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	logSrv := startLogServer(logDir)
-
 	// connect to etcd
 	etcd, err := storage.NewEtcdClient()
 	if err != nil {
@@ -120,6 +118,8 @@ func main() {
 	// Pass database for stateless recovery of PPPoE status
 	nmm := server.NewNodeMonitorManager(nil)
 	rest := server.NewRestServer(etcd, nmm, nil, jwtSecret)
+	logRouter := rest.NewLogRouter(filepath.Join(logDir, "controller.log"))
+	logSrv := startLogServer(logRouter)
 
 	// Optional PostgreSQL read model. Connection attempts run in the background
 	// so every listener can start in etcd-only mode even when PostgreSQL is late.
@@ -259,34 +259,12 @@ func startProjectionWhenDatabaseReady(leaderCtx context.Context, etcd *storage.E
 	}
 }
 
-func startLogServer(logDir string) *http.Server {
+func startLogServer(handler http.Handler) *http.Server {
 	// start HTTPS server to expose log file on :8444 (or $LOG_HTTPS_PORT)
 	logHTTPSPort := os.Getenv("LOG_HTTPS_PORT")
 	if logHTTPSPort == "" {
 		logHTTPSPort = "8444"
 	}
-	logFilePath := filepath.Join(logDir, "controller.log")
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		f, err := os.Open(logFilePath)
-		if err != nil {
-			http.Error(w, "log file not found", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		fi, err := f.Stat()
-		if err != nil {
-			http.Error(w, "failed to stat log file", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeContent(w, r, filepath.Base(logFilePath), fi.ModTime(), f)
-	})
-
 	certFile := os.Getenv("CERT_FILE")
 	if certFile == "" {
 		certFile = "./certs/server.crt"
@@ -296,7 +274,7 @@ func startLogServer(logDir string) *http.Server {
 		keyFile = "./certs/server.key"
 	}
 
-	srv := server.NewHardenedTLSServer(":"+logHTTPSPort, nil)
+	srv := server.NewHardenedTLSServer(":"+logHTTPSPort, handler)
 	go func() {
 		logrus.Infof("Starting log HTTPS server on :%s", logHTTPSPort)
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {

@@ -2,12 +2,18 @@ package server
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"net/http"
 	"os"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 )
+
+func newMetricsMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	return mux
+}
 
 // StartPrometheusServer starts the Prometheus metrics HTTP server
 func StartPrometheusServer() error {
@@ -23,14 +29,15 @@ func StartPrometheusServer() error {
 	prometheusPort := "55688"
 	addr := fmt.Sprintf("%s:%s", prometheusIP, prometheusPort)
 
-	// Create HTTP server for Prometheus metrics
-	http.Handle("/metrics", promhttp.Handler())
+	// Keep metrics routes isolated from the process-wide default mux and from
+	// the log HTTPS listener.
+	mux := newMetricsMux()
 
 	logrus.Infof("Starting Prometheus metrics server on %s", addr)
 
 	// Start server in a goroutine
 	go func() {
-		if err := http.ListenAndServe(addr, nil); err != nil {
+		if err := http.ListenAndServe(addr, mux); err != nil {
 			logrus.WithError(err).Error("Prometheus metrics server error")
 		}
 	}()
