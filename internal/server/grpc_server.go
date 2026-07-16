@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -22,6 +23,12 @@ const (
 	HeartbeatTimeout = 60
 	// CheckInterval defines how often to check for stale nodes (in seconds)
 	CheckInterval = 30
+)
+
+var (
+	errNodeNotRegistered = errors.New("node not registered")
+	errNodeNoLongerStale = errors.New("node no longer stale")
+	errInvalidNodeData   = errors.New("invalid node data")
 )
 
 type GrpcServer struct {
@@ -73,30 +80,14 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 		}, nil
 	}
 
-	// Prepare node data to be stored
-	nodeData := map[string]interface{}{
-		"node_uuid":      req.NodeUuid,
-		"node_ip":        req.Ip,
-		"version":        req.Version,
-		"location":       req.Location,
-		"registered_at":  time.Now().Unix(),
-		"last_seen_time": time.Now().Unix(),
-		"status":         "active",
-	}
-
-	// Serialize node data to JSON
-	nodeDataJSON, err := json.Marshal(nodeData)
-	if err != nil {
-		logrus.WithError(err).Error("Failed to marshal node data")
-		return &controllerpb.NodeRegisterReply{
-			Success: false,
-			Message: "Failed to process node data",
-		}, nil
-	}
-
-	// Store to etcd, using nodes/{node_uuid} as key
+	// Re-registration intentionally resets the node's registration and liveness
+	// fields. The CAS mutate carries over only the two NIC-model fields so a
+	// concurrent NIC refresh cannot create a temporary missing-field window.
+	registeredAt := time.Now().Unix()
 	etcdKey := fmt.Sprintf("nodes/%s", req.NodeUuid)
-	_, err = s.etcd.Client().Put(ctx, etcdKey, string(nodeDataJSON))
+	err := s.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		return registerNodeCASValue(current, req, registeredAt)
+	})
 	if err != nil {
 		logrus.WithError(err).Error("Failed to store node data to etcd")
 		return &controllerpb.NodeRegisterReply{
@@ -159,48 +150,30 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 		return &emptypb.Empty{}, fmt.Errorf("node_uuid is required")
 	}
 
-	// Check if the node is registered
 	etcdKey := fmt.Sprintf("nodes/%s", req.GetNodeUuid())
-	resp, err := s.etcd.Client().Get(ctx, etcdKey)
-	if err != nil {
-		logrus.WithError(err).Error("Failed to get node data from etcd")
-		return &emptypb.Empty{}, fmt.Errorf("failed to check node registration")
-	}
-
-	if len(resp.Kvs) == 0 {
+	var nodeData map[string]interface{}
+	heartbeatAt := time.Now().Unix()
+	err := s.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		result, updatedNodeData, mutateErr := heartbeatNodeCASValue(current, req, heartbeatAt)
+		// CAS may retry this closure. Overwrite (never accumulate) the derived
+		// value so the successful attempt is the one used after CAS returns.
+		nodeData = updatedNodeData
+		return result, mutateErr
+	})
+	if errors.Is(err, errNodeNotRegistered) {
 		logrus.Errorf("Heartbeat failed: node %s not registered", req.GetNodeUuid())
 		return &emptypb.Empty{}, fmt.Errorf("node not registered")
 	}
-
-	// Deserialize existing node data
-	var nodeData map[string]interface{}
-	err = json.Unmarshal(resp.Kvs[0].Value, &nodeData)
-	if err != nil {
+	if errors.Is(err, errInvalidNodeData) {
 		logrus.WithError(err).Error("Failed to unmarshal node data")
 		return &emptypb.Empty{}, fmt.Errorf("failed to process node data")
 	}
-
-	// Update node data with heartbeat info
-	nodeData["last_seen_time"] = time.Now().Unix()
-	nodeData["uuid"] = req.GetNodeUuid()
-	nodeData["uptime"] = req.GetUptimeTimestamp()
-	nodeData["node_ip"] = req.GetIp()
-	nodeData["status"] = "active"
-	if req.GetHostOs() != "" {
-		nodeData["host_os"] = req.GetHostOs()
-	}
-
-	// Serialize updated node data to JSON
-	updatedNodeDataJSON, err := json.Marshal(nodeData)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to marshal updated node data")
-		return &emptypb.Empty{}, fmt.Errorf("failed to process updated node data")
-	}
-
-	// Update etcd with the new node data
-	_, err = s.etcd.Client().Put(ctx, etcdKey, string(updatedNodeDataJSON))
-	if err != nil {
-		logrus.WithError(err).Error("Failed to update node data in etcd")
+		if errors.Is(err, storage.ErrCASConflict) {
+			logrus.WithError(err).Error("Heartbeat CAS retries exhausted")
+		} else {
+			logrus.WithError(err).Error("Failed to update node data in etcd")
+		}
 		return &emptypb.Empty{}, fmt.Errorf("failed to update node data")
 	}
 
@@ -303,30 +276,25 @@ func (s *GrpcServer) checkAndUnregisterStaleNodes() {
 				}
 			}
 
-			logrus.Infof("Node %v is stale (last seen %d seconds ago), marking inactive...", nodeUUID, timeSinceLastSeen)
-
-			// Stop monitoring the node
-			s.nodeMonitorMgr.StopMonitoring(fmt.Sprintf("%v", nodeUUID))
-
-			// Mark the node inactive (a recovering node's Heartbeat will flip it
-			// back to "active"); keep the entry in etcd for audit/visibility.
-			nodeData["status"] = "inactive"
-			nodeData["inactive_at"] = currentTime
-			nodeData["inactive_reason"] = "heartbeat_timeout"
-
-			updatedNodeDataJSON, err := json.Marshal(nodeData)
-			if err != nil {
-				logrus.WithError(err).Errorf("Failed to marshal inactive node %v", nodeUUID)
-				continue
-			}
-
-			// Persist the inactive status back to etcd
-			_, err = s.etcd.Client().Put(ctx, string(kv.Key), string(updatedNodeDataJSON))
-			if err != nil {
-				logrus.WithError(err).Errorf("Failed to mark stale node %v inactive", nodeUUID)
-			} else {
-				logrus.Infof("Marked stale node inactive: %v", nodeUUID)
+			// The prefix snapshot only selects candidates. CAS re-reads the key
+			// and re-evaluates staleness so a concurrent heartbeat wins safely.
+			err = s.etcd.CAS(ctx, string(kv.Key), func(current []byte) (storage.CASResult, error) {
+				return staleNodeCASValue(current, currentTime)
+			})
+			switch {
+			case err == nil:
+				// Side effects happen only after the inactive state was committed.
+				s.nodeMonitorMgr.StopMonitoring(fmt.Sprintf("%v", nodeUUID))
+				logrus.Infof("Marked stale node inactive: %v (last seen %d seconds ago)", nodeUUID, timeSinceLastSeen)
 				staleCount++
+			case errors.Is(err, errNodeNotRegistered), errors.Is(err, errNodeNoLongerStale):
+				continue
+			case errors.Is(err, errInvalidNodeData):
+				logrus.WithError(err).Errorf("Failed to process current node data for key %s", kv.Key)
+			case errors.Is(err, storage.ErrCASConflict):
+				logrus.WithError(err).Warnf("CAS retries exhausted while marking stale node %v inactive", nodeUUID)
+			default:
+				logrus.WithError(err).Errorf("Failed to mark stale node %v inactive", nodeUUID)
 			}
 		}
 	}
@@ -334,6 +302,93 @@ func (s *GrpcServer) checkAndUnregisterStaleNodes() {
 	if staleCount > 0 {
 		logrus.Infof("Marked %d stale node(s) inactive in this check cycle", staleCount)
 	}
+}
+
+func registerNodeCASValue(current []byte, req *controllerpb.NodeRegisterRequest, registeredAt int64) (storage.CASResult, error) {
+	nodeData := map[string]interface{}{
+		"node_uuid":      req.NodeUuid,
+		"node_ip":        req.Ip,
+		"version":        req.Version,
+		"location":       req.Location,
+		"registered_at":  registeredAt,
+		"last_seen_time": registeredAt,
+		"status":         "active",
+	}
+
+	// Reset-on-register is intentional. Only NIC models survive a restart, and
+	// only when the transaction's current value is valid JSON.
+	if current != nil {
+		var existing map[string]interface{}
+		if err := json.Unmarshal(current, &existing); err == nil {
+			if wan, ok := existing["nic_model_wan"]; ok {
+				nodeData["nic_model_wan"] = wan
+			}
+			if lan, ok := existing["nic_model_lan"]; ok {
+				nodeData["nic_model_lan"] = lan
+			}
+		}
+	}
+
+	updated, err := json.Marshal(nodeData)
+	if err != nil {
+		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	return storage.CASResult{Value: updated}, nil
+}
+
+func heartbeatNodeCASValue(current []byte, req *controllerpb.NodeHeartbeat, heartbeatAt int64) (storage.CASResult, map[string]interface{}, error) {
+	if current == nil {
+		return storage.CASResult{}, nil, errNodeNotRegistered
+	}
+
+	var nodeData map[string]interface{}
+	if err := json.Unmarshal(current, &nodeData); err != nil {
+		return storage.CASResult{}, nil, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	nodeData["last_seen_time"] = heartbeatAt
+	nodeData["uuid"] = req.GetNodeUuid()
+	nodeData["uptime"] = req.GetUptimeTimestamp()
+	nodeData["node_ip"] = req.GetIp()
+	nodeData["status"] = "active"
+	if req.GetHostOs() != "" {
+		nodeData["host_os"] = req.GetHostOs()
+	}
+
+	updated, err := json.Marshal(nodeData)
+	if err != nil {
+		return storage.CASResult{}, nil, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	return storage.CASResult{Value: updated}, nodeData, nil
+}
+
+func staleNodeCASValue(current []byte, currentTime int64) (storage.CASResult, error) {
+	if current == nil {
+		return storage.CASResult{}, errNodeNotRegistered
+	}
+
+	var nodeData map[string]interface{}
+	if err := json.Unmarshal(current, &nodeData); err != nil {
+		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	lastSeenTime, ok := nodeData["last_seen_time"].(float64)
+	if !ok {
+		return storage.CASResult{}, fmt.Errorf("%w: invalid last_seen_time", errInvalidNodeData)
+	}
+	if status, _ := nodeData["status"].(string); status == "inactive" {
+		return storage.CASResult{}, errNodeNoLongerStale
+	}
+	if currentTime-int64(lastSeenTime) <= HeartbeatTimeout {
+		return storage.CASResult{}, errNodeNoLongerStale
+	}
+
+	nodeData["status"] = "inactive"
+	nodeData["inactive_at"] = currentTime
+	nodeData["inactive_reason"] = "heartbeat_timeout"
+	updated, err := json.Marshal(nodeData)
+	if err != nil {
+		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	return storage.CASResult{Value: updated}, nil
 }
 
 // Stop gracefully stops the gRPC server and background monitoring
