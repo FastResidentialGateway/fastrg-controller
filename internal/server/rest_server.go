@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -572,9 +573,17 @@ func (r *RestServer) Logout(c *gin.Context) {
 	blacklistKey := fmt.Sprintf("token_blacklist/%s", authHeader)
 
 	// Calculate remaining TTL for token
-	claims := token.Claims.(jwt.MapClaims)
-	exp := int64(claims["exp"].(float64))
-	ttl := exp - time.Now().Unix()
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+	expVal, ok := claims["exp"].(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+	ttl := int64(expVal) - time.Now().Unix()
 
 	if ttl > 0 {
 		// Only add to blacklist if token is not expired
@@ -1327,8 +1336,11 @@ func (r *RestServer) setDesireStatus(ctx context.Context, nodeId, userId, userna
 
 		var cwm HSIConfigWithMetadata
 		// Guard against wiping a malformed/legacy value: require a real config.
-		if err := json.Unmarshal(current, &cwm); err != nil || cwm.Config.UserID == "" {
+		if err := json.Unmarshal(current, &cwm); err != nil {
 			return storage.CASResult{}, fmt.Errorf("parse HSI config: %w", err)
+		}
+		if cwm.Config.UserID == "" {
+			return storage.CASResult{}, errors.New("parse HSI config: stored value has no user_id")
 		}
 
 		cwm.Config.DesireStatus = desire
@@ -2284,6 +2296,17 @@ func (r *RestServer) newRouter() *gin.Engine {
 	return router
 }
 
+// NewHardenedTLSServer returns an HTTP server for handler (nil means
+// http.DefaultServeMux) with TLS capped below at 1.2 — Go's server-side
+// default still accepts TLS 1.0 handshakes.
+func NewHardenedTLSServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:      addr,
+		Handler:   handler,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+}
+
 func (r *RestServer) StartRestServer(addr string) error {
 	gin.SetMode(gin.ReleaseMode)
 	router := r.newRouter()
@@ -2297,7 +2320,7 @@ func (r *RestServer) StartRestServer(addr string) error {
 	if keyFile == "" {
 		keyFile = "./certs/server.key"
 	}
-	return router.RunTLS(addr, certFile, keyFile)
+	return NewHardenedTLSServer(addr, router).ListenAndServeTLS(certFile, keyFile)
 }
 
 // Start HTTP redirect server
