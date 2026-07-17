@@ -40,17 +40,26 @@ seed_node_config() {
     compose exec -T etcd etcdctl --endpoints=localhost:2379 put "user_counts/$uuid/" "$user_count" >/dev/null || return 1
 }
 
-# cleanup runs on every exit path (normal, error, or interrupt): stop the node
-# process and restore its config so the node returns to its original
-# (production) endpoints regardless of how the test ends. Guarded so it only
-# acts after the config has actually been modified.
+# cleanup runs on every exit path (normal, error, or interrupt): stop the
+# phase's own node process and restore the config so the node returns to its
+# original (production) endpoints regardless of how the test ends. Guarded so
+# it only acts after the config has actually been modified — and therefore
+# only ever touches the fastrg process this phase started itself: a foreign
+# fastrg (someone else's e2e) makes the phase skip before arming cleanup.
 CLEANUP_ARMED=0
+BRAS_STARTED=0
 cleanup() {
     [ "$CLEANUP_ARMED" = "1" ] || return 0
     CLEANUP_ARMED=0
     log_info "Cleanup: stopping node and restoring config"
     node_stop || true
     node_restore_config || true
+    # Only stop a dpdk-bras this phase started itself; one that was already
+    # running belongs to someone else (or is a shared leftover) — leave it.
+    if [ "$BRAS_STARTED" = "1" ]; then
+        log_info "Cleanup: stopping the dpdk-bras this phase started"
+        bras_stop || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -73,9 +82,18 @@ test_node_failure() {
     fi
     log_info "Node UUID: $NODE_UUID"
 
-    # Stop any pre-existing fastrg process (it may be pointed at another env).
-    node_stop
-    log_success "Node prepared (no stale fastrg process)"
+    # Never touch a fastrg process this phase did not start: the node machine
+    # is shared and a running fastrg most likely belongs to another test (the
+    # node repo's own e2e starts and stops it too). Skip the phase entirely so
+    # concurrent test runs cannot terminate each other's processes. (Known
+    # race: a foreign run starting between this check and node_start below is
+    # not excluded — a cross-repo lock on the node would be needed for that.)
+    if node_is_running; then
+        log_warn "A fastrg process is already running on $NODE_HOST — likely another e2e in progress."
+        log_warn "Refusing to touch it; SKIPPING $PHASE."
+        return 0
+    fi
+    log_success "Node prepared (no fastrg process running)"
 
     # Step 3: Seed the node's HSI/DNS/user-count config into etcd so PPPoE can
     # actually connect (the stack starts from clean volumes each run).
@@ -85,6 +103,23 @@ test_node_failure() {
         return 1
     fi
     log_success "Node config seeded (hsi/2, dns/2, user_counts)"
+
+    # Step 3b: Ensure a PPPoE server is listening before the node dials. The
+    # lab BRAS (dpdk-bras on $BRAS_HOST) is started on demand by whichever
+    # test needs it, never assumed running. Shared-resource rule: use a
+    # running instance as-is; start (and later stop) our own when absent.
+    log_info "Step 3b: Ensuring dpdk-bras is running on $BRAS_HOST"
+    if bras_is_running; then
+        log_info "dpdk-bras already running (started by another test) — using it as-is"
+    else
+        CLEANUP_ARMED=1
+        BRAS_STARTED=1
+        if ! bras_start; then
+            log_error "dpdk-bras did not start on $BRAS_HOST within 24s"
+            return 1
+        fi
+        log_success "dpdk-bras started on $BRAS_HOST (VLANs 3,5)"
+    fi
 
     # Step 4: Point node config at the e2e controller and start the node.
     # Arm cleanup first so the EXIT trap restores config even if a step below

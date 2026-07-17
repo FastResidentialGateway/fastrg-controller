@@ -261,18 +261,18 @@ stack_is_up() {
     [[ "$defined" -gt 0 && "$running" -ge "$defined" ]]
 }
 
-# Ensure the compose stack is running before the tests start. If it is not
-# already up, bring it up and wait for all containers to be running.
+# Ensure the compose stack is built from the current code and running before
+# the tests start, then wait for all containers to be running.
 ensure_stack_up() {
     if stack_is_up; then
-        log_info "Docker compose stack already running"
-        return 0
+        log_info "Docker compose stack already running — rebuilding current code..."
+    else
+        log_info "Docker compose stack not running — starting it..."
+        # Clear any leftover volumes from a previous (possibly interrupted) run so the
+        # projection checkpoint and etcd revision start consistent (see teardown_stack).
+        compose_remote down -v >/dev/null 2>&1 || true
     fi
-    log_info "Docker compose stack not running — starting it..."
-    # Clear any leftover volumes from a previous (possibly interrupted) run so the
-    # projection checkpoint and etcd revision start consistent (see teardown_stack).
-    compose_remote down -v >/dev/null 2>&1 || true
-    compose_remote up -d || { log_error "docker-compose up failed"; return 1; }
+    compose_remote up -d --build || { log_error "docker-compose up --build failed"; return 1; }
     log_info "Waiting for containers to be up..."
     local attempt
     for attempt in $(seq 1 60); do

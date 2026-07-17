@@ -9,7 +9,9 @@
 # so a controller that silently misbehaves now breaks CI instead of printing
 # green. Ports are overridable via the same env vars the controller reads
 # (HTTPS_PORT / HTTP_REDIRECT_PORT / GRPC_PORT), so the script can target a
-# controller launched on non-default ports.
+# controller launched on non-default ports. Local run_all_tests uses dedicated
+# test defaults; target-mode functions retain the controller deployment
+# defaults. TEST_ETCD_HOST_PORT controls the host port of the self-managed etcd.
 
 set -e
 
@@ -25,16 +27,38 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Endpoint + ports (ports match the controller's own env var names).
+# Endpoint + ports (ports match the controller's own env var names). Resolve the
+# mode before applying defaults so explicit environment overrides always win.
 ENDPOINT=${1:-"127.0.0.1"}
-HTTPS_PORT=${HTTPS_PORT:-8443}
-HTTP_PORT=${HTTP_REDIRECT_PORT:-8080}
-GRPC_PORT=${GRPC_PORT:-50051}
+TEST_FUNCTION=${2:-run_all_tests}
+if [ "$TEST_FUNCTION" = "run_all_tests" ]; then
+    HTTPS_PORT=${HTTPS_PORT:-18443}
+    HTTP_PORT=${HTTP_REDIRECT_PORT:-18080}
+    GRPC_PORT=${GRPC_PORT:-15051}
+    LOG_HTTPS_PORT=${LOG_HTTPS_PORT:-18444}
+    TEST_ETCD_HOST_PORT=${TEST_ETCD_HOST_PORT:-12380}
+else
+    HTTPS_PORT=${HTTPS_PORT:-8443}
+    HTTP_PORT=${HTTP_REDIRECT_PORT:-8080}
+    GRPC_PORT=${GRPC_PORT:-50051}
+    LOG_HTTPS_PORT=${LOG_HTTPS_PORT:-8444}
+    TEST_ETCD_HOST_PORT=${TEST_ETCD_HOST_PORT:-2379}
+fi
 BASE="https://$ENDPOINT:$HTTPS_PORT"
 
-log_info "Using endpoint $ENDPOINT (https:$HTTPS_PORT http:$HTTP_PORT grpc:$GRPC_PORT)"
+log_info "Using endpoint $ENDPOINT (https:$HTTPS_PORT http:$HTTP_PORT grpc:$GRPC_PORT log-https:$LOG_HTTPS_PORT)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR/.."
+
+# Resource ownership flags ensure the EXIT trap only removes resources that
+# this invocation created. This is especially important when a name collision
+# causes docker run to fail before the test-etcd container starts.
+BACKEND_STARTED=0
+BACKEND_LAUNCHER_PID=""
+BACKEND_PID_FILE=""
+TEST_ETCD_STARTED=0
+TEST_CERT_DIR=""
 
 # ------------------------- assertion harness -------------------------
 PASS_COUNT=0
@@ -110,26 +134,88 @@ test_summary() {
 }
 
 # ------------------------- lifecycle helpers -------------------------
+port_in_use() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    else
+        (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+    fi
+}
+
+require_free_local_port() {
+    local variable_name="$1" port="$2"
+
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        log_error "$variable_name must be a TCP port from 1 to 65535 (got '$port')"
+        return 1
+    fi
+    if port_in_use "$port"; then
+        log_error "Local port $port is already in use. Override $variable_name with an unused port."
+        return 1
+    fi
+}
+
+check_local_ports() {
+    local -a names=(HTTPS_PORT HTTP_REDIRECT_PORT GRPC_PORT LOG_HTTPS_PORT TEST_ETCD_HOST_PORT)
+    local -a ports=("$HTTPS_PORT" "$HTTP_PORT" "$GRPC_PORT" "$LOG_HTTPS_PORT" "$TEST_ETCD_HOST_PORT")
+    local index other_index
+
+    for index in "${!ports[@]}"; do
+        require_free_local_port "${names[$index]}" "${ports[$index]}"
+        for ((other_index = 0; other_index < index; other_index++)); do
+            if [ "${ports[$index]}" = "${ports[$other_index]}" ]; then
+                log_error "${names[$index]} and ${names[$other_index]} both use port ${ports[$index]}; choose distinct ports."
+                return 1
+            fi
+        done
+    done
+}
+
 start_backend() {
     log_info "Starting backend (background)..."
-    cd "$SCRIPT_DIR/.."
+    cd "$PROJECT_ROOT"
     make build-backend
-    nohup sudo ./bin/controller > backend.log 2>&1 &
+    BACKEND_PID_FILE="$(mktemp "$PROJECT_ROOT/.test-controller-pid.XXXXXX")"
+    nohup sudo sh -c 'echo "$$" > "$1"; shift; exec "$@"' sh \
+        "$BACKEND_PID_FILE" env \
+        ETCD_ENDPOINTS="$ETCD_ENDPOINTS" \
+        HTTPS_PORT="$HTTPS_PORT" \
+        HTTP_REDIRECT_PORT="$HTTP_PORT" \
+        GRPC_PORT="$GRPC_PORT" \
+        LOG_HTTPS_PORT="$LOG_HTTPS_PORT" \
+        CERT_FILE="$CERT_FILE" \
+        KEY_FILE="$KEY_FILE" \
+        ./bin/controller > backend.log 2>&1 &
+    BACKEND_LAUNCHER_PID=$!
+    BACKEND_STARTED=1
     sleep 2
-    pidof controller > backend.pid || pgrep -f "controller" > backend.pid || true
     log_success "Backend log -> backend.log"
 }
 
 stop_backend() {
-    if [ -f "$SCRIPT_DIR/../backend.pid" ]; then
-        sudo kill "$(cat "$SCRIPT_DIR/../backend.pid")" || true
-        rm -f "$SCRIPT_DIR/../backend.pid" || true
+    if [ "$BACKEND_STARTED" -eq 1 ]; then
+        if [ -n "$BACKEND_PID_FILE" ] && [ -s "$BACKEND_PID_FILE" ]; then
+            sudo kill "$(cat "$BACKEND_PID_FILE")" >/dev/null 2>&1 || true
+        fi
+        if [ -n "$BACKEND_LAUNCHER_PID" ]; then
+            kill "$BACKEND_LAUNCHER_PID" >/dev/null 2>&1 || true
+            wait "$BACKEND_LAUNCHER_PID" 2>/dev/null || true
+        fi
+        BACKEND_STARTED=0
         log_success "Stopped backend"
+        rm -f "$PROJECT_ROOT/bin/controller" || true
+        rm -f "$PROJECT_ROOT/backend.log" || true
     else
-        log_info "No backend.pid found"
+        log_info "No locally started backend to stop"
     fi
-    rm -f "$SCRIPT_DIR/../bin/controller" || true
-    rm -f "$SCRIPT_DIR/../backend.log"
+    [ -n "$BACKEND_PID_FILE" ] && rm -f -- "$BACKEND_PID_FILE"
+    BACKEND_PID_FILE=""
 }
 
 test_etcd_seed() {
@@ -140,8 +226,8 @@ test_etcd_seed() {
 }
 
 start_test_etcd() {
-    log_info "Starting etcd (docker)..."
-    docker run -d --rm --name test-etcd -p 2379:2379 -p 2380:2380 \
+    log_info "Starting etcd on host port $TEST_ETCD_HOST_PORT (docker)..."
+    docker run -d --rm --name test-etcd -p "$TEST_ETCD_HOST_PORT:2379" \
         gcr.io/etcd-development/etcd:v3.6.5 \
         /usr/local/bin/etcd --name=node1 \
         --advertise-client-urls=http://0.0.0.0:2379 \
@@ -149,11 +235,15 @@ start_test_etcd() {
         --initial-cluster node1=http://0.0.0.0:2380 \
         --initial-advertise-peer-urls http://0.0.0.0:2380 \
         --listen-peer-urls http://0.0.0.0:2380
+    TEST_ETCD_STARTED=1
 }
 
 stop_test_etcd() {
-    log_info "Stopping etcd (docker)..."
-    docker stop test-etcd || true
+    if [ "$TEST_ETCD_STARTED" -eq 1 ]; then
+        log_info "Stopping etcd (docker)..."
+        docker stop test-etcd >/dev/null 2>&1 || true
+        TEST_ETCD_STARTED=0
+    fi
 }
 
 # ------------------------- feature tests -------------------------
@@ -360,14 +450,35 @@ test_hsi_apis() {
 }
 
 generate_test_certs() {
-    cd "$SCRIPT_DIR/.."
-    make generate-dev-certs
+    TEST_CERT_DIR="$(mktemp -d)"
+    CERT_FILE="$TEST_CERT_DIR/server.crt"
+    KEY_FILE="$TEST_CERT_DIR/server.key"
+    export CERT_FILE KEY_FILE
+    openssl req -x509 -newkey rsa:4096 -keyout "$KEY_FILE" -out "$CERT_FILE" \
+        -days 1 -nodes -subj "/CN=localhost/O=FastRG Controller/C=TW" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0" >/dev/null 2>&1
+    chmod 600 "$KEY_FILE"
+    chmod 644 "$CERT_FILE"
 }
 
 clean_test_certs() {
-    cd "$SCRIPT_DIR/.."
-    make clean-dev-certs
+    if [ -n "$TEST_CERT_DIR" ]; then
+        rm -rf -- "$TEST_CERT_DIR"
+        TEST_CERT_DIR=""
+    fi
 }
+
+cleanup() {
+    local exit_code=$?
+    trap - EXIT
+    set +e
+    [ "$BACKEND_STARTED" -eq 1 ] && stop_backend
+    [ "$TEST_ETCD_STARTED" -eq 1 ] && stop_test_etcd
+    [ -n "$TEST_CERT_DIR" ] && clean_test_certs
+    exit "$exit_code"
+}
+
+trap cleanup EXIT
 
 run_feature_tests() {
     test_etcd_seed
@@ -384,14 +495,13 @@ run_feature_tests() {
 }
 
 run_all_tests() {
+    check_local_ports
+    export ETCD_ENDPOINTS="127.0.0.1:$TEST_ETCD_HOST_PORT"
     start_test_etcd
     generate_test_certs
     test_etcd_seed
     start_backend
     run_feature_tests
-    stop_backend
-    stop_test_etcd
-    clean_test_certs
 }
 
 show_usage() {
@@ -402,7 +512,11 @@ show_usage() {
     echo "  ENDPOINT_ADDRESS    Controller IP (default: 127.0.0.1)"
     echo "  FUNCTION_NAME       Specific test function to run (optional)"
     echo ""
-    echo "Env overrides: HTTPS_PORT (8443), HTTP_REDIRECT_PORT (8080), GRPC_PORT (50051)"
+    echo "Local run_all_tests defaults: HTTPS_PORT=18443, HTTP_REDIRECT_PORT=18080,"
+    echo "  GRPC_PORT=15051, LOG_HTTPS_PORT=18444, TEST_ETCD_HOST_PORT=12380"
+    echo "Target-mode defaults: HTTPS_PORT=8443, HTTP_REDIRECT_PORT=8080,"
+    echo "  GRPC_PORT=50051, LOG_HTTPS_PORT=8444 (TEST_ETCD_HOST_PORT=2379)"
+    echo "Explicit environment overrides always take precedence."
     echo ""
     echo "Common functions: test_login test_nodes test_grpc test_redirect"
     echo "  test_logout test_hsi_workflow test_hsi_apis run_feature_tests run_all_tests"
@@ -423,7 +537,7 @@ on_error() {
     echo
     echo "==================== CI DIAGNOSTICS (on error) ===================="
     echo "Date: $(date)"
-    echo "ENDPOINT: $ENDPOINT  (https:$HTTPS_PORT http:$HTTP_PORT grpc:$GRPC_PORT)"
+    echo "ENDPOINT: $ENDPOINT  (https:$HTTPS_PORT http:$HTTP_PORT grpc:$GRPC_PORT log-https:$LOG_HTTPS_PORT)"
     echo "ETCD_ENDPOINTS: ${ETCD_ENDPOINTS:-unset}"
     env | grep -E 'GITHUB|CI|ETCD|ENDPOINT|PORT' || true
     echo
@@ -440,7 +554,7 @@ on_error() {
     if command -v ss >/dev/null 2>&1; then ss -lntp || true; elif command -v netstat >/dev/null 2>&1; then netstat -lntp || true; fi
     echo
     echo "etcd health:"
-    curl -v --max-time 5 "http://127.0.0.1:2379/health" || true
+    curl -v --max-time 5 "http://127.0.0.1:$TEST_ETCD_HOST_PORT/health" || true
     echo
     echo "HTTPS health (controller):"
     curl -vk --max-time 5 "$BASE/api/health" || true

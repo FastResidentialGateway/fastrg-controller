@@ -81,13 +81,56 @@ is_service_up() {
     compose ps "$service" 2>/dev/null | grep -q "Up\|healthy" && return 0 || return 1
 }
 
+# http_get_code <url>: print the HTTP status code (000 on connection failure),
+# ignoring TLS verification. The e2e runner host is not guaranteed to have
+# curl (a bare Ubuntu runner only ships wget/python3), so fall back to
+# python3 — phase 1 used to fail on the runner solely because curl was absent.
+http_get_code() {
+    local url=$1
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -k -o /dev/null -m 5 -w '%{http_code}' "$url" 2>/dev/null || echo 000
+    else
+        python3 - "$url" 2>/dev/null <<'PY' || echo 000
+import ssl, sys, urllib.error, urllib.request
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=5, context=ctx).status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print("000")
+PY
+    fi
+}
+
+# http_get_body <url>: print the response body (empty on failure), ignoring
+# TLS verification. Same curl-or-python3 fallback as http_get_code.
+http_get_body() {
+    local url=$1
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -k -H "Content-Type: application/json" "$url" 2>/dev/null || echo ""
+    else
+        python3 - "$url" 2>/dev/null <<'PY' || echo ""
+import ssl, sys, urllib.request
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=10, context=ctx).read().decode())
+except Exception:
+    print("")
+PY
+    fi
+}
+
 # True if the controller's HTTPS API layer answers at all (any HTTP status),
 # proving process/listener liveness — a stronger check than container "Up"
 # state. HTTP code 000 means the connection was refused (server not answering).
 controller_http_alive() {
     local code
-    code=$(curl -s -k -o /dev/null -m 5 -w '%{http_code}' \
-        "https://${CONTROLLER_HOST:-localhost}:28443/api/health" 2>/dev/null || echo 000)
+    code=$(http_get_code "https://${CONTROLLER_HOST:-localhost}:28443/api/health")
     [ "$code" != "000" ]
 }
 
@@ -156,7 +199,7 @@ kafka_produce_base64() {
 # Query controller REST API
 api_get() {
     local endpoint=$1
-    curl -s -k -H "Content-Type: application/json" "https://${CONTROLLER_HOST:-localhost}:28443/api$endpoint" || echo ""
+    http_get_body "https://${CONTROLLER_HOST:-localhost}:28443/api$endpoint"
 }
 
 # Get node status from controller
@@ -244,6 +287,50 @@ NODE_LOG="/tmp/fastrg-e2e-node.log"
 NODE_BIN="/root/fastrg-node/fastrg"
 NODE_ARGS="-l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
 
+# ---- BRAS (PPPoE server) lifecycle -------------------------------------
+# The lab's PPPoE terminator is dpdk-bras, an on-demand simulator on the BRAS
+# host (started per test run, e.g. by the fastrg-node repo's own e2e — it is
+# NOT an always-on service). Phase 4 must ensure one is running before the
+# node dials, following the shared-resource rule: a dpdk-bras we did not
+# start is left strictly alone; one we started is stopped when we are done.
+BRAS_HOST="${BRAS_HOST:-192.168.10.215}"
+
+ssh_bras() {
+    ssh $SSH_OPTS "root@${BRAS_HOST}" "$@" 2>&1
+}
+
+bras_is_running() {
+    ssh_bras "pgrep -x dpdk-bras >/dev/null 2>&1"
+}
+
+# Start dpdk-bras (VLANs 3 and 5, matching the seeded subscribers). dpdk-bras
+# runs in the foreground and keeps its SSH channel open (DPDK re-opens fds, so
+# remote setsid/nohup cannot detach it) — run it over a locally-backgrounded
+# SSH client instead and record that client's PID so bras_stop can clean up.
+BRAS_SSH_PID=""
+bras_start() {
+    ssh_bras "cd /root/dpdk-bras && exec ./dpdk-bras -l 0-7 -n 4 -- --pri-dns 192.168.10.1 --drop-pcap ./test.pcap --vlans 3,5 >/var/log/dpdk-bras.log 2>&1" </dev/null >/dev/null 2>&1 &
+    BRAS_SSH_PID=$!
+    local _i
+    for _i in $(seq 1 12); do
+        sleep 2
+        if bras_is_running; then
+            return 0
+        fi
+    done
+    ssh_bras "tail -20 /var/log/dpdk-bras.log 2>/dev/null || true"
+    return 1
+}
+
+bras_stop() {
+    ssh_bras "pkill -x dpdk-bras 2>/dev/null || true"
+    if [ -n "$BRAS_SSH_PID" ]; then
+        kill "$BRAS_SSH_PID" >/dev/null 2>&1 || true
+        wait "$BRAS_SSH_PID" 2>/dev/null || true
+        BRAS_SSH_PID=""
+    fi
+}
+
 # Point the node config at the e2e docker-compose controller endpoints.
 # Backs up the original config first so node_restore_config can undo it.
 node_point_config_to_e2e() {
@@ -309,8 +396,10 @@ pppoe_connected_count() {
 }
 
 export -f log_info log_success log_warn log_error compose compose_quiet
-export -f wait_for_service is_service_up controller_http_alive stop_service start_service
+export -f wait_for_service is_service_up http_get_code http_get_body controller_http_alive stop_service start_service
 export -f etcd_get db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
 export -f api_get node_status config_get pppoe_status
 export -f wait_for verify_config_sync kafka_lag
 export -f node_point_config_to_e2e node_restore_config node_stop node_start node_is_running pppoe_connected_count
+export -f ssh_bras bras_is_running bras_start bras_stop
+export BRAS_HOST
