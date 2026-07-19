@@ -33,6 +33,7 @@ test_database_failure() {
 
     # Step 1: Verify initial state
     log_info "Step 1: Verify initial state"
+    wait_for_service "etcd" || return 1
     wait_for_service "postgres" || return 1
     wait_for_service "controller" || return 1
     log_success "All services healthy"
