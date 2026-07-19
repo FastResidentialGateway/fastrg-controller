@@ -181,6 +181,26 @@ start_backend() {
     log_info "Starting backend (background)..."
     cd "$PROJECT_ROOT"
     make build-backend
+    # Optional coverage instrumentation: when SMOKE_COVER_DIR is set, rebuild the
+    # controller with binary coverage (Go 1.20+ `go build -cover`) so the REST
+    # smoke assertions count towards internal/... coverage. make build-backend
+    # already regenerated protobuf/swagger above; this only replaces the binary.
+    # GOCOVERDIR (added to the sudo env list below) is where the running process
+    # writes coverage data on graceful exit. When SMOKE_COVER_DIR is unset both
+    # the rebuild and the GOCOVERDIR passthrough are skipped, so the default CI /
+    # `make test` path is byte-for-byte unchanged.
+    #
+    # -coverpkg MUST include the main package (hence ./... not ./internal/...):
+    # Go registers the exit-time coverage writer via a synthetic init emitted into
+    # the instrumented main package. With -coverpkg=./internal/... main is left
+    # uninstrumented, no writer is registered, and GOCOVERDIR stays empty on exit
+    # (verified: internal-only instrumentation flushes nothing). run_tests.sh then
+    # restricts the emitted profile back to internal/... via `covdata textfmt
+    # -pkg`, so only internal coverage reaches the README/total.
+    if [ -n "${SMOKE_COVER_DIR:-}" ]; then
+        log_info "Rebuilding instrumented (coverage) controller binary -> GOCOVERDIR=$SMOKE_COVER_DIR"
+        go build -cover -coverpkg=./... -o bin/controller .
+    fi
     BACKEND_PID_FILE="$(mktemp "$PROJECT_ROOT/.test-controller-pid.XXXXXX")"
     nohup sudo sh -c 'echo "$$" > "$1"; shift; exec "$@"' sh \
         "$BACKEND_PID_FILE" env \
@@ -191,6 +211,7 @@ start_backend() {
         LOG_HTTPS_PORT="$LOG_HTTPS_PORT" \
         CERT_FILE="$CERT_FILE" \
         KEY_FILE="$KEY_FILE" \
+        ${SMOKE_COVER_DIR:+GOCOVERDIR="$SMOKE_COVER_DIR"} \
         ./bin/controller > backend.log 2>&1 &
     BACKEND_LAUNCHER_PID=$!
     BACKEND_STARTED=1
@@ -200,8 +221,24 @@ start_backend() {
 
 stop_backend() {
     if [ "$BACKEND_STARTED" -eq 1 ]; then
+        local controller_pid=""
         if [ -n "$BACKEND_PID_FILE" ] && [ -s "$BACKEND_PID_FILE" ]; then
-            sudo kill "$(cat "$BACKEND_PID_FILE")" >/dev/null 2>&1 || true
+            controller_pid="$(cat "$BACKEND_PID_FILE")"
+            sudo kill "$controller_pid" >/dev/null 2>&1 || true
+        fi
+        # Binary coverage: the controller only flushes GOCOVERDIR counter data on a
+        # *completed* graceful exit (meta is written at startup, counters at exit).
+        # cleanup() stops the throwaway etcd right after stop_backend, so wait here
+        # for the process to terminate while etcd is still up (keeping the graceful
+        # shutdown fast) before proceeding. Bounded so a wedged process can't hang
+        # the suite; runs at most ~15s. No-op when SMOKE_COVER_DIR is unset, so the
+        # default path is unchanged.
+        if [ -n "${SMOKE_COVER_DIR:-}" ] && [ -n "$controller_pid" ]; then
+            log_info "Waiting for instrumented controller to flush coverage..."
+            for _ in $(seq 1 60); do
+                sudo kill -0 "$controller_pid" >/dev/null 2>&1 || break
+                sleep 0.25
+            done
         fi
         if [ -n "$BACKEND_LAUNCHER_PID" ]; then
             kill "$BACKEND_LAUNCHER_PID" >/dev/null 2>&1 || true

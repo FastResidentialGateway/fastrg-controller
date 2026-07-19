@@ -144,7 +144,7 @@ readonly TOTAL_PERCENTAGE="$(awk -v covered="$total_covered" -v statements="$tot
 ')"
 
 {
-    printf 'The following results were measured on %s with disposable etcd, PostgreSQL, and Kafka containers and all three `TEST_*` variables set:\n\n' "$(date +%F)"
+    printf 'The following results were measured on %s with disposable etcd, PostgreSQL, and Kafka containers, all three `TEST_*` variables set, and the REST smoke suite'\''s instrumented controller binary included:\n\n' "$(date +%F)"
     printf '| Package | Coverage |\n'
     printf '|---|---:|\n'
     while IFS=$'\t' read -r _ package_name percentage; do
