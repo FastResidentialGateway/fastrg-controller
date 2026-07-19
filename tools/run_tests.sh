@@ -188,6 +188,14 @@ if [ -s "$COVERAGE_FILE" ]; then
     fi
 fi
 
+if [ "$GO_TEST_STATUS" = "PASS" ]; then
+    if "$SCRIPT_DIR/update_readme_coverage.sh"; then
+        echo "Readme coverage table updated"
+    else
+        echo "WARNING: failed to update Readme coverage table; continuing test run" >&2
+    fi
+fi
+
 echo "Running REST smoke suite on dedicated local ports..."
 if "$SCRIPT_DIR/test_script.sh" 127.0.0.1 run_all_tests; then
     REST_SMOKE_STATUS="PASS"
