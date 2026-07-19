@@ -129,19 +129,23 @@ The test suite is split into layers according to its external-service requiremen
 
 ### Coverage
 
-The following results were measured on 2026-07-17 with disposable etcd, PostgreSQL, and Kafka containers and all three `TEST_*` variables set:
+<!-- coverage:begin -->
+The following results were measured on 2026-07-19 with disposable etcd, PostgreSQL, and Kafka containers and all three `TEST_*` variables set:
 
 | Package | Coverage |
 |---|---:|
 | `internal/utils` | 100.0% |
 | `internal/validation` | 100.0% |
-| `internal/db` | 79.8% |
+| `internal/storage` | 88.1% |
+| `internal/db` | 80.3% |
 | `internal/kafka` | 74.7% |
 | `internal/projection` | 74.2% |
 | `internal/leader` | 61.1% |
-| `internal/storage` | 53.7% |
 | `internal/server` | 50.4% |
-| **Merged total (`make cover`, `-coverpkg=./internal/...`)** | **58.1%** |
+| **Merged total** | **58.0%** |
+
+Each percentage is the statement coverage of that package by the entire test suite, calculated from a single merged coverage profile.
+<!-- coverage:end -->
 
 Coverage changes as the codebase evolves. Run `make cover` to obtain current results instead of relying on this snapshot.
 
