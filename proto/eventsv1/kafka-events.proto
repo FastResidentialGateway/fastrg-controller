@@ -7,72 +7,142 @@ option go_package = "fastrg-controller/proto/eventsv1";
 // ------------------------------------------------------------
 // Kafka Topic: fastrg.node.events
 //
-// Partition key: node_uuid  (保證同一 node 的事件有序)
+// Partition key: node_uuid  (keeps events from one node ordered)
 // Producer:      fastrg-node (librdkafka, non-blocking)
 // Consumer:      fastrg-controller (consumer group: fastrg-controller)
-// Delivery:      at-least-once → consumer 端需冪等寫 DB
+// Delivery:      at-least-once -> consumer-side writes must be idempotent
 // ------------------------------------------------------------
 
-// 頂層事件信封,所有 Kafka 訊息使用此結構
+// Top-level event envelope; every Kafka message uses this structure.
 message NodeEvent {
-  string node_uuid  = 1;  // 發送此事件的 node UUID
-  string user_id    = 2;  // 相關 subscriber id;對 node 級別事件填 "0"
+  string node_uuid  = 1;  // UUID of the node emitting this event
+  string user_id    = 2;  // related subscriber id; "0" for node-level events
   EventType type    = 3;
-  int64 timestamp   = 4;  // Unix timestamp (秒)
-  string correlation_id = 5;  // 對應觸發此事件的 etcd mod_revision(字串);無則空
+  int64 timestamp   = 4;  // Unix timestamp (seconds)
+  string correlation_id = 5;  // etcd mod_revision (as string) that triggered this event; empty if none
 
   oneof payload {
     ConfigApplyResult  config_apply_result  = 10;
     PPPoEStateChange   pppoe_state_change   = 11;
     RuntimeError       runtime_error        = 12;
+    ConfigOfflineEdit  config_offline_edit  = 13;
   }
 }
 
 enum EventType {
   EVENT_TYPE_UNSPECIFIED       = 0;
 
-  // Config 套用結果 (point 5)
+  // Config apply result (point 5)
   EVENT_TYPE_CONFIG_APPLY_OK   = 1;
   EVENT_TYPE_CONFIG_APPLY_FAIL = 2;
 
-  // PPPoE 狀態轉態 (point 6)
+  // Offline-edit report: a config modified via the node CLI while the
+  // controller was unreachable, published over Kafka after reconnecting.
+  // The controller arbitrates by resourceVersion; see
+  // docs/contracts/resource-version.md, "Arbitration rules".
+  EVENT_TYPE_CONFIG_OFFLINE_EDIT = 3;
+
+  // PPPoE phase transitions (point 6)
   EVENT_TYPE_PPPOE_CONNECTING    = 10;
   EVENT_TYPE_PPPOE_CONNECTED     = 11;
   EVENT_TYPE_PPPOE_DISCONNECTING = 12;
   EVENT_TYPE_PPPOE_DISCONNECTED  = 13;
 
-  // Runtime 錯誤 (point 5)
+  // Runtime error (point 5)
   EVENT_TYPE_RUNTIME_ERROR     = 20;
 }
 
-// Config 套用結果 (EVENT_TYPE_CONFIG_APPLY_OK / FAIL)
+// Config apply result (EVENT_TYPE_CONFIG_APPLY_OK / FAIL)
 message ConfigApplyResult {
   string action        = 1;  // "create" | "update" | "delete"
   bool   success       = 2;
-  string error_code    = 3;  // 失敗時填;對應 etcd_error_reason_t
-  string error_message = 4;  // 人類可讀錯誤描述
+  string error_code    = 3;  // set on failure; maps to etcd_error_reason_t
+  string error_message = 4;  // human-readable error description
+
+  // metadata.resourceVersion of the config this apply attempt targeted.
+  // The controller's apply-fail rollback guard uses it to decide precisely
+  // whether the failed version is still the current etcd value, replacing
+  // the transitional curRV==okRV+1 heuristic (task-4/task-34). Older nodes
+  // leave it empty; the controller MUST tolerate the empty value and fall
+  // back to the transitional guard — a missing field never rejects the event.
+  string applied_resource_version = 5;
 }
 
-// PPPoE 狀態轉態 (EVENT_TYPE_PPPOE_*)
+// Offline-edit report (EVENT_TYPE_CONFIG_OFFLINE_EDIT)
+//
+// Emitted by the node when the controller/etcd was unreachable, the local
+// config was modified through the CLI, and on reconnect the local content
+// differs from the current etcd value — identical content is never sent.
+// The node no longer writes etcd directly; this message is the only path
+// by which offline edits re-enter the system. When Kafka is unreachable the
+// node queues locally and retries (at-least-once; the controller-side
+// arbitration is idempotent).
+//
+// Arbitration (controller side; normative definition in
+// docs/contracts/resource-version.md):
+//   1. config_json equals the current etcd value    -> idempotent no-op (replay)
+//   2. resource_version >  current etcd rv          -> apply the node snapshot
+//   3. resource_version <= current etcd rv          -> controller authority wins,
+//      discard this edit and record it in node_events
+message ConfigOfflineEdit {
+  // Full snapshot JSON of the target key, same shape as its etcd value and
+  // always carrying a metadata envelope with metadata.resourceVersion
+  // (incremented per contract on every CLI edit on the node side):
+  //   HSI_CONFIG       -> HSIConfigWithMetadata
+  //                       {"config": {...}, "metadata": {...}}
+  //   DNS_RECORDS      -> enveloped record array (schema change: the bare
+  //                       JSON array gains an envelope; see
+  //                       docs/contracts/resource-version.md §"DNS key schema")
+  //                       {"records": [...], "metadata": {...}}
+  //   SUBSCRIBER_COUNT -> {"subscriber_count": "...", "metadata": {...}}
+  string config_json = 1;
+
+  // metadata.resourceVersion of the snapshot, duplicated here so the
+  // consumer can arbitrate and log without parsing the JSON; MUST match the
+  // value inside config_json.
+  string resource_version = 2;
+
+  // Unix timestamp (seconds) of the last CLI edit on the node; for audit
+  // and debugging only — arbitration looks solely at resourceVersion.
+  int64 edited_at = 3;
+
+  // Human-readable edit summary, e.g. "snat set eport=12345" or
+  // "dns add www.example.com"; used for node_events records and debugging.
+  // May be empty.
+  string edit_summary = 4;
+
+  // Which etcd key family this snapshot belongs to. All three kinds follow
+  // the same resourceVersion contract and the same arbitration rules.
+  OfflineEditKind kind = 5;
+}
+
+enum OfflineEditKind {
+  OFFLINE_EDIT_KIND_UNSPECIFIED      = 0;
+  OFFLINE_EDIT_KIND_HSI_CONFIG       = 1;  // configs/{node}/hsi/{user}
+  OFFLINE_EDIT_KIND_DNS_RECORDS      = 2;  // configs/{node}/dns/{user}
+  OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT = 3;  // user_counts/{node}/
+}
+
+// PPPoE phase transition (EVENT_TYPE_PPPOE_*)
 message PPPoEStateChange {
   PPPoEPhase phase     = 1;
-  string hsi_ipv4      = 2;  // 連線完成時填入;其他轉態可為空
-  string hsi_ipv4_gw   = 3;  // 連線完成時填入
-  string error_message = 4;  // 失敗/異常斷線時填入
+  string hsi_ipv4      = 2;  // set once connected; may be empty for other transitions
+  string hsi_ipv4_gw   = 3;  // set once connected
+  string error_message = 4;  // set on failure / abnormal disconnect
 }
 
 enum PPPoEPhase {
   PPPOE_PHASE_UNSPECIFIED   = 0;
-  PPPOE_PHASE_CONNECTING    = 1;  // 開始建線 (撥號中)
-  PPPOE_PHASE_CONNECTED     = 2;  // 連線完成 (取得 IP)
-  PPPOE_PHASE_DISCONNECTING = 3;  // 開始斷線
-  PPPOE_PHASE_DISCONNECTED  = 4;  // 斷線完成
+  PPPOE_PHASE_CONNECTING    = 1;  // dialing started
+  PPPOE_PHASE_CONNECTED     = 2;  // connected (IP acquired)
+  PPPOE_PHASE_DISCONNECTING = 3;  // disconnect started
+  PPPOE_PHASE_DISCONNECTED  = 4;  // disconnect completed
 }
 
-// Runtime 錯誤 (EVENT_TYPE_RUNTIME_ERROR)
+// Runtime error (EVENT_TYPE_RUNTIME_ERROR)
 message RuntimeError {
-  string module        = 1;  // 產生錯誤的模組,例如 "pppd" | "dhcpd" | "dnsd" | "dp"
+  string module        = 1;  // module that raised the error, e.g. "pppd" | "dhcpd" | "dnsd" | "dp"
   string error_code    = 2;
   string error_message = 3;
-  string context       = 4;  // 額外 debug 資訊 (JSON 字串或空)
+  string context       = 4;  // extra debug info (JSON string or empty)
 }
