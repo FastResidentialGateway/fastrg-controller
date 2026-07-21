@@ -182,12 +182,50 @@ else
     OVERALL_STATUS=1
 fi
 
-if [ -s "$COVERAGE_FILE" ]; then
-    if coverage_line=$(go tool cover -func="$COVERAGE_FILE" | tail -1); then
-        COVERAGE_TOTAL="$coverage_line"
+# The REST smoke suite drives a real controller binary; instrument it so its
+# handler coverage is captured. The controller writes binary coverage data into
+# GOCOVERDIR (SMOKE_COVER_DIR) on graceful exit; test_script.sh only rebuilds
+# with -cover and forwards GOCOVERDIR when this variable is set.
+SMOKE_COVER_DIR="${TEST_TMP_DIR}/smoke-covdata"
+mkdir -p "$SMOKE_COVER_DIR"
+export SMOKE_COVER_DIR
+
+echo "Running REST smoke suite on dedicated local ports..."
+if "$SCRIPT_DIR/test_script.sh" 127.0.0.1 run_all_tests; then
+    REST_SMOKE_STATUS="PASS"
+else
+    REST_SMOKE_STATUS="FAIL"
+    OVERALL_STATUS=1
+fi
+
+# Merge the smoke binary-coverage data into the go test profile so both the
+# README table and the summary total reflect handler paths exercised only by the
+# smoke suite. Only attempt this when the smoke run passed (a clean shutdown is
+# what flushes the data) and the go profile exists. covdata textfmt emits its own
+# `mode:` header line, so drop it before appending; the merged profile then has a
+# single header followed by go blocks and smoke blocks. Duplicate blocks are safe
+# under set mode: both the README updater's dedup aggregation and
+# `go tool cover -func` OR-merge repeated blocks (verified equivalent in task-28).
+# A conversion failure only warns and skips the append; it never fails the run.
+if [ "$REST_SMOKE_STATUS" = "PASS" ] && [ -s "$COVERAGE_FILE" ]; then
+    smoke_profile="${TEST_TMP_DIR}/smoke.out"
+    # -pkg restricts the emitted profile to internal/... blocks. The smoke binary
+    # is instrumented with -coverpkg=./... (main must be instrumented for the
+    # exit-time writer to run), so its raw covdata also carries main/proto blocks;
+    # the README updater only accepts internal/... paths, so filter here.
+    if go tool covdata textfmt -i="$SMOKE_COVER_DIR" -pkg=fastrg-controller/internal/... -o "$smoke_profile"; then
+        tail -n +2 "$smoke_profile" >> "$COVERAGE_FILE"
+        echo "Merged REST smoke coverage into $COVERAGE_FILE"
+    else
+        echo "WARNING: failed to convert smoke coverage data; README/total will reflect go tests only" >&2
     fi
 fi
 
+# Regenerate the README coverage table from the (now smoke-augmented) profile.
+# Gated on the go layer passing: when go tests fail there is no trustworthy
+# profile to publish. When the smoke append did not happen (smoke failed or the
+# conversion warned) the table simply degrades to the go-only numbers, which are
+# still correct. An updater failure warns but never fails the run.
 if [ "$GO_TEST_STATUS" = "PASS" ]; then
     if "$SCRIPT_DIR/update_readme_coverage.sh"; then
         echo "Readme coverage table updated"
@@ -196,12 +234,11 @@ if [ "$GO_TEST_STATUS" = "PASS" ]; then
     fi
 fi
 
-echo "Running REST smoke suite on dedicated local ports..."
-if "$SCRIPT_DIR/test_script.sh" 127.0.0.1 run_all_tests; then
-    REST_SMOKE_STATUS="PASS"
-else
-    REST_SMOKE_STATUS="FAIL"
-    OVERALL_STATUS=1
+# Compute the summary total after the smoke merge so it matches the README table.
+if [ -s "$COVERAGE_FILE" ]; then
+    if coverage_line=$(go tool cover -func="$COVERAGE_FILE" | tail -1); then
+        COVERAGE_TOTAL="$coverage_line"
+    fi
 fi
 
 echo "Running full-stack failure and recovery e2e suite..."
