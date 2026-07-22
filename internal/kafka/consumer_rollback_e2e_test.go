@@ -185,6 +185,37 @@ func rollbackJSONEqual(got []byte, want string) bool {
 	return reflect.DeepEqual(gotValue, wantValue)
 }
 
+// rollbackRestoredPayload reports whether got carries want's config payload
+// with freshly re-stamped rollback metadata (docs/contracts/resource-version.md
+// §2.3/§8-7): the payload is restored while resourceVersion advances to
+// wantRV (current+1) and updatedBy identifies the rollback writer. The old
+// snapshot's metadata must never be written back.
+func rollbackRestoredPayload(got []byte, want string, wantRV string) bool {
+	type envelope struct {
+		Config   any `json:"config"`
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+			UpdatedBy       string `json:"updatedBy"`
+			UpdatedAt       string `json:"updatedAt"`
+		} `json:"metadata"`
+	}
+	var gotEnv, wantEnv envelope
+	if err := json.Unmarshal(got, &gotEnv); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(want), &wantEnv); err != nil {
+		return false
+	}
+	if !reflect.DeepEqual(gotEnv.Config, wantEnv.Config) {
+		return false
+	}
+	if gotEnv.Metadata.ResourceVersion != wantRV || gotEnv.Metadata.UpdatedBy != rollbackUpdatedBy {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339, gotEnv.Metadata.UpdatedAt)
+	return err == nil
+}
+
 func TestRollbackRestoresPreviousConfig(t *testing.T) {
 	env := newRollbackE2EEnvironment(t)
 	node, user := "rollback-restore-"+env.suffix, "101"
@@ -211,8 +242,10 @@ func TestRollbackRestoresPreviousConfig(t *testing.T) {
 
 	waitFor(t, 25*time.Second, func() bool {
 		resp, err := env.etcd.Client().Get(env.ctx, key)
-		return err == nil && len(resp.Kvs) == 1 && rollbackJSONEqual(resp.Kvs[0].Value, v1)
-	}, "failed v2 to be rolled back to v1")
+		// Contract §2.3/§8-7: the rollback restores v1's payload but re-stamps
+		// metadata (rv = current 2 + 1 = 3, fresh updatedAt/updatedBy).
+		return err == nil && len(resp.Kvs) == 1 && rollbackRestoredPayload(resp.Kvs[0].Value, v1, "3")
+	}, "failed v2 to be rolled back to v1's payload with re-stamped metadata")
 	waitFor(t, 25*time.Second, func() bool {
 		return rollbackHistoryCount(env.ctx, env.pool, node, user, "failed", "apply-failed") == 1
 	}, "apply-failed history")

@@ -32,7 +32,7 @@ seed_node_config() {
     local uuid=$1
     local hsi_config dns_records user_count
     hsi_config='{"config":{"user_id":"2","vlan_id":"3","password":"admin","dhcp_subnet":"255.255.255.0","account_name":"the","dhcp_gateway":"192.168.4.1","port-mapping":[{"dip":"192.168.4.2","dport":"8080","eport":"12345","index":"0"}],"desire_status":"connect","dhcp_addr_pool":"192.168.4.2-192.168.4.10","dns_proxy_enable":true,"tcp_conntrack_enable":true},"metadata":{"node":"'"$uuid"'","updatedAt":"2026-06-10T05:07:07Z","updatedBy":"admin","resourceVersion":"239"}}'
-    dns_records='[{"domain":"www.fastrg.org","ip":"192.168.201.11","ttl":30}]'
+    dns_records='{"records":[{"domain":"www.fastrg.org","ip":"192.168.201.11","ttl":30}],"metadata":{"node":"'"$uuid"'","resourceVersion":"1","updatedAt":"2026-06-10T05:07:19Z","updatedBy":"admin"}}'
     user_count='{"metadata":{"node":"'"$uuid"'","resourceVersion":"199","updatedAt":"2026-06-10T05:07:19Z","updatedBy":"admin"},"subscriber_count":"2"}'
 
     compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$uuid/hsi/2" "$hsi_config" >/dev/null || return 1
