@@ -116,6 +116,22 @@ func skipRollback(reason string, warn bool) error {
 	return &rollbackSkipError{reason: reason, warn: warn}
 }
 
+// rollbackUpdatedBy marks the metadata.updatedBy of a config that the automatic
+// apply-failure rollback path rewrote, so an operator can tell a rollback write
+// apart from a user or node write. See docs/contracts/resource-version.md §2.3
+// and §8-7.
+const rollbackUpdatedBy = "controller-rollback"
+
+// configMetadata is the metadata envelope shared by the three config key
+// families (docs/contracts/resource-version.md §2). Only the fields the
+// rollback path reads or re-stamps are modelled here.
+type configMetadata struct {
+	Node            string `json:"node"`
+	ResourceVersion string `json:"resourceVersion"`
+	UpdatedBy       string `json:"updatedBy"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
 func configResourceVersion(value []byte) (uint64, error) {
 	var envelope struct {
 		Metadata *struct {
@@ -136,10 +152,63 @@ func configResourceVersion(value []byte) (uint64, error) {
 	return rv, nil
 }
 
+// rollbackConfigValue builds the value the rollback CAS commits: the payload of
+// the last successful config (its "config" object) re-wrapped with freshly
+// stamped metadata. Per docs/contracts/resource-version.md §2.3 and §8-7,
+// rollback restores payload ONLY; metadata is never copied from the old
+// snapshot but re-stamped so the resourceVersion chain and updatedAt advance
+// (rv = curRV+1, updatedAt = now, updatedBy = rollback marker) rather than
+// regressing, which task-33's offline-edit arbitration relies on.
+//
+// curRV is the already-parsed resourceVersion of current (validated by the
+// caller). now is read here rather than passed in, matching every other CAS
+// mutate closure in this repo, which timestamp inside the closure; only the
+// committed attempt's value survives, so a retry simply re-stamps a coherent,
+// later updatedAt with no cross-field inconsistency.
+func rollbackConfigValue(prevJSON, current []byte, curRV uint64) ([]byte, error) {
+	var prev struct {
+		Config json.RawMessage `json:"config"`
+	}
+	if err := json.Unmarshal(prevJSON, &prev); err != nil {
+		return nil, fmt.Errorf("decode last successful config: %w", err)
+	}
+	if len(prev.Config) == 0 {
+		return nil, errors.New("last successful config has no payload")
+	}
+
+	// node is metadata identity, not payload; carry it from the live value.
+	var cur struct {
+		Metadata struct {
+			Node string `json:"node"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(current, &cur); err != nil {
+		return nil, fmt.Errorf("decode current metadata: %w", err)
+	}
+
+	envelope := struct {
+		Config   json.RawMessage `json:"config"`
+		Metadata configMetadata  `json:"metadata"`
+	}{
+		Config: prev.Config,
+		Metadata: configMetadata{
+			Node:            cur.Metadata.Node,
+			ResourceVersion: strconv.FormatUint(curRV+1, 10),
+			UpdatedBy:       rollbackUpdatedBy,
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	return json.Marshal(envelope)
+}
+
 // guardedRollbackMutation decides whether the current etcd value is still the
 // single write immediately following the last node-confirmed version. It must
 // run inside storage.CAS so a concurrent write causes a retry with the newest
 // value and therefore a fresh guard evaluation.
+//
+// When it does roll back, it restores only the last successful payload and
+// re-stamps metadata (see rollbackConfigValue): the write must not regress the
+// resourceVersion chain or updatedAt back to the old snapshot's values.
 //
 // This is a transitional resourceVersion-only guard. A delete followed by a
 // recreate can reset resourceVersion to 1 and is indistinguishable from the
@@ -169,7 +238,11 @@ func guardedRollbackMutation(prevConfig *db.HSIConfigRow, current []byte) (stora
 		if prevConfig == nil {
 			return storage.CASResult{Delete: true}, nil
 		}
-		return storage.CASResult{Value: prevConfig.ConfigJSON}, nil
+		value, err := rollbackConfigValue(prevConfig.ConfigJSON, current, curRV)
+		if err != nil {
+			return storage.CASResult{}, skipRollback("cannot rebuild rollback config: "+err.Error(), true)
+		}
+		return storage.CASResult{Value: value}, nil
 	}
 
 	return storage.CASResult{}, skipRollback(

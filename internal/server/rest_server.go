@@ -145,6 +145,32 @@ type DnsRecord struct {
 	TTL    uint32 `json:"ttl" example:"30"`
 }
 
+// DnsRecordsData is the DNS key envelope (docs/contracts/resource-version.md
+// §3): the record array now lives under "records" alongside a metadata envelope
+// identical to the other config families, so DNS writes participate in the
+// resourceVersion chain instead of being stored as a bare JSON array.
+type DnsRecordsData struct {
+	Records  []DnsRecord `json:"records"`
+	Metadata HSIMetadata `json:"metadata"`
+}
+
+// decodeDnsRecords extracts the records from a DNS key value. A value that does
+// not parse as the envelope schema (a legacy bare JSON array, or corrupt data)
+// is treated as having no valid records; the write path overwrites it with the
+// new schema (docs/contracts/resource-version.md §3, no compatibility window
+// because the system is not yet deployed).
+func decodeDnsRecords(value []byte) []DnsRecord {
+	if len(value) == 0 {
+		return nil
+	}
+	var env DnsRecordsData
+	if err := json.Unmarshal(value, &env); err != nil {
+		logrus.WithError(err).Warn("DNS key not in envelope schema, treating as empty (legacy value will be overwritten on write)")
+		return nil
+	}
+	return env.Records
+}
+
 // SubscriberCountMetadata represents metadata for subscriber count
 type SubscriberCountMetadata struct {
 	Node            string `json:"node"`
@@ -250,11 +276,14 @@ func (r *RestServer) getUserFromToken(tokenString string) (string, error) {
 	return username, nil
 }
 
-// nextResourceVersion derives the display-only resourceVersion to stamp on the
-// value about to be written, from the current stored value (nil for a new key).
-// This is a human-readable audit counter only; concurrency control uses etcd's
-// ModRevision via EtcdClient.CAS, not this number. Behaviour mirrors the old
-// getNextResourceVersion: new key -> "1", unparseable/missing version -> "2".
+// nextResourceVersion derives the resourceVersion to stamp on the value about
+// to be written, from the current stored value (nil for a new key). Per
+// docs/contracts/resource-version.md §2 this is no longer display-only: it is a
+// version chain that every writer (both repos, including the rollback and
+// offline-edit paths) maintains and that task-33's arbitration relies on. It
+// does NOT replace concurrency control, which is still etcd's ModRevision via
+// EtcdClient.CAS. Rules (§2): new key -> "1", missing/unparseable version -> "2",
+// otherwise current+1.
 func nextResourceVersion(current []byte) string {
 	if len(current) == 0 {
 		return "1"
@@ -2024,11 +2053,10 @@ func (r *RestServer) GetDnsRecords(c *gin.Context) {
 
 	records := []DnsRecord{}
 	if len(resp.Kvs) > 0 {
-		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-			logrus.WithError(err).Errorf("Failed to parse DNS records")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
-			return
-		}
+		records = decodeDnsRecords(resp.Kvs[0].Value)
+	}
+	if records == nil {
+		records = []DnsRecord{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"records": records})
@@ -2057,13 +2085,7 @@ func (r *RestServer) GetDnsRecord(c *gin.Context) {
 		return
 	}
 
-	var records []DnsRecord
-	if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse DNS records"})
-		return
-	}
-
-	for _, r := range records {
+	for _, r := range decodeDnsRecords(resp.Kvs[0].Value) {
 		if r.Domain == domain {
 			c.JSON(http.StatusOK, r)
 			return
@@ -2094,18 +2116,19 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
+		return
+	}
 	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
-	// CAS the whole DNS record array: read current, add/update the entry,
-	// enforce the 64-record cap, write back atomically.
+	// CAS the DNS envelope: read current records, add/update the entry, enforce
+	// the 64-record cap, then write back the records under a freshly stamped
+	// metadata envelope (resource-version.md §2, §3) atomically.
 	isUpdate := false
-	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
-		var records []DnsRecord
-		if current != nil {
-			if err := json.Unmarshal(current, &records); err != nil {
-				return storage.CASResult{}, err
-			}
-		}
+	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+		records := decodeDnsRecords(current)
 
 		isUpdate = false
 		for i, rec := range records {
@@ -2122,7 +2145,16 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 			records = append(records, newRecord)
 		}
 
-		data, err := json.Marshal(records)
+		env := DnsRecordsData{
+			Records: records,
+			Metadata: HSIMetadata{
+				Node:            nodeId,
+				ResourceVersion: nextResourceVersion(current),
+				UpdatedBy:       username,
+				UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		data, err := json.Marshal(env)
 		if err != nil {
 			return storage.CASResult{}, err
 		}
@@ -2160,20 +2192,22 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
+		return
+	}
 	key := fmt.Sprintf("configs/%s/dns/%s", nodeId, userId)
 
-	// CAS the DNS record array: remove the domain, then delete the key when no
-	// records remain or write back the trimmed array, atomically.
-	err := r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
+	// CAS the DNS envelope: remove the domain, then delete the key when no
+	// records remain or write back the trimmed records under a freshly stamped
+	// metadata envelope (resource-version.md §2, §3), atomically.
+	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
 		if current == nil {
 			return storage.CASResult{}, errDNSRecordNotFound
 		}
 
-		var records []DnsRecord
-		if err := json.Unmarshal(current, &records); err != nil {
-			return storage.CASResult{}, err
-		}
-
+		records := decodeDnsRecords(current)
 		found := false
 		newRecords := records[:0]
 		for _, rec := range records {
@@ -2190,7 +2224,16 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 		if len(newRecords) == 0 {
 			return storage.CASResult{Delete: true}, nil
 		}
-		data, err := json.Marshal(newRecords)
+		env := DnsRecordsData{
+			Records: newRecords,
+			Metadata: HSIMetadata{
+				Node:            nodeId,
+				ResourceVersion: nextResourceVersion(current),
+				UpdatedBy:       username,
+				UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		data, err := json.Marshal(env)
 		if err != nil {
 			return storage.CASResult{}, err
 		}

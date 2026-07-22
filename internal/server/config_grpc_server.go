@@ -204,6 +204,32 @@ type dnsRecordInner struct {
 	TTL    uint32 `json:"ttl"`
 }
 
+// dnsRecordsWithMetadata is the DNS key envelope
+// (docs/contracts/resource-version.md §3): the record array now lives under
+// "records" alongside a metadata envelope identical to the other two config
+// families, so DNS writes participate in the resourceVersion chain.
+type dnsRecordsWithMetadata struct {
+	Records  []dnsRecordInner `json:"records"`
+	Metadata hsiMetaInner     `json:"metadata"`
+}
+
+// decodeDNSRecords reads the records out of a DNS key value. A value that does
+// not parse as the envelope schema (a legacy bare JSON array, or corrupt data)
+// is treated as having no valid records; the caller overwrites it with the new
+// schema on the next write (docs/contracts/resource-version.md §3, no
+// compatibility window because the system is not yet deployed).
+func decodeDNSRecords(current []byte) []dnsRecordInner {
+	if len(current) == 0 {
+		return nil
+	}
+	var env dnsRecordsWithMetadata
+	if err := json.Unmarshal(current, &env); err != nil {
+		logrus.WithError(err).Warn("grpc: DNS key not in envelope schema, treating as empty (legacy value will be overwritten)")
+		return nil
+	}
+	return env.Records
+}
+
 // ── proto ↔ inner type converters ─────────────────────────────────────────
 
 func protoToInner(p *controllerpb.HSIConfig) hsiConfigInner {
@@ -598,7 +624,8 @@ func (s *ConfigGrpcServer) GetSubscriberCount(ctx context.Context, req *controll
 // ── DNS records ───────────────────────────────────────────────────────────
 
 func (s *ConfigGrpcServer) AddOrUpdateDNSRecord(ctx context.Context, req *controllerpb.DNSRecordRequest) (*emptypb.Empty, error) {
-	if _, err := s.callerFromCtx(ctx); err != nil {
+	caller, err := s.callerFromCtx(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
@@ -613,12 +640,7 @@ func (s *ConfigGrpcServer) AddOrUpdateDNSRecord(ctx context.Context, req *contro
 	}
 	newRec := dnsRecordInner{Domain: r.GetDomain(), IP: r.GetIp(), TTL: r.GetTtl()}
 	casErr := s.etcd.CAS(ctx, dnsKey(req.NodeId, req.UserId), func(current []byte) (storage.CASResult, error) {
-		var records []dnsRecordInner
-		if current != nil {
-			if err := json.Unmarshal(current, &records); err != nil {
-				return storage.CASResult{}, err
-			}
-		}
+		records := decodeDNSRecords(current)
 		updated := false
 		for i, rec := range records {
 			if rec.Domain == newRec.Domain {
@@ -633,7 +655,16 @@ func (s *ConfigGrpcServer) AddOrUpdateDNSRecord(ctx context.Context, req *contro
 			}
 			records = append(records, newRec)
 		}
-		b, err := json.Marshal(records)
+		env := dnsRecordsWithMetadata{
+			Records: records,
+			Metadata: hsiMetaInner{
+				Node:            req.NodeId,
+				ResourceVersion: nextResourceVersion(current),
+				UpdatedBy:       caller,
+				UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		b, err := json.Marshal(env)
 		if err != nil {
 			return storage.CASResult{}, err
 		}
@@ -649,7 +680,8 @@ func (s *ConfigGrpcServer) AddOrUpdateDNSRecord(ctx context.Context, req *contro
 }
 
 func (s *ConfigGrpcServer) DeleteDNSRecord(ctx context.Context, req *controllerpb.DeleteDNSRecordRequest) (*emptypb.Empty, error) {
-	if _, err := s.callerFromCtx(ctx); err != nil {
+	caller, err := s.callerFromCtx(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateNodeAndUserIDsToStatus(req.NodeId, req.UserId); err != nil {
@@ -662,10 +694,7 @@ func (s *ConfigGrpcServer) DeleteDNSRecord(ctx context.Context, req *controllerp
 		if current == nil {
 			return storage.CASResult{}, errDNSRecordNotFound
 		}
-		var records []dnsRecordInner
-		if err := json.Unmarshal(current, &records); err != nil {
-			return storage.CASResult{}, err
-		}
+		records := decodeDNSRecords(current)
 		found := false
 		kept := records[:0]
 		for _, rec := range records {
@@ -681,7 +710,16 @@ func (s *ConfigGrpcServer) DeleteDNSRecord(ctx context.Context, req *controllerp
 		if len(kept) == 0 {
 			return storage.CASResult{Delete: true}, nil
 		}
-		b, err := json.Marshal(kept)
+		env := dnsRecordsWithMetadata{
+			Records: kept,
+			Metadata: hsiMetaInner{
+				Node:            req.NodeId,
+				ResourceVersion: nextResourceVersion(current),
+				UpdatedBy:       caller,
+				UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		b, err := json.Marshal(env)
 		if err != nil {
 			return storage.CASResult{}, err
 		}
@@ -710,11 +748,7 @@ func (s *ConfigGrpcServer) ListDNSRecords(ctx context.Context, req *controllerpb
 	}
 	out := &controllerpb.ListDNSRecordsResponse{}
 	if len(resp.Kvs) > 0 {
-		var records []dnsRecordInner
-		if err := json.Unmarshal(resp.Kvs[0].Value, &records); err != nil {
-			return nil, status.Error(codes.Internal, "failed to parse DNS records")
-		}
-		for _, r := range records {
+		for _, r := range decodeDNSRecords(resp.Kvs[0].Value) {
 			out.Records = append(out.Records, &controllerpb.DNSRecord{
 				Domain: r.Domain,
 				Ip:     r.IP,
