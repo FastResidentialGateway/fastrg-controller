@@ -19,7 +19,7 @@
 #   --db-host      IP     PostgreSQL host (default: 192.168.10.212)
 #   --compose-dir  PATH   Docker Compose project directory on controller (default: /root/fastrg-controller/e2e_test)
 #   --ssh-key      PATH   SSH identity file (default: auto-detect)
-#   --phase        N      Run specific phase (1-4) (default: all)
+#   --phase        N      Run specific phase (1-5) (default: all)
 #   --help                Show this help
 #
 # Requirements (local machine):
@@ -359,7 +359,7 @@ main() {
     if [[ -n "$PHASE_TO_RUN" ]]; then
         run_phase "$PHASE_TO_RUN" || rc=1
     else
-        for phase in 1 2 3 4; do
+        for phase in 1 2 3 4 5; do
             if ! run_phase "$phase"; then
                 log_error "Phase ${phase} failed"
                 rc=1

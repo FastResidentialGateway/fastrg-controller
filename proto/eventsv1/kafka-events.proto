@@ -80,10 +80,15 @@ message ConfigApplyResult {
 //
 // Arbitration (controller side; normative definition in
 // docs/contracts/resource-version.md):
-//   1. config_json equals the current etcd value    -> idempotent no-op (replay)
-//   2. resource_version >  current etcd rv          -> apply the node snapshot
-//   3. resource_version <= current etcd rv          -> controller authority wins,
-//      discard this edit and record it in node_events
+//   1. Compare only the kind-specific payload, excluding metadata. Equal
+//      payloads are an idempotent no-op for at-least-once replay.
+//   2. Apply a content edit only when resource_version is greater than the
+//      current etcd rv AND edited_at is later than current metadata.updatedAt.
+//      The controller writes the proposed payload with freshly stamped
+//      metadata; it never copies the node metadata.
+//   3. Otherwise controller authority wins: keep the current value and record
+//      the discarded cumulative offline edit in node_events.
+// Tombstone arbitration is documented on deleted below.
 message ConfigOfflineEdit {
   // Full snapshot JSON of the target key, same shape as its etcd value and
   // always carrying a metadata envelope with metadata.resourceVersion
@@ -102,8 +107,10 @@ message ConfigOfflineEdit {
   // value inside config_json.
   string resource_version = 2;
 
-  // Unix timestamp (seconds) of the last CLI edit on the node; for audit
-  // and debugging only — arbitration looks solely at resourceVersion.
+  // Unix timestamp (seconds) of the last CLI edit on the node. This is a
+  // required arbitration input: content edits and tombstones must be strictly
+  // later than current metadata.updatedAt; equal timestamps favor controller
+  // authority. It is also retained for audit and debugging.
   int64 edited_at = 3;
 
   // Human-readable edit summary, e.g. "snat set eport=12345" or
@@ -114,6 +121,26 @@ message ConfigOfflineEdit {
   // Which etcd key family this snapshot belongs to. All three kinds follow
   // the same resourceVersion contract and the same arbitration rules.
   OfflineEditKind kind = 5;
+
+  // Offline DELETE proposal (tombstone) when true (contract §9). Then:
+  //   - config_json is empty and MUST NOT be parsed; a non-empty
+  //     config_json with deleted=true is a poison message (kafka_dlq) —
+  //     an offline delete+recreate is sent as an ordinary content edit
+  //     continuing the last-known rv chain (§9-2), never as a tombstone;
+  //   - resource_version carries the key's last-known rv at delete time
+  //     and IS an arbitration input (still exempt from the §7
+  //     config_json/resource_version consistency check);
+  //   - the controller deletes the etcd key only when BOTH hold (§9-3):
+  //     resource_version >= the current value's rv (the node's knowledge
+  //     was not behind — config the controller advanced while the node was
+  //     offline always survives) AND edited_at > current
+  //     metadata.updatedAt; otherwise it keeps the key and records the
+  //     discard in node_events. Accepting an HSI delete also cascades the
+  //     deletion of the subscriber's DNS records key;
+  //   - only kind = HSI_CONFIG may carry a tombstone; other kinds with
+  //     deleted=true are poison messages (kafka_dlq).
+  // Defaults to false — an absent field is an ordinary content edit.
+  bool deleted = 6;
 }
 
 enum OfflineEditKind {
