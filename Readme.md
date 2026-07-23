@@ -33,8 +33,8 @@ This is an SDN-enabled and open source Residential Gateway Controller, designed 
 FastRG Components Overview
 
 ┌──────┐                                  CONFIG STORAGE           DATA PLANE
-│FastRG│   ┌────────────┐if primary failed┌────────────┐           ┌────────────────────────┐
-│ User │──▶│ FastRG CLI │ ─ ─ ─ ─ ─ ─ ─ ─▶│ etcd :2379 │           │ Backbone / Core Network│
+│FastRG│   ┌────────────┐                 ┌────────────┐           ┌────────────────────────┐
+│ User │──▶│ FastRG CLI │                 │ etcd :2379 │           │ Backbone / Core Network│
 └─┬────┘   └───────┬─┬──┘                 └─▲───────┬──┘           │ Internet uplink        │
   │                │ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─│─ ─ ─ ─ ┐     └────────────▲───────────┘
   │                │     if etcd unavailable│       │        │                  │ routed IP
@@ -45,7 +45,7 @@ FastRG Components Overview
 │web frontend     ││                        │       │        │                 │ PPPoE / IPoE
 │http(s):8080/8443││ primary path           │       │        │     ┌───────────▼────────────┐
 └──────┬──────────┘│                        │       │        └ ─ ─▶│ FastRG Node            │
-       │           │                        │       └──────────────┤ PPPoE client/NAT       │
+       │           │                        │       └─────────────▶│ PPPoE client/NAT       │
        ▼           ▼                        │     ┌────────────────│ DHCP server            │
 ┌────────────────────────┐  write config    │     │ write events   │ gRPC :50052            │
 │ FastRG Controller      │──────────────────┘     │                │ Prometheus: 55688      │
@@ -130,19 +130,19 @@ The test suite is split into layers according to its external-service requiremen
 ### Coverage
 
 <!-- coverage:begin -->
-The following results were measured on 2026-07-21 with disposable etcd, PostgreSQL, and Kafka containers, all three `TEST_*` variables set, and the REST smoke suite's instrumented controller binary included:
+The following results were measured on 2026-07-23 with disposable etcd, PostgreSQL, and Kafka containers, all three `TEST_*` variables set, and the REST smoke suite's instrumented controller binary included:
 
 | Package | Coverage |
 |---|---:|
 | `internal/utils` | 100.0% |
 | `internal/validation` | 100.0% |
-| `internal/storage` | 88.1% |
-| `internal/db` | 80.3% |
-| `internal/kafka` | 74.8% |
+| `internal/storage` | 88.9% |
+| `internal/db` | 79.8% |
+| `internal/kafka` | 77.4% |
 | `internal/projection` | 74.2% |
 | `internal/leader` | 69.4% |
-| `internal/server` | 55.9% |
-| **Merged total** | **62.2%** |
+| `internal/server` | 55.8% |
+| **Merged total** | **63.4%** |
 
 Each percentage is the statement coverage of that package by the entire test suite, calculated from a single merged coverage profile.
 <!-- coverage:end -->
