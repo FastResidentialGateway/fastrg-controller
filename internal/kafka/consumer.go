@@ -13,12 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"fastrg-controller/internal/db"
 	"fastrg-controller/internal/storage"
+	"fastrg-controller/internal/validation"
 	eventsv1 "fastrg-controller/proto/eventsv1"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -41,6 +43,8 @@ const (
 
 var (
 	errRollbackSuperseded = errors.New("rollback skipped because the current config supersedes the failed version")
+	errOfflineEditNoop    = errors.New("offline edit is already reflected in etcd")
+	errOfflineEditDiscard = errors.New("offline edit discarded in favor of controller state")
 
 	kafkaConsumerStallSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "fastrg_kafka_consumer_stall_seconds",
@@ -121,6 +125,10 @@ func skipRollback(reason string, warn bool) error {
 // apart from a user or node write. See docs/contracts/resource-version.md §2.3
 // and §8-7.
 const rollbackUpdatedBy = "controller-rollback"
+
+// offlineEditUpdatedBy marks metadata freshly stamped by the controller when
+// it accepts a node's offline-edit proposal. Node metadata is never copied.
+const offlineEditUpdatedBy = "node-offline-edit"
 
 // configMetadata is the metadata envelope shared by the three config key
 // families (docs/contracts/resource-version.md §2). Only the fields the
@@ -249,6 +257,266 @@ func guardedRollbackMutation(prevConfig *db.HSIConfigRow, current []byte) (stora
 		fmt.Sprintf("current resourceVersion %d is not the failed successor of last successful resourceVersion %d", curRV, okRV),
 		false,
 	)
+}
+
+type offlineEditProposal struct {
+	nodeID           string
+	userID           string
+	key              string
+	kind             eventsv1.OfflineEditKind
+	payloadField     string
+	payload          json.RawMessage
+	canonicalPayload any
+	resourceVersion  string
+	editedAt         time.Time
+	editSummary      string
+	deleted          bool
+}
+
+type offlineEditDiscardError struct {
+	reason string
+	warn   bool
+}
+
+func (e *offlineEditDiscardError) Error() string {
+	return fmt.Sprintf("%s: %s", errOfflineEditDiscard, e.reason)
+}
+
+func (e *offlineEditDiscardError) Unwrap() error { return errOfflineEditDiscard }
+
+func discardOfflineEdit(reason string, warn bool) error {
+	return &offlineEditDiscardError{reason: reason, warn: warn}
+}
+
+func offlineEditKindSpec(kind eventsv1.OfflineEditKind, nodeID, userID string) (key, payloadField string, err error) {
+	switch kind {
+	case eventsv1.OfflineEditKind_OFFLINE_EDIT_KIND_HSI_CONFIG:
+		return fmt.Sprintf("configs/%s/hsi/%s", nodeID, userID), "config", nil
+	case eventsv1.OfflineEditKind_OFFLINE_EDIT_KIND_DNS_RECORDS:
+		return fmt.Sprintf("configs/%s/dns/%s", nodeID, userID), "records", nil
+	case eventsv1.OfflineEditKind_OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT:
+		return fmt.Sprintf("user_counts/%s/", nodeID), "subscriber_count", nil
+	default:
+		return "", "", fmt.Errorf("unknown offline edit kind %d", kind)
+	}
+}
+
+func decodeCanonicalJSON(raw []byte) (any, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func parseOfflineEditEnvelope(configJSON, payloadField string) (json.RawMessage, any, string, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(configJSON), &envelope); err != nil {
+		return nil, nil, "", fmt.Errorf("decode config_json: %w", err)
+	}
+	if envelope == nil {
+		return nil, nil, "", errors.New("config_json must be a JSON object")
+	}
+
+	payload, ok := envelope[payloadField]
+	if !ok {
+		return nil, nil, "", fmt.Errorf("config_json has no %q payload", payloadField)
+	}
+	canonical, err := decodeCanonicalJSON(payload)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("decode %s payload: %w", payloadField, err)
+	}
+
+	var metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	}
+	metadataJSON, ok := envelope["metadata"]
+	if !ok {
+		return nil, nil, "", errors.New("config_json has no metadata")
+	}
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		return nil, nil, "", fmt.Errorf("decode config_json metadata: %w", err)
+	}
+	return payload, canonical, metadata.ResourceVersion, nil
+}
+
+// prepareOfflineEdit performs poison-message validation and derives the etcd
+// target solely from the NodeEvent envelope. It deliberately does not parse a
+// tombstone's empty config_json.
+func prepareOfflineEdit(ev *eventsv1.NodeEvent, edit *eventsv1.ConfigOfflineEdit) (offlineEditProposal, error) {
+	if ev.GetType() != eventsv1.EventType_EVENT_TYPE_CONFIG_OFFLINE_EDIT {
+		return offlineEditProposal{}, fmt.Errorf("offline edit payload has event type %s", ev.GetType())
+	}
+	if err := validation.ValidateNodeID(ev.GetNodeUuid()); err != nil {
+		return offlineEditProposal{}, fmt.Errorf("invalid node_uuid: %w", err)
+	}
+
+	key, payloadField, err := offlineEditKindSpec(edit.GetKind(), ev.GetNodeUuid(), ev.GetUserId())
+	if err != nil {
+		return offlineEditProposal{}, err
+	}
+	if edit.GetKind() == eventsv1.OfflineEditKind_OFFLINE_EDIT_KIND_SUBSCRIBER_COUNT {
+		if ev.GetUserId() != "0" {
+			return offlineEditProposal{}, errors.New("subscriber-count offline edit requires user_id \"0\"")
+		}
+	} else if err := validation.ValidateUserID(ev.GetUserId()); err != nil {
+		return offlineEditProposal{}, fmt.Errorf("invalid user_id: %w", err)
+	}
+
+	proposal := offlineEditProposal{
+		nodeID:          ev.GetNodeUuid(),
+		userID:          ev.GetUserId(),
+		key:             key,
+		kind:            edit.GetKind(),
+		payloadField:    payloadField,
+		resourceVersion: edit.GetResourceVersion(),
+		editedAt:        time.Unix(edit.GetEditedAt(), 0).UTC(),
+		editSummary:     edit.GetEditSummary(),
+		deleted:         edit.GetDeleted(),
+	}
+
+	if proposal.deleted {
+		if edit.GetConfigJson() != "" {
+			return offlineEditProposal{}, errors.New("tombstone config_json must be empty")
+		}
+		if proposal.kind != eventsv1.OfflineEditKind_OFFLINE_EDIT_KIND_HSI_CONFIG {
+			return offlineEditProposal{}, errors.New("tombstones are valid only for HSI_CONFIG")
+		}
+		return proposal, nil
+	}
+
+	payload, canonical, metadataRV, err := parseOfflineEditEnvelope(edit.GetConfigJson(), payloadField)
+	if err != nil {
+		return offlineEditProposal{}, err
+	}
+	if edit.GetResourceVersion() != metadataRV {
+		return offlineEditProposal{}, fmt.Errorf(
+			"resource_version %q does not match config_json metadata.resourceVersion %q",
+			edit.GetResourceVersion(), metadataRV,
+		)
+	}
+	proposal.payload = append(json.RawMessage(nil), payload...)
+	proposal.canonicalPayload = canonical
+	return proposal, nil
+}
+
+func currentOfflineEditPayload(current []byte, payloadField string) (any, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(current, &envelope); err != nil {
+		return nil, fmt.Errorf("decode current JSON: %w", err)
+	}
+	if envelope == nil {
+		return nil, errors.New("current value must be a JSON object")
+	}
+	payload, ok := envelope[payloadField]
+	if !ok {
+		return nil, fmt.Errorf("current value has no %q payload", payloadField)
+	}
+	canonical, err := decodeCanonicalJSON(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode current %s payload: %w", payloadField, err)
+	}
+	return canonical, nil
+}
+
+func currentOfflineEditMetadata(current []byte) (uint64, time.Time, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(current, &envelope); err != nil {
+		return 0, time.Time{}, fmt.Errorf("decode current JSON: %w", err)
+	}
+	metadataJSON, ok := envelope["metadata"]
+	if !ok {
+		return 0, time.Time{}, errors.New("current value has no metadata")
+	}
+	var metadata configMetadata
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		return 0, time.Time{}, fmt.Errorf("decode current metadata: %w", err)
+	}
+	rv, err := strconv.ParseUint(metadata.ResourceVersion, 10, 64)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("parse current metadata.resourceVersion %q: %w", metadata.ResourceVersion, err)
+	}
+	updatedAt, err := time.Parse(time.RFC3339, metadata.UpdatedAt)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("parse current metadata.updatedAt %q: %w", metadata.UpdatedAt, err)
+	}
+	if _, offset := updatedAt.Zone(); offset != 0 {
+		return 0, time.Time{}, fmt.Errorf("current metadata.updatedAt %q is not UTC", metadata.UpdatedAt)
+	}
+	return rv, updatedAt, nil
+}
+
+// offlineEditMutation is the pure arbitration decision run inside EtcdClient.CAS.
+// It must use current on every invocation: a CAS conflict causes a fresh read,
+// re-evaluation, and (when accepted) a freshly stamped value based on that
+// newest current state.
+func offlineEditMutation(proposal offlineEditProposal, current []byte, now time.Time) (storage.CASResult, error) {
+	if current == nil {
+		if proposal.deleted {
+			return storage.CASResult{}, errOfflineEditNoop
+		}
+		return storage.CASResult{}, discardOfflineEdit("target key no longer exists", false)
+	}
+
+	if !proposal.deleted {
+		currentPayload, err := currentOfflineEditPayload(current, proposal.payloadField)
+		if err != nil {
+			return storage.CASResult{}, discardOfflineEdit("cannot establish current payload: "+err.Error(), true)
+		}
+		if reflect.DeepEqual(proposal.canonicalPayload, currentPayload) {
+			return storage.CASResult{}, errOfflineEditNoop
+		}
+	}
+
+	currentRV, currentUpdatedAt, err := currentOfflineEditMetadata(current)
+	if err != nil {
+		return storage.CASResult{}, discardOfflineEdit("cannot establish current metadata: "+err.Error(), true)
+	}
+
+	nodeRV, err := strconv.ParseUint(proposal.resourceVersion, 10, 64)
+	if err != nil {
+		return storage.CASResult{}, discardOfflineEdit(
+			fmt.Sprintf("cannot parse node resource_version %q: %v", proposal.resourceVersion, err), true,
+		)
+	}
+
+	if proposal.deleted {
+		if nodeRV < currentRV {
+			return storage.CASResult{}, discardOfflineEdit(
+				fmt.Sprintf("node resource_version %d is behind current resourceVersion %d", nodeRV, currentRV), false,
+			)
+		}
+		if !proposal.editedAt.After(currentUpdatedAt) {
+			return storage.CASResult{}, discardOfflineEdit(
+				fmt.Sprintf("node edited_at %s is not later than current updatedAt %s", proposal.editedAt.Format(time.RFC3339), currentUpdatedAt.Format(time.RFC3339)), false,
+			)
+		}
+		return storage.CASResult{Delete: true}, nil
+	}
+
+	if nodeRV <= currentRV {
+		return storage.CASResult{}, discardOfflineEdit(
+			fmt.Sprintf("node resource_version %d does not exceed current resourceVersion %d", nodeRV, currentRV), false,
+		)
+	}
+	if !proposal.editedAt.After(currentUpdatedAt) {
+		return storage.CASResult{}, discardOfflineEdit(
+			fmt.Sprintf("node edited_at %s is not later than current updatedAt %s", proposal.editedAt.Format(time.RFC3339), currentUpdatedAt.Format(time.RFC3339)), false,
+		)
+	}
+	value, err := json.Marshal(map[string]any{
+		proposal.payloadField: json.RawMessage(proposal.payload),
+		"metadata": configMetadata{
+			Node:            proposal.nodeID,
+			ResourceVersion: strconv.FormatUint(currentRV+1, 10),
+			UpdatedBy:       offlineEditUpdatedBy,
+			UpdatedAt:       now.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		return storage.CASResult{}, fmt.Errorf("encode accepted offline edit: %w", err)
+	}
+	return storage.CASResult{Value: value}, nil
 }
 
 // Consumer reads NodeEvent messages from Kafka and writes them to PostgreSQL.
@@ -539,6 +807,9 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 	eventTime := time.Unix(ev.GetTimestamp(), 0).UTC()
 
 	switch p := ev.GetPayload().(type) {
+	case *eventsv1.NodeEvent_ConfigOfflineEdit:
+		return c.handleConfigOfflineEdit(ctx, &ev, p.ConfigOfflineEdit, eventTime)
+
 	case *eventsv1.NodeEvent_PppoeStateChange:
 		return wrapDatabaseError(c.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
 			NodeUUID:     ev.GetNodeUuid(),
@@ -701,6 +972,132 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		logrus.WithField("type", ev.GetType()).Warn("kafka: event with no/unknown payload, skipping")
 		return nil
 	}
+}
+
+func (c *Consumer) handleConfigOfflineEdit(
+	ctx context.Context,
+	ev *eventsv1.NodeEvent,
+	edit *eventsv1.ConfigOfflineEdit,
+	eventTime time.Time,
+) error {
+	proposal, err := prepareOfflineEdit(ev, edit)
+	if err != nil {
+		return fmt.Errorf("poison ConfigOfflineEdit: %w", err)
+	}
+	if c.etcd == nil {
+		return wrapEtcdError(errors.New("etcd client is not configured for ConfigOfflineEdit"))
+	}
+
+	casErr := c.etcd.CAS(ctx, proposal.key, func(current []byte) (storage.CASResult, error) {
+		return offlineEditMutation(proposal, current, time.Now())
+	})
+	switch {
+	case casErr == nil:
+		if proposal.deleted {
+			if err := storage.DeleteSubscriberDNS(ctx, c.etcd, proposal.nodeID, proposal.userID); err != nil {
+				return wrapEtcdError(err)
+			}
+			logrus.WithFields(logrus.Fields{"node": proposal.nodeID, "user": proposal.userID}).Info(
+				"kafka: accepted offline HSI tombstone and cascaded DNS deletion",
+			)
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"node": proposal.nodeID,
+				"user": proposal.userID,
+				"kind": offlineEditKindString(proposal.kind),
+			}).Info("kafka: accepted offline config edit")
+		}
+		return nil
+
+	case errors.Is(casErr, errOfflineEditNoop):
+		// A replayed tombstone still repairs a DNS orphan left by a crash after
+		// the HSI delete but before the original cascade completed.
+		if proposal.deleted {
+			if err := storage.DeleteSubscriberDNS(ctx, c.etcd, proposal.nodeID, proposal.userID); err != nil {
+				return wrapEtcdError(err)
+			}
+		}
+		logrus.WithFields(logrus.Fields{
+			"node": proposal.nodeID,
+			"user": proposal.userID,
+			"kind": offlineEditKindString(proposal.kind),
+		}).Info("kafka: offline edit replay is already reflected in etcd")
+		return nil
+
+	case errors.Is(casErr, errOfflineEditDiscard):
+		var discardErr *offlineEditDiscardError
+		if !errors.As(casErr, &discardErr) {
+			return fmt.Errorf("offline edit discard has no reason: %w", casErr)
+		}
+		return c.recordOfflineEditDiscard(ctx, proposal, eventTime, discardErr)
+
+	case errors.Is(casErr, storage.ErrCASConflict):
+		// A reachable etcd that repeatedly conflicts is not an infrastructure
+		// outage. Leave this unwrapped so the normal bounded retries send the
+		// poison/stuck message to kafka_dlq and advance the partition.
+		return casErr
+
+	default:
+		return wrapEtcdError(casErr)
+	}
+}
+
+func (c *Consumer) recordOfflineEditDiscard(
+	ctx context.Context,
+	proposal offlineEditProposal,
+	eventTime time.Time,
+	discardErr *offlineEditDiscardError,
+) error {
+	if c.db == nil {
+		return wrapDatabaseError(errors.New("database is not configured for offline-edit audit events"))
+	}
+	contextJSON, err := json.Marshal(map[string]string{
+		"kind":         offlineEditKindString(proposal.kind),
+		"edit_summary": proposal.editSummary,
+		"reason":       discardErr.reason,
+	})
+	if err != nil {
+		return fmt.Errorf("encode offline-edit discard context: %w", err)
+	}
+	success := false
+	inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
+		NodeUUID:     proposal.nodeID,
+		UserID:       proposal.userID,
+		EventType:    "CONFIG_OFFLINE_EDIT",
+		Action:       "discard",
+		Success:      &success,
+		Module:       offlineEditKindString(proposal.kind),
+		ErrorCode:    "OFFLINE_EDIT_DISCARDED",
+		ErrorMessage: discardErr.reason,
+		Context:      string(contextJSON),
+		// Deliberately empty: the arbitration result and existing event-time
+		// uniqueness key make at-least-once replay idempotent without requiring
+		// producers to invent a correlation ID for a cumulative offline period.
+		CorrelationID: "",
+		EventTime:     eventTime,
+	})
+	if err != nil {
+		return wrapDatabaseError(err)
+	}
+
+	entry := logrus.WithFields(logrus.Fields{
+		"node":         proposal.nodeID,
+		"user":         proposal.userID,
+		"kind":         offlineEditKindString(proposal.kind),
+		"edit_summary": proposal.editSummary,
+		"reason":       discardErr.reason,
+		"inserted":     inserted,
+	})
+	if discardErr.warn {
+		entry.Warn("kafka: discarded offline edit because current arbitration metadata is unusable")
+	} else {
+		entry.Info("kafka: discarded offline edit in favor of controller state")
+	}
+	return nil
+}
+
+func offlineEditKindString(kind eventsv1.OfflineEditKind) string {
+	return strings.TrimPrefix(kind.String(), "OFFLINE_EDIT_KIND_")
 }
 
 func (c *Consumer) waitAndSendToDLQ(ctx context.Context, m kafka.Message) {

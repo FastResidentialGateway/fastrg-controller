@@ -1347,6 +1347,11 @@ func (r *RestServer) DeleteHSIConfig(c *gin.Context) {
 		}
 		return
 	}
+	if err := storage.DeleteSubscriberDNS(ctx, r.etcd, nodeId, userId); err != nil {
+		logrus.WithError(err).Error("Failed to cascade DNS deletion after deleting HSI config")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete subscriber DNS records"})
+		return
+	}
 
 	logrus.Infof("HSI config deleted for node %s, user: %s", nodeId, userId)
 	c.JSON(http.StatusOK, gin.H{"message": "HSI config deleted successfully"})

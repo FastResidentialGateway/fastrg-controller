@@ -483,6 +483,10 @@ func (s *ConfigGrpcServer) DeleteHSIConfig(ctx context.Context, req *controllerp
 		}
 		return nil, casToStatus(casErr)
 	}
+	if err := storage.DeleteSubscriberDNS(ctx, s.etcd, req.NodeId, req.UserId); err != nil {
+		logrus.WithError(err).Error("grpc: failed to cascade DNS deletion after deleting HSI config")
+		return nil, status.Error(codes.Internal, "failed to delete subscriber DNS records")
+	}
 	logrus.Infof("grpc DeleteHSIConfig node=%s user=%s", req.NodeId, req.UserId)
 	return &emptypb.Empty{}, nil
 }
