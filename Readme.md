@@ -137,12 +137,12 @@ The following results were measured on 2026-07-23 with disposable etcd, PostgreS
 | `internal/utils` | 100.0% |
 | `internal/validation` | 100.0% |
 | `internal/storage` | 88.9% |
-| `internal/db` | 79.8% |
+| `internal/db` | 80.3% |
 | `internal/kafka` | 77.4% |
 | `internal/projection` | 74.2% |
 | `internal/leader` | 69.4% |
-| `internal/server` | 55.8% |
-| **Merged total** | **63.4%** |
+| `internal/server` | 56.9% |
+| **Merged total** | **64.1%** |
 
 Each percentage is the statement coverage of that package by the entire test suite, calculated from a single merged coverage profile.
 <!-- coverage:end -->

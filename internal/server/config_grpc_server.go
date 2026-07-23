@@ -188,6 +188,56 @@ type hsiConfigWithMetadata struct {
 	Metadata hsiMetaInner   `json:"metadata"`
 }
 
+var errConflictingPortMappingUpdate = errors.New("port_mappings and clear_port_mappings cannot be used together")
+
+// mergeGRPCHSIConfigUpdate applies update-only optional-field semantics without
+// mutating either input. It must be called from inside the CAS mutate closure so
+// current is the value read for that specific retry attempt.
+func mergeGRPCHSIConfigUpdate(requested hsiConfigInner, current *hsiConfigInner, clearPortMappings bool) hsiConfigInner {
+	merged := requested
+
+	if requested.DNSProxyEnable != nil {
+		merged.DNSProxyEnable = boolPointer(*requested.DNSProxyEnable)
+	} else if current != nil && current.DNSProxyEnable != nil {
+		merged.DNSProxyEnable = boolPointer(*current.DNSProxyEnable)
+	} else {
+		merged.DNSProxyEnable = boolPointer(true)
+	}
+
+	if requested.TCPConntrackEnable != nil {
+		merged.TCPConntrackEnable = boolPointer(*requested.TCPConntrackEnable)
+	} else if current != nil && current.TCPConntrackEnable != nil {
+		merged.TCPConntrackEnable = boolPointer(*current.TCPConntrackEnable)
+	} else {
+		merged.TCPConntrackEnable = boolPointer(true)
+	}
+
+	switch {
+	case clearPortMappings:
+		merged.PortMappings = []portMapping{}
+	case len(requested.PortMappings) > 0:
+		merged.PortMappings = append([]portMapping{}, requested.PortMappings...)
+	case current != nil:
+		merged.PortMappings = append([]portMapping{}, current.PortMappings...)
+	default:
+		merged.PortMappings = []portMapping{}
+	}
+
+	merged.DesireStatus = desireStatusDisconnect
+	if current != nil && current.DesireStatus != "" {
+		merged.DesireStatus = current.DesireStatus
+	}
+
+	return merged
+}
+
+func validateGRPCPortMappingUpdate(requested hsiConfigInner, clearPortMappings bool) error {
+	if clearPortMappings && len(requested.PortMappings) > 0 {
+		return errConflictingPortMappingUpdate
+	}
+	return nil
+}
+
 type subscriberCountData struct {
 	SubscriberCount string `json:"subscriber_count"`
 	Metadata        struct {
@@ -243,10 +293,12 @@ func protoToInner(p *controllerpb.HSIConfig) hsiConfigInner {
 		DHCPGateway:  p.GetDhcpGateway(),
 		DesireStatus: p.GetDesireStatus(),
 	}
-	t := p.GetDnsProxyEnable()
-	inner.DNSProxyEnable = &t
-	c := p.GetTcpConntrackEnable()
-	inner.TCPConntrackEnable = &c
+	if p.DnsProxyEnable != nil {
+		inner.DNSProxyEnable = boolPointer(p.GetDnsProxyEnable())
+	}
+	if p.TcpConntrackEnable != nil {
+		inner.TCPConntrackEnable = boolPointer(p.GetTcpConntrackEnable())
+	}
 	for _, pm := range p.GetPortMappings() {
 		inner.PortMappings = append(inner.PortMappings, portMapping{
 			Index: pm.GetIndex(),
@@ -267,8 +319,8 @@ func innerToProto(c hsiConfigInner, m hsiMetaInner) *controllerpb.HSIConfigRespo
 		DhcpAddrPool:       c.DHCPAddrPool,
 		DhcpSubnet:         c.DHCPSubnet,
 		DhcpGateway:        c.DHCPGateway,
-		DnsProxyEnable:     derefBool(c.DNSProxyEnable),
-		TcpConntrackEnable: derefBool(c.TCPConntrackEnable),
+		DnsProxyEnable:     boolPointer(derefBool(c.DNSProxyEnable)),
+		TcpConntrackEnable: boolPointer(derefBool(c.TCPConntrackEnable)),
 		DesireStatus:       c.DesireStatus,
 	}
 	for _, pm := range c.PortMappings {
@@ -295,6 +347,10 @@ func derefBool(b *bool) bool {
 		return false
 	}
 	return *b
+}
+
+func boolPointer(v bool) *bool {
+	return &v
 }
 
 // ── HSI config CRUD ───────────────────────────────────────────────────────
@@ -391,6 +447,10 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 	if p == nil {
 		return nil, status.Error(codes.InvalidArgument, "config is required")
 	}
+	inner := protoToInner(p)
+	if err := validateGRPCPortMappingUpdate(inner, req.GetClearPortMappings()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	if err := validationToStatus(validation.ValidateHSIConfig(validation.HSIConfigInput{
 		UserID:       p.GetUserId(),
@@ -422,27 +482,19 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 		return nil, err
 	}
 
-	inner := protoToInner(p)
 	key := hsiKey(req.NodeId, req.UserId)
 	var rv string
 	var meta hsiMetaInner
+	var responseInner hsiConfigInner
 	casErr := s.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
-		desire := desireStatusDisconnect
+		var currentConfig *hsiConfigInner
 		if current != nil {
 			var existing hsiConfigWithMetadata
-			if err := json.Unmarshal(current, &existing); err == nil && existing.Config.DesireStatus != "" {
-				desire = existing.Config.DesireStatus
+			if err := json.Unmarshal(current, &existing); err == nil {
+				currentConfig = &existing.Config
 			}
 		}
-		inner.DesireStatus = desire
-		if inner.DNSProxyEnable == nil {
-			t := true
-			inner.DNSProxyEnable = &t
-		}
-		if inner.TCPConntrackEnable == nil {
-			t := true
-			inner.TCPConntrackEnable = &t
-		}
+		merged := mergeGRPCHSIConfigUpdate(inner, currentConfig, req.GetClearPortMappings())
 		rv = nextResourceVersion(current)
 		meta = hsiMetaInner{
 			Node:            req.NodeId,
@@ -450,18 +502,19 @@ func (s *ConfigGrpcServer) UpdateHSIConfig(ctx context.Context, req *controllerp
 			UpdatedBy:       caller,
 			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
 		}
-		cwm := hsiConfigWithMetadata{Config: inner, Metadata: meta}
+		cwm := hsiConfigWithMetadata{Config: merged, Metadata: meta}
 		b, err := json.Marshal(cwm)
 		if err != nil {
 			return storage.CASResult{}, err
 		}
+		responseInner = merged
 		return storage.CASResult{Value: b}, nil
 	})
 	if casErr != nil {
 		return nil, casToStatus(casErr)
 	}
 	logrus.Infof("grpc UpdateHSIConfig node=%s user=%s by=%s", req.NodeId, req.UserId, caller)
-	return innerToProto(inner, meta), nil
+	return innerToProto(responseInner, meta), nil
 }
 
 func (s *ConfigGrpcServer) DeleteHSIConfig(ctx context.Context, req *controllerpb.DeleteHSIConfigRequest) (*emptypb.Empty, error) {
