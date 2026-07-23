@@ -209,20 +209,39 @@ func rollbackConfigValue(prevJSON, current []byte, curRV uint64) ([]byte, error)
 	return json.Marshal(envelope)
 }
 
-// guardedRollbackMutation decides whether the current etcd value is still the
-// single write immediately following the last node-confirmed version. It must
-// run inside storage.CAS so a concurrent write causes a retry with the newest
-// value and therefore a fresh guard evaluation.
+// rollbackGuardInputs carries the event version markers evaluated against the
+// value and ModRevision from the same CAS read. The optional wrapper argument
+// lets existing resourceVersion-only tests exercise the empty-applied-version
+// fallback without changing their call sites.
+type rollbackGuardInputs struct {
+	currentModRevision int64
+	appliedRV          string
+	correlationID      string
+}
+
+// guardedRollbackMutation decides whether the failed version is still the
+// current etcd value. It must run inside storage.CASWithRevision so a
+// concurrent write causes a retry with the newest value and ModRevision and
+// therefore a fresh guard evaluation.
 //
 // When it does roll back, it restores only the last successful payload and
 // re-stamps metadata (see rollbackConfigValue): the write must not regress the
 // resourceVersion chain or updatedAt back to the old snapshot's values.
 //
-// This is a transitional resourceVersion-only guard. A delete followed by a
-// recreate can reset resourceVersion to 1 and is indistinguishable from the
-// original first failed create; the event schema needs an applied revision to
-// close that remaining cross-repository race.
-func guardedRollbackMutation(prevConfig *db.HSIConfigRow, current []byte) (storage.CASResult, error) {
+// applied_resource_version is the primary guard. When correlation_id contains
+// a valid etcd ModRevision it is an additional generation check that closes
+// the delete-and-recreate corner where resourceVersion resets to 1. An empty
+// applied_resource_version uses the transitional curRV==okRV+1 guard.
+func guardedRollbackMutation(
+	prevConfig *db.HSIConfigRow,
+	current []byte,
+	inputs ...rollbackGuardInputs,
+) (storage.CASResult, error) {
+	var guard rollbackGuardInputs
+	if len(inputs) > 0 {
+		guard = inputs[0]
+	}
+
 	if current == nil {
 		return storage.CASResult{}, skipRollback("config key no longer exists", false)
 	}
@@ -232,31 +251,64 @@ func guardedRollbackMutation(prevConfig *db.HSIConfigRow, current []byte) (stora
 		return storage.CASResult{}, skipRollback("cannot establish current resourceVersion: "+err.Error(), true)
 	}
 
-	var okRV uint64
-	if prevConfig != nil {
-		okRV, err = configResourceVersion(prevConfig.ConfigJSON)
+	if guard.appliedRV == "" {
+		var okRV uint64
+		if prevConfig != nil {
+			okRV, err = configResourceVersion(prevConfig.ConfigJSON)
+			if err != nil {
+				return storage.CASResult{}, skipRollback("cannot establish last successful resourceVersion: "+err.Error(), true)
+			}
+		}
+
+		// Written this way instead of comparing with okRV+1 so MaxUint64 cannot
+		// wrap around and accidentally authorize a rollback.
+		if curRV > okRV && curRV-okRV == 1 {
+			// The transitional guard passed; continue to the common rollback
+			// write path below.
+		} else {
+			return storage.CASResult{}, skipRollback(
+				fmt.Sprintf("current resourceVersion %d is not the failed successor of last successful resourceVersion %d", curRV, okRV),
+				false,
+			)
+		}
+	} else {
+		appliedRV, err := strconv.ParseUint(guard.appliedRV, 10, 64)
 		if err != nil {
-			return storage.CASResult{}, skipRollback("cannot establish last successful resourceVersion: "+err.Error(), true)
+			return storage.CASResult{}, skipRollback(
+				fmt.Sprintf("cannot parse applied_resource_version %q: %v", guard.appliedRV, err),
+				true,
+			)
+		}
+		if curRV != appliedRV {
+			return storage.CASResult{}, skipRollback(
+				fmt.Sprintf("current resourceVersion %d no longer matches applied resourceVersion %d", curRV, appliedRV),
+				false,
+			)
+		}
+
+		if guard.correlationID != "" {
+			appliedModRevision, parseErr := strconv.ParseInt(guard.correlationID, 10, 64)
+			if parseErr == nil && appliedModRevision != guard.currentModRevision {
+				return storage.CASResult{}, skipRollback(
+					fmt.Sprintf(
+						"current ModRevision %d no longer matches applied ModRevision %d; a recreate or later write replaced the failed value",
+						guard.currentModRevision,
+						appliedModRevision,
+					),
+					false,
+				)
+			}
 		}
 	}
 
-	// Written this way instead of comparing with okRV+1 so MaxUint64 cannot
-	// wrap around and accidentally authorize a rollback.
-	if curRV > okRV && curRV-okRV == 1 {
-		if prevConfig == nil {
-			return storage.CASResult{Delete: true}, nil
-		}
-		value, err := rollbackConfigValue(prevConfig.ConfigJSON, current, curRV)
-		if err != nil {
-			return storage.CASResult{}, skipRollback("cannot rebuild rollback config: "+err.Error(), true)
-		}
-		return storage.CASResult{Value: value}, nil
+	if prevConfig == nil {
+		return storage.CASResult{Delete: true}, nil
 	}
-
-	return storage.CASResult{}, skipRollback(
-		fmt.Sprintf("current resourceVersion %d is not the failed successor of last successful resourceVersion %d", curRV, okRV),
-		false,
-	)
+	value, err := rollbackConfigValue(prevConfig.ConfigJSON, current, curRV)
+	if err != nil {
+		return storage.CASResult{}, skipRollback("cannot rebuild rollback config: "+err.Error(), true)
+	}
+	return storage.CASResult{Value: value}, nil
 }
 
 type offlineEditProposal struct {
@@ -909,8 +961,12 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 					ev.GetNodeUuid(), ev.GetUserId())
 			} else {
 				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
-				rbErr := c.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
-					return guardedRollbackMutation(prevConfig, current)
+				rbErr := c.etcd.CASWithRevision(ctx, etcdKey, func(current []byte, modRevision int64) (storage.CASResult, error) {
+					return guardedRollbackMutation(prevConfig, current, rollbackGuardInputs{
+						currentModRevision: modRevision,
+						appliedRV:          p.ConfigApplyResult.GetAppliedResourceVersion(),
+						correlationID:      ev.GetCorrelationId(),
+					})
 				})
 				if rbErr != nil {
 					if !errors.Is(rbErr, errRollbackSuperseded) {

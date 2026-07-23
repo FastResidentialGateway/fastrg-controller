@@ -124,6 +124,20 @@ type CASMutateFunc func(current []byte) (CASResult, error)
 // concurrent write landed in between, the Txn fails and the whole read-modify
 // cycle retries with exponential backoff, up to casMaxRetries.
 func (e *EtcdClient) CAS(ctx context.Context, key string, mutate CASMutateFunc) error {
+	return e.CASWithRevision(ctx, key, func(current []byte, _ int64) (CASResult, error) {
+		return mutate(current)
+	})
+}
+
+// CASWithRevision performs the same compare-and-swap as CAS, while also
+// passing the ModRevision read for the current value to mutate. A missing key
+// is represented by current == nil and modRevision == 0. On a conflict both
+// values are re-read before mutate is called again.
+func (e *EtcdClient) CASWithRevision(
+	ctx context.Context,
+	key string,
+	mutate func(current []byte, modRevision int64) (CASResult, error),
+) error {
 	backoff := casInitialBackoff
 	for attempt := 0; attempt < casMaxRetries; attempt++ {
 		resp, err := e.client.Get(ctx, key)
@@ -140,7 +154,7 @@ func (e *EtcdClient) CAS(ctx context.Context, key string, mutate CASMutateFunc) 
 			modRevision = resp.Kvs[0].ModRevision
 		}
 
-		result, err := mutate(current)
+		result, err := mutate(current, modRevision)
 		if err != nil {
 			return err
 		}

@@ -19,7 +19,9 @@ message NodeEvent {
   string user_id    = 2;  // related subscriber id; "0" for node-level events
   EventType type    = 3;
   int64 timestamp   = 4;  // Unix timestamp (seconds)
-  string correlation_id = 5;  // etcd mod_revision (as string) that triggered this event; empty if none
+  // etcd mod_revision (as string) that triggered this event; empty if none.
+  // CONFIG_APPLY_FAIL uses it as a rollback-guard side-check when present.
+  string correlation_id = 5;
 
   oneof payload {
     ConfigApplyResult  config_apply_result  = 10;
@@ -62,9 +64,11 @@ message ConfigApplyResult {
   // metadata.resourceVersion of the config this apply attempt targeted.
   // The controller's apply-fail rollback guard uses it to decide precisely
   // whether the failed version is still the current etcd value, replacing
-  // the transitional curRV==okRV+1 heuristic (task-4/task-34). Older nodes
-  // leave it empty; the controller MUST tolerate the empty value and fall
-  // back to the transitional guard — a missing field never rejects the event.
+  // the transitional curRV==okRV+1 heuristic (task-4/task-34). correlation_id
+  // supplies a ModRevision side-check that rejects delete+recreate generations
+  // even when their resourceVersion values match. Older nodes leave this field
+  // empty; the controller MUST tolerate the empty value and fall back to the
+  // transitional guard — a missing field never rejects the event.
   string applied_resource_version = 5;
 }
 
