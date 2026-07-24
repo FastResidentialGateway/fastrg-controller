@@ -29,8 +29,8 @@ func TestProtoInnerRoundtrip(t *testing.T) {
 		DhcpAddrPool:       "192.168.1.2-192.168.1.200",
 		DhcpSubnet:         "255.255.255.0",
 		DhcpGateway:        "192.168.1.1",
-		DnsProxyEnable:     true,
-		TcpConntrackEnable: false,
+		DnsProxyEnable:     boolPointer(true),
+		TcpConntrackEnable: boolPointer(false),
 		DesireStatus:       "connect",
 		PortMappings:       []*controllerpb.PortMapping{{Index: "0", Dip: "10.0.0.1", Dport: "80", Eport: "8080"}},
 	}

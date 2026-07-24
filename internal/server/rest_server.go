@@ -127,6 +127,46 @@ type HSIConfigWithMetadata struct {
 	Metadata HSIMetadata `json:"metadata"`
 }
 
+// mergeRESTHSIConfigUpdate applies the optional-field update semantics without
+// mutating either input. Required fields always come from requested. Optional
+// fields omitted from requested inherit current, or use their create defaults
+// when no stored value exists.
+func mergeRESTHSIConfigUpdate(requested HSIConfig, current *HSIConfig) HSIConfig {
+	merged := requested
+
+	if requested.DNSProxyEnable != nil {
+		merged.DNSProxyEnable = boolPointer(*requested.DNSProxyEnable)
+	} else if current != nil && current.DNSProxyEnable != nil {
+		merged.DNSProxyEnable = boolPointer(*current.DNSProxyEnable)
+	} else {
+		merged.DNSProxyEnable = boolPointer(true)
+	}
+
+	if requested.TCPConntrackEnable != nil {
+		merged.TCPConntrackEnable = boolPointer(*requested.TCPConntrackEnable)
+	} else if current != nil && current.TCPConntrackEnable != nil {
+		merged.TCPConntrackEnable = boolPointer(*current.TCPConntrackEnable)
+	} else {
+		merged.TCPConntrackEnable = boolPointer(true)
+	}
+
+	switch {
+	case requested.PortMappings != nil:
+		merged.PortMappings = append([]PortMapping{}, requested.PortMappings...)
+	case current != nil:
+		merged.PortMappings = append([]PortMapping{}, current.PortMappings...)
+	default:
+		merged.PortMappings = []PortMapping{}
+	}
+
+	merged.DesireStatus = desireStatusDisconnect
+	if current != nil && current.DesireStatus != "" {
+		merged.DesireStatus = current.DesireStatus
+	}
+
+	return merged
+}
+
 // HSI dial/hangup request structure
 type HSIActionRequest struct {
 	NodeID string `json:"node_id" example:"node001"`
@@ -1168,7 +1208,7 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 
 // UpdateHSIConfig updates an existing HSI configuration
 // @Summary      Update HSI configuration
-// @Description  Update an existing HSI configuration for a specific user on a node
+// @Description  Update an existing HSI configuration. Omitted toggles and port-mapping preserve their stored values; an explicit empty port-mapping array clears all mappings.
 // @Tags         HSI Configuration
 // @Accept       json
 // @Produce      json
@@ -1241,34 +1281,23 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Default boolean toggle fields to true if not provided
-	if config.DNSProxyEnable == nil {
-		trueVal := true
-		config.DNSProxyEnable = &trueVal
-	}
-	if config.TCPConntrackEnable == nil {
-		trueVal := true
-		config.TCPConntrackEnable = &trueVal
-	}
-
-	// CAS-update (upsert): read the current value inside the mutate so the
-	// existing desire_status is preserved atomically. An ordinary config edit
-	// must never change desire_status — only DialPPPoE/HangupPPPoE do — so any
-	// desire_status sent in the request body is ignored.
+	// CAS-update (upsert): decode and merge inside mutate so every retry uses
+	// the current value read for that attempt. An ordinary config edit must
+	// never change desire_status — only DialPPPoE/HangupPPPoE do.
 	etcdKey := fmt.Sprintf("configs/%s/hsi/%s", nodeId, userId)
 	var resourceVersion string
 	err = r.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
-		desire := desireStatusDisconnect
+		var currentConfig *HSIConfig
 		if current != nil {
 			var existing HSIConfigWithMetadata
-			if err := json.Unmarshal(current, &existing); err == nil && existing.Config.DesireStatus != "" {
-				desire = existing.Config.DesireStatus
+			if err := json.Unmarshal(current, &existing); err == nil {
+				currentConfig = &existing.Config
 			}
 		}
-		config.DesireStatus = desire
+		merged := mergeRESTHSIConfigUpdate(config, currentConfig)
 		resourceVersion = nextResourceVersion(current)
 
-		configWithMetadata := HSIConfigWithMetadata{Config: config}
+		configWithMetadata := HSIConfigWithMetadata{Config: merged}
 		configWithMetadata.Metadata.Node = nodeId
 		configWithMetadata.Metadata.ResourceVersion = resourceVersion
 		configWithMetadata.Metadata.UpdatedBy = username

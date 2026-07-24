@@ -88,8 +88,10 @@ message HSIConfig {
   string   dhcp_addr_pool       = 5;
   string   dhcp_subnet          = 6;
   string   dhcp_gateway         = 7;
-  bool     dns_proxy_enable     = 8;
-  bool     tcp_conntrack_enable = 9;
+  // Optional on update: omission preserves the stored value.
+  optional bool dns_proxy_enable     = 8;
+  // Optional on update: omission preserves the stored value.
+  optional bool tcp_conntrack_enable = 9;
   repeated PortMapping port_mappings = 10;
   // desire_status is managed exclusively by DialPPPoE/HangupPPPoE.
   // Create/Update preserve the stored value and ignore this field.
@@ -117,6 +119,9 @@ message UpdateHSIConfigRequest {
   string    node_id = 1;
   string    user_id = 2;
   HSIConfig config  = 3;
+  // Clears all port mappings when config.port_mappings is empty. Supplying
+  // mappings and setting this flag together is invalid.
+  bool clear_port_mappings = 4;
 }
 
 message DeleteHSIConfigRequest {
