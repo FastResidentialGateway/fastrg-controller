@@ -628,6 +628,10 @@ func (c *Consumer) Run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Heal a wedged group before re-joining it: after broker data loss the
+	// stored committed offset can point beyond the log end and the group
+	// would otherwise wait forever (negative lag).
+	c.negativeLagGuard(ctx, cfg)
 	c.reader = kafka.NewReader(cfg)
 	defer c.reader.Close()
 
@@ -833,6 +837,115 @@ func (c *Consumer) waitForTopicReady(ctx context.Context, brokers []string, topi
 		}
 		c.sleep(ctx)
 	}
+}
+
+// negativeLagGuard snaps the consumer group's committed offsets back into the
+// topic's valid range before this process joins the group. After broker data
+// loss (disk-full log truncation / topic re-creation) the group's committed
+// offset can exceed the partition's log-end offset; the broker then treats
+// that position as "waiting for future messages", FetchMessage never returns,
+// and the consumer wedges forever with negative lag (2026-07-08 and
+// 2026-07-24 incidents — previously required manual kafka-consumer-groups
+// surgery: scale to 0, reset offsets, scale back up).
+//
+// The reset snaps to the FIRST available offset and replays whatever survived
+// in the log: projection writes are idempotent and offline-edit arbitration
+// absorbs replays (resource-version contract §5 rule 1), so replay is safe
+// and preserves any proposals that were produced but never consumed.
+//
+// The commit is issued with GenerationID -1 (no group membership), which
+// brokers only accept while the group is empty — exactly the startup window
+// in which Run calls this, before the reader joins. If a stale member still
+// holds the group the commit fails; we log and continue, and the next process
+// restart retries.
+func (c *Consumer) negativeLagGuard(ctx context.Context, cfg kafka.ReaderConfig) {
+	if len(cfg.Brokers) == 0 || cfg.GroupID == "" {
+		return
+	}
+	client := &kafka.Client{Addr: kafka.TCP(cfg.Brokers...)}
+
+	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{cfg.Topic}})
+	if err != nil {
+		logrus.WithError(err).Warn("kafka: negative-lag guard: metadata lookup failed, skipping")
+		return
+	}
+	var partitions []int
+	for _, t := range meta.Topics {
+		if t.Name != cfg.Topic || t.Error != nil {
+			continue
+		}
+		for _, part := range t.Partitions {
+			partitions = append(partitions, part.ID)
+		}
+	}
+	if len(partitions) == 0 {
+		return
+	}
+
+	offReqs := make([]kafka.OffsetRequest, 0, len(partitions)*2)
+	for _, part := range partitions {
+		offReqs = append(offReqs, kafka.FirstOffsetOf(part), kafka.LastOffsetOf(part))
+	}
+	ranges, err := client.ListOffsets(ctx, &kafka.ListOffsetsRequest{
+		Topics: map[string][]kafka.OffsetRequest{cfg.Topic: offReqs},
+	})
+	if err != nil {
+		logrus.WithError(err).Warn("kafka: negative-lag guard: list offsets failed, skipping")
+		return
+	}
+	firstLast := map[int][2]int64{}
+	for _, po := range ranges.Topics[cfg.Topic] {
+		if po.Error != nil {
+			continue
+		}
+		firstLast[po.Partition] = [2]int64{po.FirstOffset, po.LastOffset}
+	}
+
+	fetched, err := client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
+		GroupID: cfg.GroupID,
+		Topics:  map[string][]int{cfg.Topic: partitions},
+	})
+	if err != nil {
+		logrus.WithError(err).Warn("kafka: negative-lag guard: offset fetch failed, skipping")
+		return
+	}
+
+	var resets []kafka.OffsetCommit
+	for _, of := range fetched.Topics[cfg.Topic] {
+		if of.Error != nil || of.CommittedOffset < 0 {
+			continue // no committed offset for this partition: nothing to guard
+		}
+		fl, ok := firstLast[of.Partition]
+		if !ok {
+			continue
+		}
+		if of.CommittedOffset > fl[1] {
+			logrus.Warnf("kafka: negative-lag guard: group %q partition %d committed offset %d is beyond log end %d (broker data loss); resetting to first offset %d and replaying",
+				cfg.GroupID, of.Partition, of.CommittedOffset, fl[1], fl[0])
+			resets = append(resets, kafka.OffsetCommit{Partition: of.Partition, Offset: fl[0]})
+		}
+	}
+	if len(resets) == 0 {
+		return
+	}
+
+	commitResp, err := client.OffsetCommit(ctx, &kafka.OffsetCommitRequest{
+		GroupID:      cfg.GroupID,
+		GenerationID: -1,
+		Topics:       map[string][]kafka.OffsetCommit{cfg.Topic: resets},
+	})
+	if err != nil {
+		logrus.WithError(err).Warn("kafka: negative-lag guard: offset reset failed (stale group member still alive?); will retry on next restart")
+		return
+	}
+	for _, prs := range commitResp.Topics {
+		for _, pr := range prs {
+			if pr.Error != nil {
+				logrus.WithError(pr.Error).Warnf("kafka: negative-lag guard: offset reset rejected for partition %d", pr.Partition)
+			}
+		}
+	}
+	logrus.Warnf("kafka: negative-lag guard: reset %d partition offset(s) for group %q; replaying surviving log", len(resets), cfg.GroupID)
 }
 
 func (c *Consumer) sleep(ctx context.Context) {
