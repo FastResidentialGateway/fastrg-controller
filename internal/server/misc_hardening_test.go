@@ -25,7 +25,7 @@ func TestNewHardenedTLSServerPinsMinVersion(t *testing.T) {
 }
 
 func TestLogoutRejectsTokenWithoutExp(t *testing.T) {
-	secret := []byte("task-20-logout-secret-1234567890")
+	secret := []byte("logout-test-secret-1234567890")
 	rs := &RestServer{jwtSecret: secret}
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -80,7 +80,7 @@ func TestSetDesireStatusMalformedStoredValue(t *testing.T) {
 	defer etcd.Close()
 
 	ctx := context.Background()
-	nodeID := fmt.Sprintf("task20-node-%d", time.Now().UnixNano())
+	nodeID := fmt.Sprintf("hardening-node-%d", time.Now().UnixNano())
 	key := "configs/" + nodeID + "/hsi/9999"
 	// Stored value parses as JSON but carries no user_id: the old combined
 	// check wrapped a nil error and produced "parse HSI config: %!w(<nil>)".

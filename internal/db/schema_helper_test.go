@@ -17,7 +17,7 @@ func createIsolatedTestSchema(t *testing.T, ctx context.Context, dsn, prefix str
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task12_%s_%d", prefix, time.Now().UnixNano())
+	schema := fmt.Sprintf("dbtest_%s_%d", prefix, time.Now().UnixNano())
 	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
 
 	adminPool, err := pgxpool.New(ctx, dsn)

@@ -16,7 +16,7 @@ import (
 )
 
 func TestValidateTokenAcceptsOnlyHS256(t *testing.T) {
-	secret := []byte("task-17-unit-test-secret-1234567890")
+	secret := []byte("user-hardening-secret-1234567890")
 	rs := &RestServer{jwtSecret: secret}
 
 	hs256Token, err := rs.generateToken("alice")
@@ -56,15 +56,15 @@ func TestDummyPasswordHashUsesDefaultCost(t *testing.T) {
 
 func TestAddUserHardening(t *testing.T) {
 	etcd := serverTestEtcd(t)
-	rs := &RestServer{etcd: etcd, jwtSecret: []byte("task-17-add-user-secret-1234567890")}
+	rs := &RestServer{etcd: etcd, jwtSecret: []byte("add-user-test-secret-1234567890")}
 	gin.SetMode(gin.TestMode)
 	router := rs.newRouter()
 
-	token, err := rs.generateToken("task-17-operator")
+	token, err := rs.generateToken("hardening-operator")
 	if err != nil {
 		t.Fatalf("generate operator token: %v", err)
 	}
-	username := fmt.Sprintf("task17-add-%d", time.Now().UnixNano())
+	username := fmt.Sprintf("add-user-%d", time.Now().UnixNano())
 	key := "users/" + username
 	t.Cleanup(func() {
 		_, _ = etcd.Client().Delete(context.Background(), key)
@@ -131,15 +131,15 @@ func TestDeleteUserHardening(t *testing.T) {
 		t.Fatalf("delete-last-user test requires a clean throwaway etcd; found %d existing users", countResp.Count)
 	}
 
-	rs := &RestServer{etcd: etcd, jwtSecret: []byte("task-17-delete-user-secret-123456")}
+	rs := &RestServer{etcd: etcd, jwtSecret: []byte("delete-user-test-secret-123456")}
 	gin.SetMode(gin.TestMode)
 	router := rs.newRouter()
-	token, err := rs.generateToken("task-17-operator")
+	token, err := rs.generateToken("hardening-operator")
 	if err != nil {
 		t.Fatalf("generate operator token: %v", err)
 	}
 
-	username := fmt.Sprintf("task17-last-%d", time.Now().UnixNano())
+	username := fmt.Sprintf("last-user-%d", time.Now().UnixNano())
 	key := "users/" + username
 	hash, err := bcrypt.GenerateFromPassword([]byte("last-user-password"), bcrypt.DefaultCost)
 	if err != nil {
@@ -173,11 +173,11 @@ func TestDeleteUserHardening(t *testing.T) {
 
 func TestLoginUsesUniformInvalidCredentialsResponse(t *testing.T) {
 	etcd := serverTestEtcd(t)
-	rs := &RestServer{etcd: etcd, jwtSecret: []byte("task-17-login-secret-1234567890")}
+	rs := &RestServer{etcd: etcd, jwtSecret: []byte("login-test-secret-1234567890")}
 	gin.SetMode(gin.TestMode)
 	router := rs.newRouter()
 
-	username := fmt.Sprintf("task17-login-%d", time.Now().UnixNano())
+	username := fmt.Sprintf("login-user-%d", time.Now().UnixNano())
 	key := "users/" + username
 	hash, err := bcrypt.GenerateFromPassword([]byte("correct-password"), bcrypt.DefaultCost)
 	if err != nil {

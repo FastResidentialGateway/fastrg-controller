@@ -199,7 +199,7 @@ func createTestSchema(t *testing.T, ctx context.Context, dsn, prefix string) (st
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task6_%s_%d", prefix, time.Now().UnixNano())
+	schema := fmt.Sprintf("dedup_%s_%d", prefix, time.Now().UnixNano())
 
 	adminPool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

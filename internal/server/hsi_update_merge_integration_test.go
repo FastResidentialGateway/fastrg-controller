@@ -27,7 +27,7 @@ import (
 func TestRESTUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	ctx := context.Background()
-	nodeID := fmt.Sprintf("task32-rest-%d", time.Now().UnixNano())
+	nodeID := fmt.Sprintf("merge-rest-%d", time.Now().UnixNano())
 	userID := "21"
 	key := hsiKey(nodeID, userID)
 	t.Cleanup(func() {
@@ -60,7 +60,7 @@ func TestRESTUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 	}
 	putJSONValue(t, etcd, key, seed)
 
-	rs := &RestServer{etcd: etcd, jwtSecret: []byte("task32-rest-secret-1234567890")}
+	rs := &RestServer{etcd: etcd, jwtSecret: []byte("merge-rest-secret-1234567890")}
 	token, err := rs.generateToken("merge-admin")
 	if err != nil {
 		t.Fatalf("generateToken: %v", err)
@@ -152,7 +152,7 @@ func TestRESTUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 func TestGRPCUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	ctx := context.Background()
-	nodeID := fmt.Sprintf("task32-grpc-%d", time.Now().UnixNano())
+	nodeID := fmt.Sprintf("merge-grpc-%d", time.Now().UnixNano())
 	userID := "22"
 	key := hsiKey(nodeID, userID)
 	t.Cleanup(func() {
@@ -185,7 +185,7 @@ func TestGRPCUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 	}
 	putJSONValue(t, etcd, key, seed)
 
-	secret := []byte("task32-grpc-secret-123456789")
+	secret := []byte("merge-grpc-secret-123456789")
 	rs := &RestServer{jwtSecret: secret}
 	token, err := rs.generateToken("grpc-merge-admin")
 	if err != nil {
@@ -307,7 +307,7 @@ func TestGRPCUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 func TestRESTHSIConfigMergeUsesRefreshedCurrentAfterCASConflict(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	ctx := context.Background()
-	nodeID := fmt.Sprintf("task32-cas-%d", time.Now().UnixNano())
+	nodeID := fmt.Sprintf("merge-cas-%d", time.Now().UnixNano())
 	userID := "23"
 	key := hsiKey(nodeID, userID)
 	t.Cleanup(func() {

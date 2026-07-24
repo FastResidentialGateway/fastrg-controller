@@ -17,7 +17,7 @@ func createTask12ProjectionSchema(t *testing.T, ctx context.Context, dsn string)
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task12_projection_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("projectiontest_%d", time.Now().UnixNano())
 	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
 
 	adminPool, err := pgxpool.New(ctx, dsn)

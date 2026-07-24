@@ -101,8 +101,8 @@ func TestDSNSpecialPasswordConnects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
 	}
-	role := fmt.Sprintf("task9_dsn_%d", time.Now().UnixNano())
-	password := "task9@:/#% password"
+	role := fmt.Sprintf("dsn_role_%d", time.Now().UnixNano())
+	password := "dsn@:/#% password"
 	quotedRole := quoteTask9Identifier(role)
 	quotedPassword := quoteTask9Literal(password)
 	quotedDatabase := quoteTask9Identifier(baseConfig.ConnConfig.Database)
@@ -224,7 +224,7 @@ func createTask9TestSchema(t *testing.T, ctx context.Context, dsn string, iterat
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task9_migration_%d_%d", iteration, time.Now().UnixNano())
+	schema := fmt.Sprintf("migration_retry_%d_%d", iteration, time.Now().UnixNano())
 	quotedSchema := quoteTask9Identifier(schema)
 
 	adminPool, err := pgxpool.New(ctx, dsn)

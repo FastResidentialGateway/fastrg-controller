@@ -122,8 +122,8 @@ func skipRollback(reason string, warn bool) error {
 
 // rollbackUpdatedBy marks the metadata.updatedBy of a config that the automatic
 // apply-failure rollback path rewrote, so an operator can tell a rollback write
-// apart from a user or node write. See docs/contracts/resource-version.md §2.3
-// and §8-7.
+// apart from a user or node write. A rollback is a fresh controller write, not
+// a restoration of the previous metadata.
 const rollbackUpdatedBy = "controller-rollback"
 
 // offlineEditUpdatedBy marks metadata freshly stamped by the controller when
@@ -131,8 +131,8 @@ const rollbackUpdatedBy = "controller-rollback"
 const offlineEditUpdatedBy = "node-offline-edit"
 
 // configMetadata is the metadata envelope shared by the three config key
-// families (docs/contracts/resource-version.md §2). Only the fields the
-// rollback path reads or re-stamps are modelled here.
+// families. Only the fields the rollback path reads or re-stamps are modelled
+// here.
 type configMetadata struct {
 	Node            string `json:"node"`
 	ResourceVersion string `json:"resourceVersion"`
@@ -162,11 +162,11 @@ func configResourceVersion(value []byte) (uint64, error) {
 
 // rollbackConfigValue builds the value the rollback CAS commits: the payload of
 // the last successful config (its "config" object) re-wrapped with freshly
-// stamped metadata. Per docs/contracts/resource-version.md §2.3 and §8-7,
-// rollback restores payload ONLY; metadata is never copied from the old
-// snapshot but re-stamped so the resourceVersion chain and updatedAt advance
-// (rv = curRV+1, updatedAt = now, updatedBy = rollback marker) rather than
-// regressing, which task-33's offline-edit arbitration relies on.
+// stamped metadata. Rollback restores payload ONLY; metadata is never copied
+// from the old snapshot but re-stamped so the resourceVersion chain and
+// updatedAt advance (rv = curRV+1, updatedAt = now, updatedBy = rollback
+// marker) rather than regressing. Because rollback is a fresh controller write,
+// offline proposals that predate it lose arbitration.
 //
 // curRV is the already-parsed resourceVersion of current (validated by the
 // caller). now is read here rather than passed in, matching every other CAS
@@ -850,7 +850,7 @@ func (c *Consumer) waitForTopicReady(ctx context.Context, brokers []string, topi
 //
 // The reset snaps to the FIRST available offset and replays whatever survived
 // in the log: projection writes are idempotent and offline-edit arbitration
-// absorbs replays (resource-version contract §5 rule 1), so replay is safe
+// treats an already-applied payload as an idempotent no-op, so replay is safe
 // and preserves any proposals that were produced but never consumed.
 //
 // The commit is issued with GenerationID -1 (no group membership), which

@@ -205,7 +205,7 @@ fi
 # `mode:` header line, so drop it before appending; the merged profile then has a
 # single header followed by go blocks and smoke blocks. Duplicate blocks are safe
 # under set mode: both the README updater's dedup aggregation and
-# `go tool cover -func` OR-merge repeated blocks (verified equivalent in task-28).
+# `go tool cover -func` OR-merge repeated blocks, producing equivalent totals.
 # A conversion failure only warns and skips the append; it never fails the run.
 if [ "$REST_SMOKE_STATUS" = "PASS" ] && [ -s "$COVERAGE_FILE" ]; then
     smoke_profile="${TEST_TMP_DIR}/smoke.out"

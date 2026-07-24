@@ -186,10 +186,9 @@ func rollbackJSONEqual(got []byte, want string) bool {
 }
 
 // rollbackRestoredPayload reports whether got carries want's config payload
-// with freshly re-stamped rollback metadata (docs/contracts/resource-version.md
-// §2.3/§8-7): the payload is restored while resourceVersion advances to
-// wantRV (current+1) and updatedBy identifies the rollback writer. The old
-// snapshot's metadata must never be written back.
+// with freshly re-stamped rollback metadata: the payload is restored while
+// resourceVersion advances to wantRV (current+1) and updatedBy identifies the
+// rollback writer. The old snapshot's metadata must never be written back.
 func rollbackRestoredPayload(got []byte, want string, wantRV string) bool {
 	type envelope struct {
 		Config   any `json:"config"`
@@ -242,8 +241,8 @@ func TestRollbackRestoresPreviousConfig(t *testing.T) {
 
 	waitFor(t, 25*time.Second, func() bool {
 		resp, err := env.etcd.Client().Get(env.ctx, key)
-		// Contract §2.3/§8-7: the rollback restores v1's payload but re-stamps
-		// metadata (rv = current 2 + 1 = 3, fresh updatedAt/updatedBy).
+		// The rollback restores v1's payload but re-stamps metadata
+		// (rv = current 2 + 1 = 3, fresh updatedAt/updatedBy).
 		return err == nil && len(resp.Kvs) == 1 && rollbackRestoredPayload(resp.Kvs[0].Value, v1, "3")
 	}, "failed v2 to be rolled back to v1's payload with re-stamped metadata")
 	waitFor(t, 25*time.Second, func() bool {
