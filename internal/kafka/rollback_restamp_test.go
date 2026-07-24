@@ -8,10 +8,9 @@ import (
 	"fastrg-controller/internal/db"
 )
 
-// TestRollbackRestampsMetadata verifies the resource-version.md §2.3/§8-7
-// contract: a rollback restores only the last successful payload while
-// re-stamping metadata so the resourceVersion chain and updatedAt advance
-// instead of regressing to the old snapshot's values.
+// TestRollbackRestampsMetadata verifies that a rollback restores only the last
+// successful payload while re-stamping metadata so the resourceVersion chain
+// and updatedAt advance instead of regressing to the old snapshot's values.
 func TestRollbackRestampsMetadata(t *testing.T) {
 	prev := &db.HSIConfigRow{ConfigJSON: []byte(
 		`{"config":{"user_id":"2","vlan_id":"3"},"metadata":{"node":"n1","resourceVersion":"1","updatedBy":"admin","updatedAt":"2020-01-01T00:00:00Z"}}`,

@@ -50,13 +50,13 @@ func TestLogRouterAuthentication(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	rest := NewRestServer(etcd, nil, nil, []byte("log-integration-secret-1234567890"))
 	logFilePath := filepath.Join(t.TempDir(), "controller.log")
-	const logContent = "task-24 authenticated log content\n"
+	const logContent = "listener-isolation authenticated log content\n"
 	if err := os.WriteFile(logFilePath, []byte(logContent), 0600); err != nil {
 		t.Fatalf("write temporary log: %v", err)
 	}
 	router := rest.NewLogRouter(logFilePath)
 
-	token, err := rest.generateToken("task-24-log-reader")
+	token, err := rest.generateToken("log-reader")
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}

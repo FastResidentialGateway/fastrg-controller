@@ -85,8 +85,9 @@ func TestGuardedRollbackMutationAppliedResourceVersion(t *testing.T) {
 			wantSkip:    true,
 		},
 		{
-			// Regression for task-4's delete+recreate corner: the old
-			// resourceVersion-only guard would delete this recreated rv=1 value.
+			// Regression for the delete+recreate corner of the old
+			// resourceVersion-only guard, which would delete this recreated rv=1
+			// value.
 			name:        "matching resourceVersion from a recreated generation skips",
 			previous:    nil,
 			current:     config("1", "901"),

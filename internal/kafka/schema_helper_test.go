@@ -17,7 +17,7 @@ func createTask12KafkaSchema(t *testing.T, ctx context.Context, dsn, prefix stri
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task12_kafka_%s_%d", prefix, time.Now().UnixNano())
+	schema := fmt.Sprintf("kafkatest_%s_%d", prefix, time.Now().UnixNano())
 	quotedSchema := `"` + strings.ReplaceAll(schema, `"`, `""`) + `"`
 
 	adminPool, err := pgxpool.New(ctx, dsn)

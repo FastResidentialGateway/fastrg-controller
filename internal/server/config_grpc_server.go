@@ -254,10 +254,10 @@ type dnsRecordInner struct {
 	TTL    uint32 `json:"ttl"`
 }
 
-// dnsRecordsWithMetadata is the DNS key envelope
-// (docs/contracts/resource-version.md §3): the record array now lives under
+// dnsRecordsWithMetadata is the DNS key envelope. The record array lives under
 // "records" alongside a metadata envelope identical to the other two config
-// families, so DNS writes participate in the resourceVersion chain.
+// families, so DNS writes participate in the resourceVersion chain instead of
+// using the legacy bare JSON array.
 type dnsRecordsWithMetadata struct {
 	Records  []dnsRecordInner `json:"records"`
 	Metadata hsiMetaInner     `json:"metadata"`
@@ -266,8 +266,8 @@ type dnsRecordsWithMetadata struct {
 // decodeDNSRecords reads the records out of a DNS key value. A value that does
 // not parse as the envelope schema (a legacy bare JSON array, or corrupt data)
 // is treated as having no valid records; the caller overwrites it with the new
-// schema on the next write (docs/contracts/resource-version.md §3, no
-// compatibility window because the system is not yet deployed).
+// envelope schema on the next write. There is no compatibility window because
+// the system is not yet deployed.
 func decodeDNSRecords(current []byte) []dnsRecordInner {
 	if len(current) == 0 {
 		return nil

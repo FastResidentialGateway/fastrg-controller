@@ -32,7 +32,7 @@ func TestUpsertCurrentWithHistory(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	row := HSIConfigRow{
-		NodeUUID:        "task8-node",
+		NodeUUID:        "txn-history-node",
 		UserID:          "42",
 		Action:          ActionUpsert,
 		ConfigJSON:      []byte(`{"version":2}`),
@@ -112,7 +112,7 @@ func createTask8TestSchema(t *testing.T, ctx context.Context, dsn string) (strin
 	if err != nil || parsed.Scheme == "" {
 		t.Fatalf("TEST_DATABASE_URL must be a PostgreSQL URL: %v", err)
 	}
-	schema := fmt.Sprintf("task8_current_history_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("txn_current_history_%d", time.Now().UnixNano())
 
 	adminPool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

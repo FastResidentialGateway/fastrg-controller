@@ -16,8 +16,9 @@ type EtcdClient struct {
 	client *clientv3.Client
 }
 
-// CAS parameters. These must stay in sync with docs/contracts/cas-convention.md
-// and the C side (fastrg-node), so both implementations behave identically.
+// CAS operations make at most five attempts, starting with a 50 ms delay after
+// the first conflict and doubling it after each later conflict. The node uses
+// the same retry limit and backoff schedule so both writers behave consistently.
 const (
 	casMaxRetries     = 5
 	casInitialBackoff = 50 * time.Millisecond
@@ -118,11 +119,11 @@ type CASResult struct {
 // conditions, which the caller can then map to the right HTTP status.
 type CASMutateFunc func(current []byte) (CASResult, error)
 
-// CAS performs a compare-and-swap on key, following the project CAS convention
-// (docs/contracts/cas-convention.md): read value + ModRevision, run mutate,
-// then commit the put/delete inside a Txn guarded by that revision. If a
-// concurrent write landed in between, the Txn fails and the whole read-modify
-// cycle retries with exponential backoff, up to casMaxRetries.
+// CAS performs a compare-and-swap on key: read the value and ModRevision, run
+// mutate, then commit the put/delete inside a transaction guarded by that
+// revision. If a concurrent write landed in between, the transaction fails and
+// the whole read-modify cycle retries with exponential backoff, up to
+// casMaxRetries.
 func (e *EtcdClient) CAS(ctx context.Context, key string, mutate CASMutateFunc) error {
 	return e.CASWithRevision(ctx, key, func(current []byte, _ int64) (CASResult, error) {
 		return mutate(current)

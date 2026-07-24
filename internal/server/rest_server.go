@@ -185,10 +185,10 @@ type DnsRecord struct {
 	TTL    uint32 `json:"ttl" example:"30"`
 }
 
-// DnsRecordsData is the DNS key envelope (docs/contracts/resource-version.md
-// §3): the record array now lives under "records" alongside a metadata envelope
-// identical to the other config families, so DNS writes participate in the
-// resourceVersion chain instead of being stored as a bare JSON array.
+// DnsRecordsData is the DNS key envelope. The record array lives under
+// "records" alongside a metadata envelope identical to the other config
+// families, so DNS writes participate in the resourceVersion chain instead of
+// being stored as a bare JSON array.
 type DnsRecordsData struct {
 	Records  []DnsRecord `json:"records"`
 	Metadata HSIMetadata `json:"metadata"`
@@ -197,8 +197,8 @@ type DnsRecordsData struct {
 // decodeDnsRecords extracts the records from a DNS key value. A value that does
 // not parse as the envelope schema (a legacy bare JSON array, or corrupt data)
 // is treated as having no valid records; the write path overwrites it with the
-// new schema (docs/contracts/resource-version.md §3, no compatibility window
-// because the system is not yet deployed).
+// new envelope schema. There is no compatibility window because the system is
+// not yet deployed.
 func decodeDnsRecords(value []byte) []DnsRecord {
 	if len(value) == 0 {
 		return nil
@@ -317,13 +317,12 @@ func (r *RestServer) getUserFromToken(tokenString string) (string, error) {
 }
 
 // nextResourceVersion derives the resourceVersion to stamp on the value about
-// to be written, from the current stored value (nil for a new key). Per
-// docs/contracts/resource-version.md §2 this is no longer display-only: it is a
-// version chain that every writer (both repos, including the rollback and
-// offline-edit paths) maintains and that task-33's arbitration relies on. It
-// does NOT replace concurrency control, which is still etcd's ModRevision via
-// EtcdClient.CAS. Rules (§2): new key -> "1", missing/unparseable version -> "2",
-// otherwise current+1.
+// to be written, from the current stored value (nil for a new key). This is a
+// version chain that every writer, including rollback and offline-edit paths,
+// maintains for offline-edit arbitration; it is not merely display metadata.
+// It does NOT replace concurrency control, which is still etcd's ModRevision
+// via EtcdClient.CAS. A new key starts at "1", a missing or unparseable version
+// advances to "2", and every valid current version advances by one.
 func nextResourceVersion(current []byte) string {
 	if len(current) == 0 {
 		return "1"
@@ -2159,7 +2158,7 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 
 	// CAS the DNS envelope: read current records, add/update the entry, enforce
 	// the 64-record cap, then write back the records under a freshly stamped
-	// metadata envelope (resource-version.md §2, §3) atomically.
+	// metadata envelope that advances the resourceVersion, all atomically.
 	isUpdate := false
 	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
 		records := decodeDnsRecords(current)
@@ -2235,7 +2234,7 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 
 	// CAS the DNS envelope: remove the domain, then delete the key when no
 	// records remain or write back the trimmed records under a freshly stamped
-	// metadata envelope (resource-version.md §2, §3), atomically.
+	// metadata envelope that advances the resourceVersion, all atomically.
 	err = r.etcd.CAS(ctx, key, func(current []byte) (storage.CASResult, error) {
 		if current == nil {
 			return storage.CASResult{}, errDNSRecordNotFound

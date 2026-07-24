@@ -24,8 +24,8 @@ func TestOperatorProvisionedUserFlow(t *testing.T) {
 	router := rs.newRouter()
 
 	suffix := time.Now().UnixNano()
-	operator := fmt.Sprintf("task13-operator-%d", suffix)
-	newUser := fmt.Sprintf("task13-user-%d", suffix)
+	operator := fmt.Sprintf("reg-operator-%d", suffix)
+	newUser := fmt.Sprintf("reg-user-%d", suffix)
 	const operatorPassword = "operator-password"
 	const newUserPassword = "new-user-password"
 

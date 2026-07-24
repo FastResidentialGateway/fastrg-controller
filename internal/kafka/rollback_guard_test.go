@@ -27,8 +27,8 @@ func TestGuardedRollbackMutation(t *testing.T) {
 		wantDelete bool
 		// wantRollbackRV is set for the rollback case: the committed value must
 		// carry the previous payload with freshly re-stamped metadata whose
-		// resourceVersion equals this (docs/contracts/resource-version.md
-		// §2.3/§8-7: payload restored, metadata never copied back).
+		// resourceVersion equals this. The payload is restored, but metadata is
+		// never copied back.
 		wantRollbackRV string
 	}{
 		{name: "missing current", previous: previous("1"), current: nil, wantSkip: true},

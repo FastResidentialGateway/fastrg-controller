@@ -40,8 +40,9 @@ enum EventType {
 
   // Offline-edit report: a config modified via the node CLI while the
   // controller was unreachable, published over Kafka after reconnecting.
-  // The controller arbitrates by resourceVersion; see
-  // docs/contracts/resource-version.md, "Arbitration rules".
+  // The controller arbitrates using resourceVersion and edit time, while equal
+  // payloads are idempotent no-ops and stale proposals preserve controller
+  // authority.
   EVENT_TYPE_CONFIG_OFFLINE_EDIT = 3;
 
   // PPPoE phase transitions (point 6)
@@ -64,10 +65,10 @@ message ConfigApplyResult {
   // metadata.resourceVersion of the config this apply attempt targeted.
   // The controller's apply-fail rollback guard uses it to decide precisely
   // whether the failed version is still the current etcd value, replacing
-  // the transitional curRV==okRV+1 heuristic (task-4/task-34). correlation_id
-  // supplies a ModRevision side-check that rejects delete+recreate generations
-  // even when their resourceVersion values match. Older nodes leave this field
-  // empty; the controller MUST tolerate the empty value and fall back to the
+  // the transitional curRV==okRV+1 heuristic. correlation_id supplies a
+  // ModRevision side-check that rejects delete+recreate generations even when
+  // their resourceVersion values match. Older nodes leave this field empty;
+  // the controller MUST tolerate the empty value and fall back to the
   // transitional guard — a missing field never rejects the event.
   string applied_resource_version = 5;
 }
@@ -82,8 +83,7 @@ message ConfigApplyResult {
 // node queues locally and retries (at-least-once; the controller-side
 // arbitration is idempotent).
 //
-// Arbitration (controller side; normative definition in
-// docs/contracts/resource-version.md):
+// Arbitration on the controller:
 //   1. Compare only the kind-specific payload, excluding metadata. Equal
 //      payloads are an idempotent no-op for at-least-once replay.
 //   2. Apply a content edit only when resource_version is greater than the
@@ -96,12 +96,11 @@ message ConfigApplyResult {
 message ConfigOfflineEdit {
   // Full snapshot JSON of the target key, same shape as its etcd value and
   // always carrying a metadata envelope with metadata.resourceVersion
-  // (incremented per contract on every CLI edit on the node side):
+  // (incremented after every CLI edit on the node side):
   //   HSI_CONFIG       -> HSIConfigWithMetadata
   //                       {"config": {...}, "metadata": {...}}
   //   DNS_RECORDS      -> enveloped record array (schema change: the bare
-  //                       JSON array gains an envelope; see
-  //                       docs/contracts/resource-version.md §"DNS key schema")
+  //                       JSON array gains a metadata envelope)
   //                       {"records": [...], "metadata": {...}}
   //   SUBSCRIBER_COUNT -> {"subscriber_count": "...", "metadata": {...}}
   string config_json = 1;
@@ -126,15 +125,15 @@ message ConfigOfflineEdit {
   // the same resourceVersion contract and the same arbitration rules.
   OfflineEditKind kind = 5;
 
-  // Offline DELETE proposal (tombstone) when true (contract §9). Then:
+  // Offline DELETE proposal (tombstone) when true. Then:
   //   - config_json is empty and MUST NOT be parsed; a non-empty
   //     config_json with deleted=true is a poison message (kafka_dlq) —
   //     an offline delete+recreate is sent as an ordinary content edit
-  //     continuing the last-known rv chain (§9-2), never as a tombstone;
+  //     continuing the last-known rv chain, never as a tombstone;
   //   - resource_version carries the key's last-known rv at delete time
-  //     and IS an arbitration input (still exempt from the §7
+  //     and IS an arbitration input (still exempt from the
   //     config_json/resource_version consistency check);
-  //   - the controller deletes the etcd key only when BOTH hold (§9-3):
+  //   - the controller deletes the etcd key only when BOTH hold:
   //     resource_version >= the current value's rv (the node's knowledge
   //     was not behind — config the controller advanced while the node was
   //     offline always survives) AND edited_at > current

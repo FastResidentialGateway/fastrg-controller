@@ -65,7 +65,7 @@ including managed services (RDS, Cloud SQL, Azure Database). Use `sslmode=requir
 
 ## 4. Kafka
 
-- **Wire format is protobuf** — the message schema is `docs/contracts/kafka-events.proto`
+- **Wire format is protobuf** — the message schema is `proto/eventsv1/kafka-events.proto`
   (`fastrg.events.v1.NodeEvent`). Producers (the FastRG node) must serialize with
   this exact schema; the controller drops messages it cannot decode.
 - **Topic**: `fastrg.node.events` (override with `KAFKA_TOPIC`).
