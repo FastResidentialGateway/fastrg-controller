@@ -91,7 +91,7 @@ test_node_failure() {
     if node_is_running; then
         log_warn "A fastrg process is already running on $NODE_HOST — likely another e2e in progress."
         log_warn "Refusing to touch it; SKIPPING $PHASE."
-        return 0
+        return 2
     fi
     log_success "Node prepared (no fastrg process running)"
 
@@ -203,6 +203,32 @@ test_node_failure() {
         return 1
     fi
     log_success "Node process stopped cleanly"
+
+    log_info "Waiting for the controller to mark the node offline"
+    local node_key="nodes/$NODE_UUID"
+    local node_record=""
+    local offline_outcome=""
+    for _attempt in $(seq 1 27); do
+        if etcd_key_absent "$node_key"; then
+            offline_outcome="registration removed"
+            break
+        fi
+
+        node_record=$(etcd_get "$node_key")
+        if printf '%s' "$node_record" | jq -e '.status == "inactive"' >/dev/null 2>&1; then
+            offline_outcome="registration marked inactive"
+            break
+        fi
+
+        if [ "$_attempt" -lt 27 ]; then
+            sleep 5
+        fi
+    done
+    if [ -z "$offline_outcome" ]; then
+        log_error "Controller did not remove the node registration or mark it inactive within 130s"
+        return 1
+    fi
+    log_success "Controller converged to offline state ($offline_outcome)"
 
     log_success "$PHASE completed successfully!"
     return 0

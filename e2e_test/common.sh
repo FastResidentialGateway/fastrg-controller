@@ -150,14 +150,31 @@ start_service() {
     sleep 2
 }
 
-# Query etcd
+# Query etcd. Errors produce empty output for compatibility with existing
+# callers. Never use empty output to assert that a key is absent; use
+# etcd_key_absent instead.
 etcd_get() {
     local key=$1
     compose exec -T etcd etcdctl --endpoints=localhost:2379 get "$key" --print-value-only 2>/dev/null || echo ""
 }
 
-# Query database
-# Returns only the data rows, skipping psql header/footer output
+etcd_key_absent() {
+    local key=$1
+    local response
+    local count
+
+    if ! response=$(compose exec -T etcd etcdctl --endpoints=localhost:2379 get "$key" --write-out=fields --count-only 2>/dev/null); then
+        return 1
+    fi
+    count=$(printf '%s\n' "$response" | awk '$1 == "\"Count\"" { print $3 }')
+
+    [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -eq 0 ]
+}
+
+# Query database. Errors produce empty output for compatibility with existing
+# callers. Never use empty output to assert that data is absent; add a helper
+# that checks both the query exit status and its result instead.
+# Returns only the data rows, skipping psql header/footer output.
 db_query() {
     local query=$1
     compose exec -T postgres psql -U fastrg -d fastrg -t -c "$query" 2>/dev/null | grep -v '^$' || echo ""
@@ -196,18 +213,6 @@ kafka_produce_base64() {
     ssh_controller "cd /root/fastrg-controller && KAFKA_BROKERS='$kafka_brokers' KAFKA_TOPIC='$topic' /usr/local/go/bin/go run ./tools/kafka_produce/main.go '$payload_base64'"
 }
 
-# Query controller REST API
-api_get() {
-    local endpoint=$1
-    http_get_body "https://${CONTROLLER_HOST:-localhost}:28443/api$endpoint"
-}
-
-# Get node status from controller
-node_status() {
-    local node_uuid=$1
-    api_get "/node/$node_uuid" | jq '.' 2>/dev/null || echo ""
-}
-
 # Get config from etcd
 config_get() {
     local node_id=$1
@@ -238,40 +243,6 @@ wait_for() {
     done
 
     return 1
-}
-
-# Verify config in etcd and database match
-verify_config_sync() {
-    local node_id=$1
-    local user_id=$2
-
-    log_info "Verifying config sync for node=$node_id user=$user_id"
-
-    local etcd_config=$(config_get "$node_id" "$user_id")
-    local db_config=$(db_query "SELECT config FROM hsi_config_current WHERE node_uuid='$node_id' AND user_id='$user_id';" 2>/dev/null)
-
-    if [ -z "$etcd_config" ] && [ -z "$db_config" ]; then
-        log_success "Config not set (OK)"
-        return 0
-    fi
-
-    if [ "$etcd_config" == "$db_config" ]; then
-        log_success "Config matches between etcd and database"
-        return 0
-    else
-        log_error "Config mismatch!"
-        log_error "etcd: $etcd_config"
-        log_error "db:   $db_config"
-        return 1
-    fi
-}
-
-# Get Kafka consumer lag
-kafka_lag() {
-    compose exec -T kafka kafka-consumer-groups.sh \
-        --bootstrap-server localhost:9092 \
-        --group fastrg-controller \
-        --describe 2>/dev/null | tail -1 || echo "unknown"
 }
 
 # ---------------------------------------------------------------------------
@@ -397,9 +368,9 @@ pppoe_connected_count() {
 
 export -f log_info log_success log_warn log_error compose compose_quiet
 export -f wait_for_service is_service_up http_get_code http_get_body controller_http_alive stop_service start_service
-export -f etcd_get db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
-export -f api_get node_status config_get pppoe_status
-export -f wait_for verify_config_sync kafka_lag
+export -f etcd_get etcd_key_absent db_query config_history_count dlq_pending_count kafka_ensure_topic kafka_produce_base64
+export -f config_get pppoe_status
+export -f wait_for
 export -f node_point_config_to_e2e node_restore_config node_stop node_start node_is_running pppoe_connected_count
 export -f ssh_bras bras_is_running bras_start bras_stop
 export BRAS_HOST
