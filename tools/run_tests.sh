@@ -34,10 +34,8 @@ print_summary() {
     echo
     echo "==================== TEST SUMMARY ===================="
     printf 'Environment setup:                 %s\n' "$SETUP_STATUS"
-    printf 'Unit tests:                       %s\n' "$GO_TEST_STATUS"
-    printf 'etcd/PostgreSQL integration:      %s\n' "$GO_TEST_STATUS"
-    printf 'Kafka/projection in-process e2e:  %s\n' "$GO_TEST_STATUS"
-    printf 'REST smoke (50 assertions):       %s\n' "$REST_SMOKE_STATUS"
+    printf 'Go tests (unit + integration + in-process e2e): %s\n' "$GO_TEST_STATUS"
+    printf 'REST smoke:                       %s\n' "$REST_SMOKE_STATUS"
     printf 'Full-stack e2e:                   %s\n' "$FULL_STACK_E2E_STATUS"
     printf 'Coverage:                         %s\n' "$COVERAGE_TOTAL"
     echo "======================================================"
