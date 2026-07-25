@@ -63,6 +63,20 @@ test_offline_edit_arbitration() {
     compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$TOMB_NODE/hsi/$TOMB_USER" "$tomb_hsi" >/dev/null
     compose exec -T etcd etcdctl --endpoints=localhost:2379 put "configs/$TOMB_NODE/dns/$TOMB_USER" "$tomb_dns" >/dev/null
 
+    local seeded_tomb_hsi
+    local seeded_tomb_dns
+    seeded_tomb_hsi=$(etcd_get "configs/$TOMB_NODE/hsi/$TOMB_USER")
+    seeded_tomb_dns=$(etcd_get "configs/$TOMB_NODE/dns/$TOMB_USER")
+    if ! printf '%s' "$seeded_tomb_hsi" | jq -e '.config.user_id == "63" and .config.vlan_id == "400"' >/dev/null 2>&1; then
+        log_error "Tombstone HSI precondition was not seeded"
+        return 1
+    fi
+    if ! printf '%s' "$seeded_tomb_dns" | jq -e '.records | length == 1 and .[0].domain == "orphan.test"' >/dev/null 2>&1; then
+        log_error "Tombstone DNS precondition was not seeded"
+        return 1
+    fi
+    log_success "Tombstone HSI and DNS preconditions exist"
+
     log_info "Producing accepted content edit"
     kafka_produce_base64 "$KAFKA_TOPIC" "$WIN_EVENT_BASE64" || return 1
     if ! wait_for "[ \"\$(etcd_get 'configs/$WIN_NODE/hsi/$WIN_USER' | jq -r '.config.vlan_id // empty')\" = '200' ]" 30 1; then
@@ -95,7 +109,7 @@ test_offline_edit_arbitration() {
 
     log_info "Producing accepted tombstone"
     kafka_produce_base64 "$KAFKA_TOPIC" "$TOMB_EVENT_BASE64" || return 1
-    if ! wait_for "[ -z \"\$(etcd_get 'configs/$TOMB_NODE/hsi/$TOMB_USER')\" ] && [ -z \"\$(etcd_get 'configs/$TOMB_NODE/dns/$TOMB_USER')\" ]" 30 1; then
+    if ! wait_for "etcd_key_absent 'configs/$TOMB_NODE/hsi/$TOMB_USER' && etcd_key_absent 'configs/$TOMB_NODE/dns/$TOMB_USER'" 30 1; then
         log_error "Accepted tombstone did not delete both HSI and DNS keys"
         return 1
     fi

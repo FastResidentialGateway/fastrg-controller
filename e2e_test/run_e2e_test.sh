@@ -313,6 +313,7 @@ run_phase() {
     local phase_num=$1
     local phase_scripts=("${SCRIPT_DIR}"/phases/phase_"${phase_num}"_*.sh)
     local phase_script
+    local phase_rc
 
     if [[ ${#phase_scripts[@]} -eq 0 || ! -f "${phase_scripts[0]}" ]]; then
         log_warn "Phase ${phase_num} script not found"
@@ -325,7 +326,18 @@ run_phase() {
     phase_script="${phase_scripts[0]}"
 
     print_header "Running Phase ${phase_num}"
-    bash "$phase_script" || return 1
+    if bash "$phase_script"; then
+        phase_rc=0
+    else
+        phase_rc=$?
+    fi
+    if [[ $phase_rc -eq 2 ]]; then
+        log_warn "Phase ${phase_num} SKIPPED"
+        return 0
+    fi
+    if [[ $phase_rc -ne 0 ]]; then
+        return "$phase_rc"
+    fi
     log_success "Phase ${phase_num} completed"
 }
 
