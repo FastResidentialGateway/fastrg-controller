@@ -18,7 +18,8 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL reconnect integration test")
 	}
 
-	proxyAddr := reserveTCPAddress(t)
+	rejector := startRejectingTCPServer(t)
+	proxyAddr := rejector.listener.Addr().String()
 	proxyDSN := replaceDSNHost(t, baseDSN, proxyAddr)
 	proxyBackend := postgresBackendFromDSN(t, baseDSN)
 
@@ -42,9 +43,12 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 		})
 	}()
 
-	// Leave the proxy port closed long enough for the first connection attempt
-	// to fail, then begin forwarding to the throwaway PostgreSQL instance.
-	time.Sleep(time.Second)
+	select {
+	case <-rejector.firstAccept:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ConnectLoop did not attempt a connection to the rejecting server")
+	}
+	rejector.Close()
 	proxy := startTCPProxy(t, proxyAddr, proxyBackend)
 
 	select {
@@ -72,6 +76,9 @@ func TestConnectLoopRecoversWhenPostgreSQLBecomesReachable(t *testing.T) {
 
 	if got := readyCalls.Load(); got != 1 {
 		t.Fatalf("onReady called %d times, want exactly once", got)
+	}
+	if got := rejector.accepts.Load(); got < 1 {
+		t.Fatalf("failed connection attempts = %d, want at least one", got)
 	}
 }
 
@@ -107,17 +114,59 @@ func TestPostgresBackendFromDSN(t *testing.T) {
 	}
 }
 
-func reserveTCPAddress(t *testing.T) string {
+type rejectingTCPServer struct {
+	listener    net.Listener
+	firstAccept chan struct{}
+	closed      chan struct{}
+	accepts     atomic.Int32
+	once        sync.Once
+	wg          sync.WaitGroup
+}
+
+func startRejectingTCPServer(t *testing.T) *rejectingTCPServer {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("reserve proxy address: %v", err)
+		t.Fatalf("start rejecting TCP server: %v", err)
 	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release proxy address: %v", err)
+
+	server := &rejectingTCPServer{
+		listener:    listener,
+		firstAccept: make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
-	return addr
+	server.wg.Add(1)
+	go server.acceptLoop(t)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func (s *rejectingTCPServer) acceptLoop(t *testing.T) {
+	defer s.wg.Done()
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			select {
+			case <-s.closed:
+				return
+			default:
+				t.Errorf("rejecting server accept: %v", err)
+				return
+			}
+		}
+		_ = conn.Close()
+		if s.accepts.Add(1) == 1 {
+			close(s.firstAccept)
+		}
+	}
+}
+
+func (s *rejectingTCPServer) Close() {
+	s.once.Do(func() {
+		close(s.closed)
+		_ = s.listener.Close()
+		s.wg.Wait()
+	})
 }
 
 func replaceDSNHost(t *testing.T, dsn, host string) string {

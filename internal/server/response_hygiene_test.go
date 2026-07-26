@@ -16,6 +16,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -60,7 +61,7 @@ func TestGetHSIConfigMissingReturnsNotFound(t *testing.T) {
 }
 
 func TestLiveNodeInfoMissingUserReturnsNotFound(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:50052")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for in-process FastRG node: %v", err)
 	}
@@ -76,10 +77,23 @@ func TestLiveNodeInfoMissingUserReturnsNotFound(t *testing.T) {
 
 	manager := NewNodeMonitorManager(nil)
 	const nodeID = "response-hygiene-node"
-	if err := manager.StartMonitoring(nodeID, "127.0.0.1"); err != nil {
-		t.Fatalf("start monitoring: %v", err)
+	monitorCtx, cancelMonitor := context.WithCancel(context.Background())
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		cancelMonitor()
+		t.Fatalf("create in-process FastRG node client: %v", err)
 	}
-	t.Cleanup(func() { manager.StopMonitoring(nodeID) })
+	manager.monitors[nodeID] = &NodeMonitor{
+		nodeUUID:     nodeID,
+		ctx:          monitorCtx,
+		cancel:       cancelMonitor,
+		grpcConn:     conn,
+		fastrgClient: fastrgnodepb.NewFastrgServiceClient(conn),
+		mgr:          manager,
+	}
+	t.Cleanup(func() {
+		manager.StopMonitoring(nodeID)
+	})
 
 	rs := &RestServer{nodeMonitorMgr: manager}
 	gin.SetMode(gin.TestMode)
