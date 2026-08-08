@@ -331,7 +331,7 @@ func (nm *NodeMonitor) syncPPPoEStatus(ctx context.Context) error {
 	}
 	for _, hsi := range hsiInfo.HsiInfos {
 		userID := fmt.Sprint(hsi.UserId)
-		statusErr := database.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
+		statusErr := database.UpsertPPPoEStatusPreservingIPv6(ctx, db.PPPoEStatusRow{
 			NodeUUID:     nm.nodeUUID,
 			UserID:       userID,
 			Phase:        hsi.Status,
