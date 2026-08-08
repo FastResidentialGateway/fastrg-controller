@@ -165,6 +165,7 @@ type hsiConfigInner struct {
 	DHCPGateway        string        `json:"dhcp_gateway"`
 	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
 	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
+	IPv6Enable         *bool         `json:"ipv6_enable,omitempty"`
 	PortMappings       []portMapping `json:"port-mapping,omitempty"`
 	DesireStatus       string        `json:"desire_status"`
 }
@@ -210,6 +211,14 @@ func mergeGRPCHSIConfigUpdate(requested hsiConfigInner, current *hsiConfigInner,
 		merged.TCPConntrackEnable = boolPointer(*current.TCPConntrackEnable)
 	} else {
 		merged.TCPConntrackEnable = boolPointer(true)
+	}
+
+	if requested.IPv6Enable != nil {
+		merged.IPv6Enable = boolPointer(*requested.IPv6Enable)
+	} else if current != nil && current.IPv6Enable != nil {
+		merged.IPv6Enable = boolPointer(*current.IPv6Enable)
+	} else {
+		merged.IPv6Enable = boolPointer(false)
 	}
 
 	switch {
@@ -299,6 +308,9 @@ func protoToInner(p *controllerpb.HSIConfig) hsiConfigInner {
 	if p.TcpConntrackEnable != nil {
 		inner.TCPConntrackEnable = boolPointer(p.GetTcpConntrackEnable())
 	}
+	if p.Ipv6Enable != nil {
+		inner.IPv6Enable = boolPointer(p.GetIpv6Enable())
+	}
 	for _, pm := range p.GetPortMappings() {
 		inner.PortMappings = append(inner.PortMappings, portMapping{
 			Index: pm.GetIndex(),
@@ -321,6 +333,7 @@ func innerToProto(c hsiConfigInner, m hsiMetaInner) *controllerpb.HSIConfigRespo
 		DhcpGateway:        c.DHCPGateway,
 		DnsProxyEnable:     boolPointer(derefBool(c.DNSProxyEnable)),
 		TcpConntrackEnable: boolPointer(derefBool(c.TCPConntrackEnable)),
+		Ipv6Enable:         boolPointer(derefBool(c.IPv6Enable)),
 		DesireStatus:       c.DesireStatus,
 	}
 	for _, pm := range c.PortMappings {
@@ -402,6 +415,9 @@ func (s *ConfigGrpcServer) CreateHSIConfig(ctx context.Context, req *controllerp
 	t := true
 	inner.DNSProxyEnable = &t
 	inner.TCPConntrackEnable = &t
+	if inner.IPv6Enable == nil {
+		inner.IPv6Enable = boolPointer(false)
+	}
 
 	key := hsiKey(req.NodeId, inner.UserID)
 	var rv string
