@@ -107,6 +107,7 @@ type HSIConfig struct {
 	DHCPGateway        string        `json:"dhcp_gateway" example:"192.168.3.1"`
 	DNSProxyEnable     *bool         `json:"dns_proxy_enable,omitempty"`
 	TCPConntrackEnable *bool         `json:"tcp_conntrack_enable,omitempty"`
+	IPv6Enable         *bool         `json:"ipv6_enable,omitempty"`
 	PortMappings       []PortMapping `json:"port-mapping,omitempty"`
 	// DesireStatus is the PPPoE expected state ("connect" | "disconnect").
 	// Only DialPPPoE/HangupPPPoE change it; ordinary config edits preserve it.
@@ -148,6 +149,14 @@ func mergeRESTHSIConfigUpdate(requested HSIConfig, current *HSIConfig) HSIConfig
 		merged.TCPConntrackEnable = boolPointer(*current.TCPConntrackEnable)
 	} else {
 		merged.TCPConntrackEnable = boolPointer(true)
+	}
+
+	if requested.IPv6Enable != nil {
+		merged.IPv6Enable = boolPointer(*requested.IPv6Enable)
+	} else if current != nil && current.IPv6Enable != nil {
+		merged.IPv6Enable = boolPointer(*current.IPv6Enable)
+	} else {
+		merged.IPv6Enable = boolPointer(false)
 	}
 
 	switch {
@@ -1151,10 +1160,13 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 		return
 	}
 
-	// Default boolean toggle fields to true for new configs
+	// DNS proxy and TCP conntrack default to true for new configs.
 	trueVal := true
 	config.DNSProxyEnable = &trueVal
 	config.TCPConntrackEnable = &trueVal
+	if config.IPv6Enable == nil {
+		config.IPv6Enable = boolPointer(false)
+	}
 	// New configs start disconnected; PPPoE is driven later via desire_status.
 	config.DesireStatus = desireStatusDisconnect
 
