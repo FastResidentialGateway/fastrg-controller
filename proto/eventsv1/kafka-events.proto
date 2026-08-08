@@ -159,6 +159,12 @@ message PPPoEStateChange {
   string hsi_ipv4      = 2;  // set once connected; may be empty for other transitions
   string hsi_ipv4_gw   = 3;  // set once connected
   string error_message = 4;  // set on failure / abnormal disconnect
+  // IPv6 session state. Absent/empty on nodes without IPv6 support and on
+  // transitions where the value is unknown; the controller stores and
+  // displays them verbatim (empty means "not reported").
+  string hsi_ipv6           = 5;  // WAN IPv6 address; set once connected
+  string hsi_ipv6_pd_prefix = 6;  // full delegated prefix in CIDR form, e.g. "2001:db8:ab00::/56" (the entire /56, not a carved /64)
+  string hsi_ipv6_dns       = 7;  // IPv6 DNS servers; multiple servers comma-separated, no spaces
 }
 
 enum PPPoEPhase {

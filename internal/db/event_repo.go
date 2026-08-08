@@ -23,14 +23,17 @@ type DLQRow struct {
 
 // PPPoEStatusRow is the latest observed PPPoE state for a (node, user).
 type PPPoEStatusRow struct {
-	NodeUUID     string    `json:"node_uuid"`
-	UserID       string    `json:"user_id"`
-	Phase        string    `json:"phase"`
-	HSIIPv4      string    `json:"hsi_ipv4,omitempty"`
-	HSIIPv4GW    string    `json:"hsi_ipv4_gw,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	EventTime    time.Time `json:"event_time"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	NodeUUID        string    `json:"node_uuid"`
+	UserID          string    `json:"user_id"`
+	Phase           string    `json:"phase"`
+	HSIIPv4         string    `json:"hsi_ipv4,omitempty"`
+	HSIIPv4GW       string    `json:"hsi_ipv4_gw,omitempty"`
+	HSIIPv6         string    `json:"hsi_ipv6,omitempty"`
+	HSIIPv6PDPrefix string    `json:"hsi_ipv6_pd_prefix,omitempty"`
+	HSIIPv6DNS      string    `json:"hsi_ipv6_dns,omitempty"`
+	ErrorMessage    string    `json:"error_message,omitempty"`
+	EventTime       time.Time `json:"event_time"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // NodeEventRow is one node event (config-apply result or runtime error).
@@ -55,6 +58,33 @@ type NodeEventRow struct {
 func (d *DB) UpsertPPPoEStatus(ctx context.Context, row PPPoEStatusRow) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO pppoe_status
+			(node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, hsi_ipv6,
+			 hsi_ipv6_pd_prefix, hsi_ipv6_dns, error_message, event_time, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+		ON CONFLICT (node_uuid, user_id) DO UPDATE SET
+			phase              = EXCLUDED.phase,
+			hsi_ipv4           = EXCLUDED.hsi_ipv4,
+			hsi_ipv4_gw        = EXCLUDED.hsi_ipv4_gw,
+			hsi_ipv6           = EXCLUDED.hsi_ipv6,
+			hsi_ipv6_pd_prefix = EXCLUDED.hsi_ipv6_pd_prefix,
+			hsi_ipv6_dns       = EXCLUDED.hsi_ipv6_dns,
+			error_message      = EXCLUDED.error_message,
+			event_time         = EXCLUDED.event_time,
+			updated_at         = now()
+		WHERE pppoe_status.event_time <= EXCLUDED.event_time`,
+		row.NodeUUID, row.UserID, row.Phase, nullStr(row.HSIIPv4),
+		nullStr(row.HSIIPv4GW), nullStr(row.HSIIPv6), nullStr(row.HSIIPv6PDPrefix),
+		nullStr(row.HSIIPv6DNS), nullStr(row.ErrorMessage), row.EventTime,
+	)
+	return err
+}
+
+// UpsertPPPoEStatusPreservingIPv6 stores status obtained from the node poll.
+// HsiInfo does not expose IPv6 state, so updates preserve the IPv6 values last
+// reported through Kafka. A newly inserted row starts with empty IPv6 values.
+func (d *DB) UpsertPPPoEStatusPreservingIPv6(ctx context.Context, row PPPoEStatusRow) error {
+	_, err := d.pool.Exec(ctx, `
+		INSERT INTO pppoe_status
 			(node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, error_message, event_time, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
 		ON CONFLICT (node_uuid, user_id) DO UPDATE SET
@@ -76,11 +106,13 @@ func (d *DB) UpsertPPPoEStatus(ctx context.Context, row PPPoEStatusRow) error {
 func (d *DB) GetPPPoEStatus(ctx context.Context, nodeUUID, userID string) (row PPPoEStatusRow, ok bool, err error) {
 	err = d.pool.QueryRow(ctx, `
 		SELECT node_uuid, user_id, phase, COALESCE(hsi_ipv4,''), COALESCE(hsi_ipv4_gw,''),
-		       COALESCE(error_message,''), event_time, updated_at
+		       COALESCE(hsi_ipv6,''), COALESCE(hsi_ipv6_pd_prefix,''),
+		       COALESCE(hsi_ipv6_dns,''), COALESCE(error_message,''), event_time, updated_at
 		FROM pppoe_status WHERE node_uuid = $1 AND user_id = $2`,
 		nodeUUID, userID,
 	).Scan(&row.NodeUUID, &row.UserID, &row.Phase, &row.HSIIPv4, &row.HSIIPv4GW,
-		&row.ErrorMessage, &row.EventTime, &row.UpdatedAt)
+		&row.HSIIPv6, &row.HSIIPv6PDPrefix, &row.HSIIPv6DNS, &row.ErrorMessage,
+		&row.EventTime, &row.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return PPPoEStatusRow{}, false, nil
 	}

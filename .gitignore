@@ -9,3 +9,6 @@ web/build
 certs
 docs
 CLAUDE.md
+.claude
+.codex
+AGENTS.md

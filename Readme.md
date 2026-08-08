@@ -130,7 +130,7 @@ The test suite is split into layers according to its external-service requiremen
 ### Coverage
 
 <!-- coverage:begin -->
-The following results were measured on 2026-07-23 with disposable etcd, PostgreSQL, and Kafka containers, all three `TEST_*` variables set, and the REST smoke suite's instrumented controller binary included:
+The following results were measured on 2026-07-25 with disposable etcd, PostgreSQL, and Kafka containers, all three `TEST_*` variables set, and the REST smoke suite's instrumented controller binary included:
 
 | Package | Coverage |
 |---|---:|
@@ -138,11 +138,11 @@ The following results were measured on 2026-07-23 with disposable etcd, PostgreS
 | `internal/validation` | 100.0% |
 | `internal/storage` | 88.9% |
 | `internal/db` | 80.3% |
-| `internal/kafka` | 77.4% |
+| `internal/kafka` | 74.7% |
 | `internal/projection` | 74.2% |
 | `internal/leader` | 69.4% |
 | `internal/server` | 56.9% |
-| **Merged total** | **64.1%** |
+| **Merged total** | **63.9%** |
 
 Each percentage is the statement coverage of that package by the entire test suite, calculated from a single merged coverage profile.
 <!-- coverage:end -->
