@@ -292,3 +292,88 @@ func TestValidateGRPCPortMappingUpdate(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeRESTHSIConfigUpdateIPv6Enable(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested *bool
+		current   *HSIConfig
+		want      bool
+	}{
+		{name: "omitted preserves current true", current: &HSIConfig{IPv6Enable: boolPointer(true)}, want: true},
+		{name: "omitted preserves current false", current: &HSIConfig{IPv6Enable: boolPointer(false)}, want: false},
+		{name: "omitted defaults false for legacy config", current: &HSIConfig{}, want: false},
+		{name: "omitted defaults false without current", current: nil, want: false},
+		{name: "explicit true replaces current false", requested: boolPointer(true), current: &HSIConfig{IPv6Enable: boolPointer(false)}, want: true},
+		{name: "explicit false replaces current true", requested: boolPointer(false), current: &HSIConfig{IPv6Enable: boolPointer(true)}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeRESTHSIConfigUpdate(HSIConfig{IPv6Enable: tt.requested}, tt.current)
+			if got.IPv6Enable == nil || *got.IPv6Enable != tt.want {
+				t.Fatalf("IPv6Enable = %v, want %v", got.IPv6Enable, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeGRPCHSIConfigUpdateIPv6Enable(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested *bool
+		current   *hsiConfigInner
+		want      bool
+	}{
+		{name: "omitted preserves current true", current: &hsiConfigInner{IPv6Enable: boolPointer(true)}, want: true},
+		{name: "omitted preserves current false", current: &hsiConfigInner{IPv6Enable: boolPointer(false)}, want: false},
+		{name: "omitted defaults false for legacy config", current: &hsiConfigInner{}, want: false},
+		{name: "omitted defaults false without current", current: nil, want: false},
+		{name: "explicit true replaces current false", requested: boolPointer(true), current: &hsiConfigInner{IPv6Enable: boolPointer(false)}, want: true},
+		{name: "explicit false replaces current true", requested: boolPointer(false), current: &hsiConfigInner{IPv6Enable: boolPointer(true)}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeGRPCHSIConfigUpdate(hsiConfigInner{IPv6Enable: tt.requested}, tt.current, false)
+			if got.IPv6Enable == nil || *got.IPv6Enable != tt.want {
+				t.Fatalf("IPv6Enable = %v, want %v", got.IPv6Enable, tt.want)
+			}
+		})
+	}
+}
+
+func TestProtoToInnerIPv6EnablePresence(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   *bool
+		wantNil bool
+		want    bool
+	}{
+		{name: "unset remains nil", value: nil, wantNil: true},
+		{name: "explicit false remains present", value: boolPointer(false), want: false},
+		{name: "explicit true remains present", value: boolPointer(true), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := protoToInner(&controllerpb.HSIConfig{Ipv6Enable: tt.value})
+			if tt.wantNil {
+				if got.IPv6Enable != nil {
+					t.Fatalf("IPv6Enable = %v, want nil", got.IPv6Enable)
+				}
+				return
+			}
+			if got.IPv6Enable == nil || *got.IPv6Enable != tt.want {
+				t.Fatalf("IPv6Enable = %v, want present %v", got.IPv6Enable, tt.want)
+			}
+		})
+	}
+
+	if got := innerToProto(hsiConfigInner{}, hsiMetaInner{}).Config; got.Ipv6Enable == nil || got.GetIpv6Enable() {
+		t.Fatalf("inner nil converted to IPv6Enable = %v, want present false", got.Ipv6Enable)
+	}
+	if got := innerToProto(hsiConfigInner{IPv6Enable: boolPointer(true)}, hsiMetaInner{}).Config; got.Ipv6Enable == nil || !got.GetIpv6Enable() {
+		t.Fatalf("inner true converted to IPv6Enable = %v, want present true", got.Ipv6Enable)
+	}
+}

@@ -304,6 +304,136 @@ func TestGRPCUpdateHSIConfigObjectMergeIntegration(t *testing.T) {
 	}
 }
 
+func TestHSIIPv6EnableCreateAndUpdateIntegration(t *testing.T) {
+	t.Run("REST", func(t *testing.T) {
+		etcd := serverTestEtcd(t)
+		ctx := context.Background()
+		nodeID := fmt.Sprintf("ipv6-rest-%d", time.Now().UnixNano())
+		userID := "31"
+		t.Cleanup(func() {
+			_, _ = etcd.Client().Delete(ctx, "configs/"+nodeID+"/", clientv3.WithPrefix())
+		})
+
+		rs := &RestServer{etcd: etcd, jwtSecret: []byte("ipv6-rest-secret-123456789")}
+		token, err := rs.generateToken("ipv6-rest-admin")
+		if err != nil {
+			t.Fatalf("generateToken: %v", err)
+		}
+		gin.SetMode(gin.TestMode)
+		router := gin.New()
+		router.POST("/api/config/:nodeId/hsi", rs.CreateHSIConfig)
+		router.PUT("/api/config/:nodeId/hsi/:userId", rs.UpdateHSIConfig)
+
+		do := func(method, path, body string) *httptest.ResponseRecorder {
+			t.Helper()
+			request := httptest.NewRequest(method, path, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", token)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			return response
+		}
+		configJSON := func(userID, vlanID, ipv6Field string) string {
+			return fmt.Sprintf(`{
+				"user_id":%q,
+				"vlan_id":%q,
+				"account_name":"ipv6@example.com",
+				"password":"secret",
+				"dhcp_addr_pool":"192.168.31.10-192.168.31.200",
+				"dhcp_subnet":"255.255.255.0",
+				"dhcp_gateway":"192.168.31.1"%s
+			}`, userID, vlanID, ipv6Field)
+		}
+
+		basePath := "/api/config/" + nodeID + "/hsi"
+		if response := do(http.MethodPost, basePath, configJSON(userID, "310", `,"ipv6_enable":true`)); response.Code != http.StatusOK {
+			t.Fatalf("POST IPv6 enabled: got %d (%s), want 200", response.Code, response.Body.String())
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), true)
+
+		if response := do(http.MethodPut, basePath+"/"+userID, configJSON(userID, "311", "")); response.Code != http.StatusOK {
+			t.Fatalf("PUT omitted IPv6: got %d (%s), want 200", response.Code, response.Body.String())
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), true)
+
+		if response := do(http.MethodPut, basePath+"/"+userID, configJSON(userID, "311", `,"ipv6_enable":false`)); response.Code != http.StatusOK {
+			t.Fatalf("PUT IPv6 disabled: got %d (%s), want 200", response.Code, response.Body.String())
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), false)
+
+		defaultUserID := "32"
+		if response := do(http.MethodPost, basePath, configJSON(defaultUserID, "320", "")); response.Code != http.StatusOK {
+			t.Fatalf("POST omitted IPv6: got %d (%s), want 200", response.Code, response.Body.String())
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, defaultUserID), false)
+	})
+
+	t.Run("gRPC", func(t *testing.T) {
+		etcd := serverTestEtcd(t)
+		ctx := context.Background()
+		nodeID := fmt.Sprintf("ipv6-grpc-%d", time.Now().UnixNano())
+		userID := "33"
+		t.Cleanup(func() {
+			_, _ = etcd.Client().Delete(ctx, "configs/"+nodeID+"/", clientv3.WithPrefix())
+		})
+
+		secret := []byte("ipv6-grpc-secret-123456789")
+		rs := &RestServer{jwtSecret: secret}
+		token, err := rs.generateToken("ipv6-grpc-admin")
+		if err != nil {
+			t.Fatalf("generateToken: %v", err)
+		}
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		grpcServer := grpc.NewServer()
+		controllerpb.RegisterConfigServiceServer(grpcServer, NewConfigGrpcServer(etcd, secret))
+		go func() {
+			_ = grpcServer.Serve(listener)
+		}()
+		t.Cleanup(grpcServer.Stop)
+
+		connection, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("grpc dial: %v", err)
+		}
+		t.Cleanup(func() { _ = connection.Close() })
+		client := controllerpb.NewConfigServiceClient(connection)
+		authCtx := metadata.AppendToOutgoingContext(ctx, "authorization", token)
+		config := func() *controllerpb.HSIConfig {
+			return &controllerpb.HSIConfig{
+				UserId:       userID,
+				VlanId:       "330",
+				AccountName:  "ipv6@example.com",
+				Password:     "secret",
+				DhcpAddrPool: "192.168.33.10-192.168.33.200",
+				DhcpSubnet:   "255.255.255.0",
+				DhcpGateway:  "192.168.33.1",
+			}
+		}
+
+		created := config()
+		created.Ipv6Enable = proto.Bool(true)
+		if _, err := client.CreateHSIConfig(authCtx, &controllerpb.CreateHSIConfigRequest{NodeId: nodeID, Config: created}); err != nil {
+			t.Fatalf("CreateHSIConfig IPv6 enabled: %v", err)
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), true)
+
+		if _, err := client.UpdateHSIConfig(authCtx, &controllerpb.UpdateHSIConfigRequest{NodeId: nodeID, UserId: userID, Config: config()}); err != nil {
+			t.Fatalf("UpdateHSIConfig omitted IPv6: %v", err)
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), true)
+
+		disabled := config()
+		disabled.Ipv6Enable = proto.Bool(false)
+		if _, err := client.UpdateHSIConfig(authCtx, &controllerpb.UpdateHSIConfigRequest{NodeId: nodeID, UserId: userID, Config: disabled}); err != nil {
+			t.Fatalf("UpdateHSIConfig IPv6 disabled: %v", err)
+		}
+		assertRawHSIIPv6Enable(t, etcd, hsiKey(nodeID, userID), false)
+	})
+}
+
 func TestRESTHSIConfigMergeUsesRefreshedCurrentAfterCASConflict(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	ctx := context.Background()
@@ -391,6 +521,31 @@ func putJSONValue(t *testing.T, etcd *storage.EtcdClient, key string, value any)
 	}
 	if _, err := etcd.Client().Put(context.Background(), key, string(encoded)); err != nil {
 		t.Fatalf("put %s: %v", key, err)
+	}
+}
+
+func assertRawHSIIPv6Enable(t *testing.T, etcd *storage.EtcdClient, key string, want bool) {
+	t.Helper()
+	response, err := etcd.Client().Get(context.Background(), key)
+	if err != nil || len(response.Kvs) != 1 {
+		t.Fatalf("get raw %s: kvs=%d err=%v", key, len(response.Kvs), err)
+	}
+	var envelope struct {
+		Config map[string]json.RawMessage `json:"config"`
+	}
+	if err := json.Unmarshal(response.Kvs[0].Value, &envelope); err != nil {
+		t.Fatalf("decode raw %s: %v", key, err)
+	}
+	raw, ok := envelope.Config["ipv6_enable"]
+	if !ok {
+		t.Fatalf("raw %s config has no ipv6_enable field: %s", key, response.Kvs[0].Value)
+	}
+	var got bool
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode raw %s ipv6_enable: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("raw %s ipv6_enable = %v, want %v", key, got, want)
 	}
 }
 
