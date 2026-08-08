@@ -150,6 +150,90 @@ func TestConsumerEndToEnd(t *testing.T) {
 	}, "etcd config to be rolled back (deleted) after CONFIG_APPLY_FAIL")
 }
 
+func TestConsumerPPPoEIPv6EndToEnd(t *testing.T) {
+	brokers := os.Getenv("TEST_KAFKA_BROKERS")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	etcdEndpoints := os.Getenv("TEST_ETCD_ENDPOINTS")
+	if brokers == "" || dsn == "" || etcdEndpoints == "" {
+		t.Skip("TEST_KAFKA_BROKERS / TEST_DATABASE_URL / TEST_ETCD_ENDPOINTS not set; skipping Kafka e2e")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	t.Setenv("ETCD_ENDPOINTS", etcdEndpoints)
+	etcd, err := storage.NewEtcdClient()
+	if err != nil {
+		t.Fatalf("etcd connect: %v", err)
+	}
+	defer etcd.Close()
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	topic := "fastrg.node.events.pppoe-ipv6." + suffix
+	t.Setenv("KAFKA_TOPIC", topic)
+	t.Setenv("KAFKA_GROUP", "fastrg-controller-pppoe-ipv6."+suffix)
+
+	scopedDSN, cleanup := createTask12KafkaSchema(t, ctx, dsn, "consumer_pppoe_ipv6")
+	defer cleanup()
+	database, err := db.New(ctx, scopedDSN)
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer database.Close()
+
+	w := &kafkago.Writer{
+		Addr:                   kafkago.TCP(splitTestBrokers(brokers)...),
+		Topic:                  topic,
+		AllowAutoTopicCreation: true,
+		BatchTimeout:           50 * time.Millisecond,
+	}
+	defer w.Close()
+
+	now := time.Now().Unix()
+	events := []*eventsv1.NodeEvent{
+		{
+			NodeUuid: "ipv6-node", UserId: "6", Type: eventsv1.EventType_EVENT_TYPE_PPPOE_CONNECTED,
+			Timestamp: now,
+			Payload: &eventsv1.NodeEvent_PppoeStateChange{PppoeStateChange: &eventsv1.PPPoEStateChange{
+				Phase:           eventsv1.PPPoEPhase_PPPOE_PHASE_CONNECTED,
+				HsiIpv4:         "10.0.0.6",
+				HsiIpv6:         "2001:db8::6",
+				HsiIpv6PdPrefix: "2001:db8:600::/56",
+				HsiIpv6Dns:      "2001:4860:4860::8888,2606:4700:4700::1111",
+			}},
+		},
+		{
+			NodeUuid: "legacy-node", UserId: "4", Type: eventsv1.EventType_EVENT_TYPE_PPPOE_CONNECTED,
+			Timestamp: now,
+			Payload: &eventsv1.NodeEvent_PppoeStateChange{PppoeStateChange: &eventsv1.PPPoEStateChange{
+				Phase: eventsv1.PPPoEPhase_PPPOE_PHASE_CONNECTED, HsiIpv4: "10.0.0.4",
+			}},
+		},
+	}
+	msgs := make([]kafkago.Message, 0, len(events))
+	for _, event := range events {
+		value, err := proto.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		msgs = append(msgs, kafkago.Message{Key: []byte(event.NodeUuid), Value: value})
+	}
+	if err := writeWithRetry(ctx, w, msgs); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	go NewConsumer(splitTestBrokers(brokers), database, etcd).Run(ctx)
+	waitFor(t, 25*time.Second, func() bool {
+		ipv6Status, ipv6OK, _ := database.GetPPPoEStatus(ctx, "ipv6-node", "6")
+		legacyStatus, legacyOK, _ := database.GetPPPoEStatus(ctx, "legacy-node", "4")
+		return ipv6OK && legacyOK &&
+			ipv6Status.HSIIPv6 == "2001:db8::6" &&
+			ipv6Status.HSIIPv6PDPrefix == "2001:db8:600::/56" &&
+			ipv6Status.HSIIPv6DNS == "2001:4860:4860::8888,2606:4700:4700::1111" &&
+			legacyStatus.HSIIPv6 == "" && legacyStatus.HSIIPv6PDPrefix == "" &&
+			legacyStatus.HSIIPv6DNS == ""
+	}, "IPv6 and legacy PPPoE events to be projected")
+}
+
 // TestConsumerSkipsUnavailableFirstBroker verifies topic discovery and
 // consumption continue through the configured broker list when the first
 // address refuses connections.
