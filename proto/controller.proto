@@ -105,6 +105,9 @@ message HSIConfig {
   // desire_status is managed exclusively by DialPPPoE/HangupPPPoE.
   // Create/Update preserve the stored value and ignore this field.
   string desire_status = 11;
+  // Optional on update: omission preserves the stored value.
+  // Defaults to false.
+  optional bool ipv6_enable = 12;
 }
 
 message HSIMetadata {
