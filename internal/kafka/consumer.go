@@ -977,13 +977,16 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 
 	case *eventsv1.NodeEvent_PppoeStateChange:
 		return wrapDatabaseError(c.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
-			NodeUUID:     ev.GetNodeUuid(),
-			UserID:       ev.GetUserId(),
-			Phase:        phaseString(p.PppoeStateChange.GetPhase()),
-			HSIIPv4:      p.PppoeStateChange.GetHsiIpv4(),
-			HSIIPv4GW:    p.PppoeStateChange.GetHsiIpv4Gw(),
-			ErrorMessage: p.PppoeStateChange.GetErrorMessage(),
-			EventTime:    eventTime,
+			NodeUUID:        ev.GetNodeUuid(),
+			UserID:          ev.GetUserId(),
+			Phase:           phaseString(p.PppoeStateChange.GetPhase()),
+			HSIIPv4:         p.PppoeStateChange.GetHsiIpv4(),
+			HSIIPv4GW:       p.PppoeStateChange.GetHsiIpv4Gw(),
+			HSIIPv6:         p.PppoeStateChange.GetHsiIpv6(),
+			HSIIPv6PDPrefix: p.PppoeStateChange.GetHsiIpv6PdPrefix(),
+			HSIIPv6DNS:      p.PppoeStateChange.GetHsiIpv6Dns(),
+			ErrorMessage:    p.PppoeStateChange.GetErrorMessage(),
+			EventTime:       eventTime,
 		}))
 
 	case *eventsv1.NodeEvent_ConfigApplyResult:
