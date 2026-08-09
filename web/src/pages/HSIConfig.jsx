@@ -12,6 +12,7 @@ import {
   getArpTable,
   getDnsCache,
   getPPPoEInfo,
+  getPPPoEStatus,
   getDhcpConfig,
   getDnsRecords,
   getDnsRecord,
@@ -38,6 +39,7 @@ export default function HSIConfig() {
     vlan_id: '',
     account_name: '',
     password: '',
+    ipv6_enable: false,
     dns_proxy_enable: true,
     tcp_conntrack_enable: true,
     // desireStatus is the PPPoE expected state from config: "connect" | "disconnect"
@@ -85,8 +87,9 @@ export default function HSIConfig() {
   const [dnsTabProxyLoading, setDnsTabProxyLoading] = useState(false)
   // Other switches tab state
   const [tcpConntrackEnable, setTcpConntrackEnable] = useState(null)
+  const [ipv6Enable, setIpv6Enable] = useState(null)
   const [switchesLoading, setSwitchesLoading] = useState(false)
-  // PPPoE info state for each user in PPPoE panel: { [userId]: { loading, data, error } }
+  // PPPoE info state for each user: live node data plus recorded Kafka-fed status
   const [pppoeInfoMap, setPppoeInfoMap] = useState({})
 
   // Reveal password modal state
@@ -180,6 +183,7 @@ export default function HSIConfig() {
         vlan_id: configData.vlan_id || '',
         account_name: configData.account_name || '',
         password: configData.password || '',
+        ipv6_enable: configData.ipv6_enable !== undefined ? configData.ipv6_enable : false,
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         // expected PPPoE state lives in the config object now
@@ -219,6 +223,7 @@ export default function HSIConfig() {
               account_name: configData.account_name || '',
               password: configData.password || '',
               desireStatus: configData.desire_status || '',
+              ipv6_enable: configData.ipv6_enable !== undefined ? configData.ipv6_enable : false,
               dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
               tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
               dhcp_addr_pool: configData.dhcp_addr_pool || '',
@@ -226,7 +231,7 @@ export default function HSIConfig() {
               dhcp_gateway: configData.dhcp_gateway || ''
             }
           } catch (_) {
-            return { user_id: uid, vlan_id: '', account_name: '', password: '', dns_proxy_enable: true, tcp_conntrack_enable: true, desireStatus: '' }
+            return { user_id: uid, vlan_id: '', account_name: '', password: '', ipv6_enable: false, dns_proxy_enable: true, tcp_conntrack_enable: true, desireStatus: '' }
           }
         })
       )
@@ -253,6 +258,7 @@ export default function HSIConfig() {
         vlan_id: configData.vlan_id || '',
         account_name: configData.account_name || '',
         password: configData.password || '',
+        ipv6_enable: configData.ipv6_enable !== undefined ? configData.ipv6_enable : false,
         dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
         tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         desireStatus: configData.desire_status || ''
@@ -405,13 +411,17 @@ export default function HSIConfig() {
     }
     // If not expanded, expand and load if needed
     if (!current || !current.data) {
-      setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: true, data: null, error: null, expanded: true } }))
-      try {
-        const data = await getPPPoEInfo(nodeId, userId)
-        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data, error: null, expanded: true } }))
-      } catch (err) {
-        const msg = extractApiError(err) || t('hsi.pppoeInfoNotAvailable')
-        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data: null, error: msg, expanded: true } }))
+      setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: true, data: null, recorded: null, error: null, expanded: true } }))
+      const [infoResult, statusResult] = await Promise.allSettled([
+        getPPPoEInfo(nodeId, userId),
+        getPPPoEStatus(nodeId, userId)
+      ])
+      const recorded = statusResult.status === 'fulfilled' ? statusResult.value : null
+      if (infoResult.status === 'fulfilled') {
+        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data: infoResult.value, recorded, error: null, expanded: true } }))
+      } else {
+        const msg = extractApiError(infoResult.reason) || t('hsi.pppoeInfoNotAvailable')
+        setPppoeInfoMap(prev => ({ ...prev, [userId]: { loading: false, data: null, recorded, error: msg, expanded: true } }))
       }
     } else {
       // Data already loaded, just expand
@@ -443,6 +453,7 @@ export default function HSIConfig() {
       vlan_id: '',
       account_name: '',
       password: '',
+      ipv6_enable: false,
       dns_proxy_enable: true,
       tcp_conntrack_enable: true
     })
@@ -482,6 +493,7 @@ export default function HSIConfig() {
     setDnsTabProxyLoading(false)
     // Reset other switches tab state
     setTcpConntrackEnable(null)
+    setIpv6Enable(null)
     setSwitchesLoading(false)
     // Clear field validation states
     setTouchedFields({})
@@ -854,6 +866,7 @@ export default function HSIConfig() {
         vlan_id: pppoeConfig.vlan_id,
         account_name: pppoeConfig.account_name,
         password: pppoeConfig.password,
+        ipv6_enable: pppoeConfig.ipv6_enable,
         dns_proxy_enable: pppoeConfig.dns_proxy_enable,
         tcp_conntrack_enable: pppoeConfig.tcp_conntrack_enable,
         dhcp_addr_pool: dhcpConfig.dhcp_addr_pool,
@@ -876,6 +889,7 @@ export default function HSIConfig() {
         vlan_id: '',
         account_name: '',
         password: '',
+        ipv6_enable: false,
         dns_proxy_enable: true,
         tcp_conntrack_enable: true
       })
@@ -1192,12 +1206,15 @@ export default function HSIConfig() {
   const loadSwitchesConfig = async (userId) => {
     setSwitchesLoading(true)
     setTcpConntrackEnable(null)
+    setIpv6Enable(null)
     try {
       const response = await getHSIConfig(nodeId, userId)
       const configData = response.config || response
       setTcpConntrackEnable(configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true)
+      setIpv6Enable(configData.ipv6_enable !== undefined ? configData.ipv6_enable : false)
     } catch (_) {
       setTcpConntrackEnable(true)
+      setIpv6Enable(false)
     } finally {
       setSwitchesLoading(false)
     }
@@ -1226,6 +1243,39 @@ export default function HSIConfig() {
       }
       await updateHSIConfig(nodeId, selectedUserId, fullConfig)
       setTcpConntrackEnable(newValue)
+      showToast(t('hsi.saveSuccess'), 3500, 'info')
+    } catch (err) {
+      const msg = extractApiError(err) || t('hsi.saveFailed')
+      showToast(msg, 3500, 'error')
+    } finally {
+      setSwitchesLoading(false)
+    }
+  }
+
+  const handleToggleIpv6 = async () => {
+    if (!selectedUserId || ipv6Enable === null) return
+    setSwitchesLoading(true)
+    try {
+      const response = await getHSIConfig(nodeId, selectedUserId)
+      const configData = response.config || response
+      const newValue = !ipv6Enable
+      const fullConfig = {
+        user_id: configData.user_id || selectedUserId,
+        vlan_id: configData.vlan_id || '',
+        account_name: configData.account_name || '',
+        password: configData.password || '',
+        ipv6_enable: newValue,
+        dns_proxy_enable: configData.dns_proxy_enable !== undefined ? configData.dns_proxy_enable : true,
+        tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
+        dhcp_addr_pool: configData.dhcp_addr_pool || '',
+        dhcp_subnet: configData.dhcp_subnet || '',
+        dhcp_gateway: configData.dhcp_gateway || ''
+      }
+      if (Array.isArray(configData['port-mapping']) && configData['port-mapping'].length > 0) {
+        fullConfig['port-mapping'] = configData['port-mapping']
+      }
+      await updateHSIConfig(nodeId, selectedUserId, fullConfig)
+      setIpv6Enable(newValue)
       showToast(t('hsi.saveSuccess'), 3500, 'info')
     } catch (err) {
       const msg = extractApiError(err) || t('hsi.saveFailed')
@@ -1423,6 +1473,16 @@ export default function HSIConfig() {
                       borderRadius: '4px'
                     }}
                   />
+                </div>
+                <div style={{ marginBottom: '15px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      type="checkbox"
+                      checked={pppoeConfig.ipv6_enable}
+                      onChange={(e) => handleInputChange('ipv6_enable', e.target.checked)}
+                    />
+                    {t('hsi.ipv6EnableLabel')}
+                  </label>
                 </div>
                 <button
                   onClick={handleCreateOrUpdate}
@@ -1722,6 +1782,21 @@ export default function HSIConfig() {
                                       <div style={{ gridColumn: '1 / -1' }}>
                                         <span style={{ color: '#6c757d', fontSize: '13px' }}>
                                           <strong>{t('hsi.pppoeDnsServers')}:</strong> {pppoeInfoMap[cfg.user_id].data?.dns_servers && pppoeInfoMap[cfg.user_id].data.dns_servers.length > 0 ? pppoeInfoMap[cfg.user_id].data.dns_servers.join(', ') : t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeIpv6Addr')}:</strong> {pppoeInfoMap[cfg.user_id].recorded?.hsi_ipv6 || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeIpv6PdPrefix')}:</strong> {pppoeInfoMap[cfg.user_id].recorded?.hsi_ipv6_pd_prefix || t('common.notSet')}
+                                        </span>
+                                      </div>
+                                      <div style={{ gridColumn: '1 / -1' }}>
+                                        <span style={{ color: '#6c757d', fontSize: '13px' }}>
+                                          <strong>{t('hsi.pppoeIpv6Dns')}:</strong> {pppoeInfoMap[cfg.user_id].recorded?.hsi_ipv6_dns || t('common.notSet')}
                                         </span>
                                       </div>
                                     </div>
@@ -2370,6 +2445,50 @@ export default function HSIConfig() {
                       </button>
                       <span style={{ fontSize: '13px', color: tcpConntrackEnable ? '#28a745' : '#6c757d', fontWeight: '500', minWidth: '30px' }}>
                         {tcpConntrackEnable ? t('hsi.tcpConntrackEnabled') : t('hsi.tcpConntrackDisabled')}
+                      </span>
+                    </>
+                  ) : null}
+                </div>
+                {/* IPv6 toggle row */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '8px 0' }}>
+                  <span style={{ flex: 1, fontWeight: '500', fontSize: '14px' }}>{t('hsi.ipv6Toggle')}</span>
+                  {switchesLoading ? (
+                    <span style={{ fontSize: '13px', color: '#6c757d' }}>{t('common.loading')}</span>
+                  ) : ipv6Enable !== null ? (
+                    <>
+                      <button
+                        onClick={handleToggleIpv6}
+                        disabled={switchesLoading}
+                        title={ipv6Enable ? t('hsi.ipv6Enabled') : t('hsi.ipv6Disabled')}
+                        style={{
+                          position: 'relative',
+                          display: 'inline-block',
+                          width: '44px',
+                          height: '24px',
+                          borderRadius: '12px',
+                          border: 'none',
+                          cursor: 'pointer',
+                          backgroundColor: ipv6Enable ? '#28a745' : '#6c757d',
+                          transition: 'background-color 0.2s',
+                          padding: 0,
+                          verticalAlign: 'middle',
+                          flexShrink: 0
+                        }}
+                      >
+                        <span style={{
+                          position: 'absolute',
+                          top: '3px',
+                          left: ipv6Enable ? '23px' : '3px',
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          backgroundColor: 'white',
+                          transition: 'left 0.2s',
+                          display: 'block'
+                        }} />
+                      </button>
+                      <span style={{ fontSize: '13px', color: ipv6Enable ? '#28a745' : '#6c757d', fontWeight: '500', minWidth: '30px' }}>
+                        {ipv6Enable ? t('hsi.ipv6Enabled') : t('hsi.ipv6Disabled')}
                       </span>
                     </>
                   ) : null}
