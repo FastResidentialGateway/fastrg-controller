@@ -5,6 +5,8 @@ body{ font-family: Arial, Helvetica, sans-serif; margin:0; padding:0; }
 .card{ max-width:420px; margin:24px auto; padding:16px; border:1px solid #ddd; border-radius:6px }
 label{ display:block; margin-bottom:8px }
 input{ width:100%; padding:8px; margin-top:4px }
+/* the rule above sizes text fields; a checkbox keeps its own size */
+input[type=checkbox]{ width:auto; margin:0 }
 button{ padding:8px 12px; margin-top:8px }
 .error{ color:#b00; margin-top:8px }
 .nodes-grid{ display:flex; flex-wrap:wrap; gap:12px }
