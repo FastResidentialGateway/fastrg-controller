@@ -15,6 +15,11 @@ service NodeManagement {
   rpc RegisterNode(NodeRegisterRequest) returns (NodeRegisterReply) {}
   rpc UnregisterNode(NodeRegisterRequest) returns (google.protobuf.Empty) {}
   rpc Heartbeat(NodeHeartbeat) returns (google.protobuf.Empty) {}
+  // ReportShutdown marks nodes/<uuid> inactive without deleting the key, so
+  // the node stays visible (status=inactive) in the controller UI. Nodes call
+  // it on graceful shutdown. UnregisterNode keeps its delete semantics and is
+  // reserved for operator-initiated removal.
+  rpc ReportShutdown(NodeShutdownRequest) returns (google.protobuf.Empty) {}
 }
 
 message NodeRegisterRequest {
@@ -34,6 +39,10 @@ message NodeHeartbeat {
   int64 uptime_timestamp = 2;
   string ip = 3;
   string host_os = 4;
+}
+
+message NodeShutdownRequest {
+  string node_uuid = 1;
 }
 
 

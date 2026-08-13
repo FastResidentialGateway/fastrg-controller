@@ -143,6 +143,45 @@ func (s *GrpcServer) UnregisterNode(ctx context.Context, req *controllerpb.NodeR
 	return &emptypb.Empty{}, nil
 }
 
+// ReportShutdown handles a node reporting its own graceful shutdown: the node
+// is marked inactive and its etcd key is kept, so it stays visible in the UI
+// until an operator removes it. Deleting a node is UnregisterNode's job.
+func (s *GrpcServer) ReportShutdown(ctx context.Context, req *controllerpb.NodeShutdownRequest) (*emptypb.Empty, error) {
+	// Check required fields
+	if req.GetNodeUuid() == "" {
+		logrus.Error("ReportShutdown failed: node_uuid is required")
+		return &emptypb.Empty{}, fmt.Errorf("node_uuid is required")
+	}
+
+	etcdKey := fmt.Sprintf("nodes/%s", req.GetNodeUuid())
+	shutdownAt := time.Now().Unix()
+	err := s.etcd.CAS(ctx, etcdKey, func(current []byte) (storage.CASResult, error) {
+		return shutdownNodeCASValue(current, shutdownAt)
+	})
+	if errors.Is(err, errNodeNotRegistered) {
+		logrus.Errorf("ReportShutdown failed: node %s not registered", req.GetNodeUuid())
+		return &emptypb.Empty{}, fmt.Errorf("node not registered")
+	}
+	if errors.Is(err, errInvalidNodeData) {
+		logrus.WithError(err).Error("Failed to unmarshal node data")
+		return &emptypb.Empty{}, fmt.Errorf("failed to process node data")
+	}
+	if err != nil {
+		if errors.Is(err, storage.ErrCASConflict) {
+			logrus.WithError(err).Error("ReportShutdown CAS retries exhausted")
+		} else {
+			logrus.WithError(err).Error("Failed to update node data in etcd")
+		}
+		return &emptypb.Empty{}, fmt.Errorf("failed to update node data")
+	}
+
+	// Side effects happen only after the inactive state was committed.
+	s.nodeMonitorMgr.StopMonitoring(req.GetNodeUuid())
+	logrus.Infof("Node reported shutdown, marked inactive: UUID=%s", req.GetNodeUuid())
+
+	return &emptypb.Empty{}, nil
+}
+
 func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartbeat) (*emptypb.Empty, error) {
 	// Check required fields
 	if req.GetNodeUuid() == "" {
@@ -350,6 +389,10 @@ func heartbeatNodeCASValue(current []byte, req *controllerpb.NodeHeartbeat, hear
 	nodeData["uptime"] = req.GetUptimeTimestamp()
 	nodeData["node_ip"] = req.GetIp()
 	nodeData["status"] = "active"
+	// The inactive markers describe a node only while it is down, so coming
+	// back to active drops them: they exist if and only if status is inactive.
+	delete(nodeData, "inactive_at")
+	delete(nodeData, "inactive_reason")
 	if req.GetHostOs() != "" {
 		nodeData["host_os"] = req.GetHostOs()
 	}
@@ -384,6 +427,32 @@ func staleNodeCASValue(current []byte, currentTime int64) (storage.CASResult, er
 	nodeData["status"] = "inactive"
 	nodeData["inactive_at"] = currentTime
 	nodeData["inactive_reason"] = "heartbeat_timeout"
+	updated, err := json.Marshal(nodeData)
+	if err != nil {
+		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+	return storage.CASResult{Value: updated}, nil
+}
+
+// shutdownNodeCASValue marks a node inactive on the node's own shutdown report.
+// Unlike staleNodeCASValue it skips the last_seen_time check: a graceful
+// shutdown happens within HeartbeatTimeout of the last heartbeat, so demanding
+// staleness would turn this into a no-op. The fields written match the stale
+// path except for the reason, and reporting shutdown for an already inactive
+// node just refreshes the markers with the more precise self-reported values.
+func shutdownNodeCASValue(current []byte, shutdownAt int64) (storage.CASResult, error) {
+	if current == nil {
+		return storage.CASResult{}, errNodeNotRegistered
+	}
+
+	var nodeData map[string]interface{}
+	if err := json.Unmarshal(current, &nodeData); err != nil {
+		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
+	}
+
+	nodeData["status"] = "inactive"
+	nodeData["inactive_at"] = shutdownAt
+	nodeData["inactive_reason"] = "node_shutdown"
 	updated, err := json.Marshal(nodeData)
 	if err != nil {
 		return storage.CASResult{}, fmt.Errorf("%w: %v", errInvalidNodeData, err)
