@@ -96,10 +96,11 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 		}, nil
 	}
 
-	logrus.Infof("Node registered successfully: UUID=%s, IP=%s, Version=%s", req.NodeUuid, req.Ip, req.Version)
+	logrus.Infof("Node registered successfully: UUID=%s, IP=%s, Version=%s, GrpcPort=%d",
+		req.NodeUuid, req.Ip, req.Version, req.GetGrpcPort())
 
 	// Start monitoring the node; always fetch NIC model since the node itself restarted.
-	if err := s.nodeMonitorMgr.StartMonitoring(req.NodeUuid, req.Ip); err != nil {
+	if err := s.nodeMonitorMgr.StartMonitoring(req.NodeUuid, req.Ip, req.GetGrpcPort()); err != nil {
 		logrus.WithError(err).Warnf("Failed to start monitoring node %s", req.NodeUuid)
 	} else {
 		go s.nodeMonitorMgr.FetchInitialNicModel(req.NodeUuid, s.etcd)
@@ -227,7 +228,13 @@ func (s *GrpcServer) Heartbeat(ctx context.Context, req *controllerpb.NodeHeartb
 		}
 	}
 	if nodeIP != "" {
-		if err := s.nodeMonitorMgr.StartMonitoring(req.GetNodeUuid(), nodeIP); err != nil {
+		// Heartbeats carry no port, so reuse the one registration stored. JSON
+		// numbers decode as float64; anything else means "not reported".
+		var grpcPort uint32
+		if port, ok := nodeData["grpc_port"].(float64); ok && port > 0 {
+			grpcPort = uint32(port)
+		}
+		if err := s.nodeMonitorMgr.StartMonitoring(req.GetNodeUuid(), nodeIP, grpcPort); err != nil {
 			logrus.WithError(err).Warnf("Failed to start monitoring for node %s", req.GetNodeUuid())
 		}
 	}
@@ -352,6 +359,9 @@ func registerNodeCASValue(current []byte, req *controllerpb.NodeRegisterRequest,
 		"registered_at":  registeredAt,
 		"last_seen_time": registeredAt,
 		"status":         "active",
+		// Stored as reported: 0 records "this node did not tell us", which is
+		// what the dialling side turns into the default.
+		"grpc_port": req.GetGrpcPort(),
 	}
 
 	// Reset-on-register is intentional. Only NIC models survive a restart, and

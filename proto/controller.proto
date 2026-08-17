@@ -27,6 +27,10 @@ message NodeRegisterRequest {
   string ip = 2;
   string version = 3;
   string location = 4;
+  // Port the node's own gRPC server listens on, so the controller dials what
+  // the node actually configured instead of a hard-coded default. A node that
+  // does not report it sends 0, and the controller falls back to 50052.
+  uint32 grpc_port = 5;
 }
 
 message NodeRegisterReply {
