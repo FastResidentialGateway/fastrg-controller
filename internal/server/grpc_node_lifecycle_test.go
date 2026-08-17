@@ -122,7 +122,7 @@ func TestReportShutdownMarksInactiveKeepsKey(t *testing.T) {
 		gs.nodeMonitorMgr.StopMonitoring(uuid)
 		gs.etcd.Client().Delete(ctx, "nodes/"+uuid)
 	})
-	if err := gs.nodeMonitorMgr.StartMonitoring(uuid, "127.0.0.1"); err != nil {
+	if err := gs.nodeMonitorMgr.StartMonitoring(uuid, "127.0.0.1", 0); err != nil {
 		t.Fatalf("StartMonitoring: %v", err)
 	}
 
