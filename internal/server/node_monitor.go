@@ -24,8 +24,12 @@ import (
 
 // NodeMonitor manages the monitoring goroutine for a single node
 type NodeMonitor struct {
-	nodeUUID     string
-	nodeIP       string
+	nodeUUID string
+	nodeIP   string
+	// Port actually dialled, after the default has been applied. Comparing the
+	// resolved port is what keeps a node that starts reporting the port it was
+	// already being dialled on from looking like a change.
+	nodeGRPCPort uint32
 	ctx          context.Context
 	cancel       context.CancelFunc
 	grpcConn     *grpc.ClientConn
@@ -74,24 +78,41 @@ func (nmm *NodeMonitorManager) SetDatabase(database *db.DB) {
 // Database returns the currently available PostgreSQL connection, if any.
 func (nmm *NodeMonitorManager) Database() *db.DB { return nmm.database.Load() }
 
+// DefaultNodeGRPCPort is dialled when a node does not report its own gRPC port,
+// which is what every node built before the port was part of registration does.
+const DefaultNodeGRPCPort uint32 = 50052
+
+// resolveNodeGRPCPort maps a reported port onto the one to dial. Nodes that do
+// not report a port send 0.
+func resolveNodeGRPCPort(reported uint32) uint32 {
+	if reported == 0 {
+		return DefaultNodeGRPCPort
+	}
+	return reported
+}
+
 // StartMonitoring starts monitoring a node. No-ops when monitoring is already
-// active for this node at the same IP.
-func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
+// active for this node at the same address. grpcPort is the port the node
+// reported at registration; 0 means it did not report one.
+func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string, grpcPort uint32) error {
 	nmm.mu.Lock()
 	defer nmm.mu.Unlock()
 
+	port := resolveNodeGRPCPort(grpcPort)
+
 	// Check if already monitoring this node
 	if existing, exists := nmm.monitors[nodeUUID]; exists {
-		if existing.nodeIP == nodeIP {
-			// Same node and IP — gRPC connection is still valid, no restart needed.
+		if existing.nodeIP == nodeIP && existing.nodeGRPCPort == port {
+			// Same node and address — gRPC connection is still valid, no restart needed.
 			return nil
 		}
-		logrus.Infof("Node %s IP changed %s -> %s, restarting monitoring", nodeUUID, existing.nodeIP, nodeIP)
+		logrus.Infof("Node %s address changed %s:%d -> %s:%d, restarting monitoring",
+			nodeUUID, existing.nodeIP, existing.nodeGRPCPort, nodeIP, port)
 		nmm.stopMonitoringLocked(nodeUUID)
 	}
 
 	// Create gRPC connection to the node
-	nodeAddr := fmt.Sprintf("%s:50052", nodeIP)
+	nodeAddr := fmt.Sprintf("%s:%d", nodeIP, port)
 	conn, err := grpc.NewClient(nodeAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		logrus.WithError(err).Errorf("failed to connect to node %s at %s", nodeUUID, nodeAddr)
@@ -108,6 +129,7 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string) error {
 	monitor := &NodeMonitor{
 		nodeUUID:     nodeUUID,
 		nodeIP:       nodeIP,
+		nodeGRPCPort: port,
 		ctx:          ctx,
 		cancel:       cancel,
 		grpcConn:     conn,
@@ -224,7 +246,7 @@ func (nmm *NodeMonitorManager) FetchInitialNicModel(nodeUUID string, etcd *stora
 	}
 	defer nmm.endNicFetch(nodeUUID)
 
-	// Node gRPC server (port 50052) may not be ready immediately after RegisterNode.
+	// The node's gRPC server may not be ready immediately after RegisterNode.
 	const grpcMaxRetries = 5
 	const grpcRetryDelay = 3 * time.Second
 

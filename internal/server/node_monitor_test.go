@@ -16,7 +16,7 @@ func TestNodeMonitorManagerLifecycle(t *testing.T) {
 	}
 	nmm.SetLeader(false)
 
-	if err := nmm.StartMonitoring("node-x", "127.0.0.1"); err != nil {
+	if err := nmm.StartMonitoring("node-x", "127.0.0.1", 0); err != nil {
 		t.Fatalf("StartMonitoring: %v", err)
 	}
 	t.Cleanup(func() { nmm.StopMonitoring("node-x") })
@@ -33,7 +33,7 @@ func TestNodeMonitorManagerLifecycle(t *testing.T) {
 	}
 
 	// Same node + IP is a no-op (no restart, no error).
-	if err := nmm.StartMonitoring("node-x", "127.0.0.1"); err != nil {
+	if err := nmm.StartMonitoring("node-x", "127.0.0.1", 0); err != nil {
 		t.Fatalf("StartMonitoring (repeat): %v", err)
 	}
 
