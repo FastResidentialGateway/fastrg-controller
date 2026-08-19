@@ -79,28 +79,6 @@ func (d *DB) UpsertPPPoEStatus(ctx context.Context, row PPPoEStatusRow) error {
 	return err
 }
 
-// UpsertPPPoEStatusPreservingIPv6 stores status obtained from the node poll.
-// HsiInfo does not expose IPv6 state, so updates preserve the IPv6 values last
-// reported through Kafka. A newly inserted row starts with empty IPv6 values.
-func (d *DB) UpsertPPPoEStatusPreservingIPv6(ctx context.Context, row PPPoEStatusRow) error {
-	_, err := d.pool.Exec(ctx, `
-		INSERT INTO pppoe_status
-			(node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, error_message, event_time, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-		ON CONFLICT (node_uuid, user_id) DO UPDATE SET
-			phase         = EXCLUDED.phase,
-			hsi_ipv4      = EXCLUDED.hsi_ipv4,
-			hsi_ipv4_gw   = EXCLUDED.hsi_ipv4_gw,
-			error_message = EXCLUDED.error_message,
-			event_time    = EXCLUDED.event_time,
-			updated_at    = now()
-		WHERE pppoe_status.event_time <= EXCLUDED.event_time`,
-		row.NodeUUID, row.UserID, row.Phase, nullStr(row.HSIIPv4),
-		nullStr(row.HSIIPv4GW), nullStr(row.ErrorMessage), row.EventTime,
-	)
-	return err
-}
-
 // GetPPPoEStatus returns the latest PPPoE state for a (node, user). ok is false
 // when no event has been recorded yet.
 func (d *DB) GetPPPoEStatus(ctx context.Context, nodeUUID, userID string) (row PPPoEStatusRow, ok bool, err error) {

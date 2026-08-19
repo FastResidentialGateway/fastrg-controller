@@ -201,14 +201,18 @@ func TestPPPoEStatusIPv6Fields(t *testing.T) {
 	}
 }
 
-func TestUpsertPPPoEStatusPreservingIPv6(t *testing.T) {
+// Two events carrying the same second must both land, the later one winning.
+// The guard admits equal timestamps on purpose: a subscriber can change state
+// twice inside one second, and dropping the second event would leave the row
+// showing a state the node has already left.
+func TestUpsertPPPoEStatusSameSecondEvents(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
 	ctx := context.Background()
-	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "pppoe_preserve_ipv6")
+	scopedDSN, cleanup := createIsolatedTestSchema(t, ctx, dsn, "pppoe_same_second")
 	defer cleanup()
 	database, err := New(ctx, scopedDSN)
 	if err != nil {
@@ -216,71 +220,37 @@ func TestUpsertPPPoEStatusPreservingIPv6(t *testing.T) {
 	}
 	defer database.Close()
 
-	t0 := time.Now().UTC().Truncate(time.Second)
+	sameSecond := time.Now().UTC().Truncate(time.Second)
 	if err := database.UpsertPPPoEStatus(ctx, PPPoEStatusRow{
-		NodeUUID:        "poll-node",
-		UserID:          "7",
+		NodeUUID:  "same-second-node",
+		UserID:    "3",
+		Phase:     "connecting",
+		HSIIPv4:   "10.0.0.9",
+		EventTime: sameSecond,
+	}); err != nil {
+		t.Fatalf("UpsertPPPoEStatus first: %v", err)
+	}
+
+	if err := database.UpsertPPPoEStatus(ctx, PPPoEStatusRow{
+		NodeUUID:        "same-second-node",
+		UserID:          "3",
 		Phase:           "connected",
-		HSIIPv4:         "10.0.0.7",
-		HSIIPv6:         "2001:db8::7",
-		HSIIPv6PDPrefix: "2001:db8:700::/56",
-		HSIIPv6DNS:      "2001:db8::53,2001:db8::54",
-		EventTime:       t0,
+		HSIIPv4:         "10.0.0.9",
+		HSIIPv6:         "2001:db8::9",
+		HSIIPv6PDPrefix: "2001:db8:900::/56",
+		HSIIPv6DNS:      "2001:db8::53",
+		EventTime:       sameSecond,
 	}); err != nil {
-		t.Fatalf("seed PPPoE status: %v", err)
+		t.Fatalf("UpsertPPPoEStatus second: %v", err)
 	}
 
-	pollTime := t0.Add(2 * time.Second)
-	if err := database.UpsertPPPoEStatusPreservingIPv6(ctx, PPPoEStatusRow{
-		NodeUUID: "poll-node", UserID: "7", Phase: "connecting",
-		HSIIPv4: "10.0.0.8", EventTime: pollTime,
-	}); err != nil {
-		t.Fatalf("poll update: %v", err)
-	}
-	status, ok, err := database.GetPPPoEStatus(ctx, "poll-node", "7")
+	status, ok, err := database.GetPPPoEStatus(ctx, "same-second-node", "3")
 	if err != nil || !ok {
-		t.Fatalf("GetPPPoEStatus after poll = (%+v,%v,%v)", status, ok, err)
+		t.Fatalf("GetPPPoEStatus = (%+v,%v,%v)", status, ok, err)
 	}
-	if status.Phase != "connecting" || status.HSIIPv4 != "10.0.0.8" ||
-		!status.EventTime.Equal(pollTime) || status.HSIIPv6 != "2001:db8::7" ||
-		status.HSIIPv6PDPrefix != "2001:db8:700::/56" ||
-		status.HSIIPv6DNS != "2001:db8::53,2001:db8::54" {
-		t.Fatalf("poll update did not preserve IPv6: %+v", status)
-	}
-
-	if err := database.UpsertPPPoEStatusPreservingIPv6(ctx, PPPoEStatusRow{
-		NodeUUID:        "new-poll-node",
-		UserID:          "8",
-		Phase:           "connected",
-		HSIIPv6:         "must-not-be-inserted",
-		HSIIPv6PDPrefix: "must-not-be-inserted",
-		HSIIPv6DNS:      "must-not-be-inserted",
-		EventTime:       pollTime,
-	}); err != nil {
-		t.Fatalf("first poll insert: %v", err)
-	}
-	inserted, ok, err := database.GetPPPoEStatus(ctx, "new-poll-node", "8")
-	if err != nil || !ok {
-		t.Fatalf("GetPPPoEStatus first poll = (%+v,%v,%v)", inserted, ok, err)
-	}
-	if inserted.HSIIPv6 != "" || inserted.HSIIPv6PDPrefix != "" || inserted.HSIIPv6DNS != "" {
-		t.Fatalf("first poll insert populated IPv6 fields: %+v", inserted)
-	}
-
-	if err := database.UpsertPPPoEStatusPreservingIPv6(ctx, PPPoEStatusRow{
-		NodeUUID: "poll-node", UserID: "7", Phase: "disconnected",
-		HSIIPv4: "10.0.0.99", EventTime: t0.Add(time.Second),
-	}); err != nil {
-		t.Fatalf("stale poll update: %v", err)
-	}
-	status, ok, err = database.GetPPPoEStatus(ctx, "poll-node", "7")
-	if err != nil || !ok {
-		t.Fatalf("GetPPPoEStatus after stale poll = (%+v,%v,%v)", status, ok, err)
-	}
-	if status.Phase != "connecting" || status.HSIIPv4 != "10.0.0.8" ||
-		!status.EventTime.Equal(pollTime) || status.HSIIPv6 != "2001:db8::7" ||
-		status.HSIIPv6PDPrefix != "2001:db8:700::/56" ||
-		status.HSIIPv6DNS != "2001:db8::53,2001:db8::54" {
-		t.Fatalf("stale poll update changed status: %+v", status)
+	if status.Phase != "connected" || status.HSIIPv6 != "2001:db8::9" ||
+		status.HSIIPv6PDPrefix != "2001:db8:900::/56" ||
+		status.HSIIPv6DNS != "2001:db8::53" {
+		t.Fatalf("second same-second event did not win: %+v", status)
 	}
 }
