@@ -140,9 +140,6 @@ func (nmm *NodeMonitorManager) StartMonitoring(nodeUUID, nodeIP string, grpcPort
 	// Store monitor
 	nmm.monitors[nodeUUID] = monitor
 
-	// Start monitoring goroutine
-	go monitor.monitorLoop()
-
 	logrus.Infof("Started monitoring node %s at %s", nodeUUID, nodeAddr)
 	return nil
 }
@@ -174,44 +171,6 @@ func (nmm *NodeMonitorManager) stopMonitoringLocked(nodeUUID string) {
 	delete(nmm.monitors, nodeUUID)
 
 	logrus.Infof("Stopped monitoring node %s", nodeUUID)
-}
-
-// monitorLoop is the main monitoring loop for a node
-func (nm *NodeMonitor) monitorLoop() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	logrus.Infof("Started monitoring loop for node %s", nm.nodeUUID)
-
-	for {
-		select {
-		case <-nm.ctx.Done():
-			logrus.Infof("Stopping monitoring loop for node %s", nm.nodeUUID)
-			return
-		case <-ticker.C:
-			// Only the leader polls nodes and writes pppoe_status; non-leader
-			// replicas keep the monitor (and its gRPC conn) alive solely for
-			// on-demand REST queries.
-			if nm.mgr != nil && !nm.mgr.IsLeader() {
-				continue
-			}
-			nm.syncNodeState()
-		}
-	}
-}
-
-// syncNodeState polls per-node state the controller still needs after Prometheus
-// began scraping nodes directly. It only syncs each subscriber's PPPoE phase into
-// the database for stateless recovery; NIC/system/DHCP metrics are now exposed by
-// the node's own /metrics endpoint and are no longer collected here.
-func (nm *NodeMonitor) syncNodeState() {
-	ctx, cancel := context.WithTimeout(nm.ctx, 5*time.Second)
-	defer cancel()
-
-	if err := nm.syncPPPoEStatus(ctx); err != nil {
-		logrus.WithError(err).Errorf("Failed to sync PPPoE status from node %s", nm.nodeUUID)
-		return
-	}
 }
 
 // beginNicFetch marks nodeUUID's NIC-model fetch as in flight. It returns
@@ -334,39 +293,6 @@ func (nmm *NodeMonitorManager) doWriteNicModels(ctx context.Context, etcd *stora
 		}
 		return storage.CASResult{Value: updated}, nil
 	})
-}
-
-// syncPPPoEStatus pulls each subscriber's PPPoE phase from the node and upserts it
-// into the database for stateless recovery. The Prometheus session metrics formerly
-// derived here are now exposed by the node's own /metrics endpoint.
-func (nm *NodeMonitor) syncPPPoEStatus(ctx context.Context) error {
-	hsiInfo, err := nm.fastrgClient.GetFastrgHsiInfo(ctx, &emptypb.Empty{})
-	if err != nil {
-		return err
-	}
-	if nm.mgr == nil {
-		return nil
-	}
-	database := nm.mgr.Database()
-	if database == nil {
-		return nil
-	}
-	for _, hsi := range hsiInfo.HsiInfos {
-		userID := fmt.Sprint(hsi.UserId)
-		statusErr := database.UpsertPPPoEStatusPreservingIPv6(ctx, db.PPPoEStatusRow{
-			NodeUUID:     nm.nodeUUID,
-			UserID:       userID,
-			Phase:        hsi.Status,
-			HSIIPv4:      hsi.IpAddr,
-			HSIIPv4GW:    hsi.Gateway,
-			ErrorMessage: "",
-			EventTime:    time.Now().UTC(),
-		})
-		if statusErr != nil {
-			logrus.WithError(statusErr).Debugf("Failed to sync PPPoE status to database for node=%s user=%s", nm.nodeUUID, userID)
-		}
-	}
-	return nil
 }
 
 // DhcpLeaseResult holds DHCP lease information for one user
