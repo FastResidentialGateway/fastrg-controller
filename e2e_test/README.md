@@ -174,8 +174,9 @@ What it verifies:
 - the node's HSI/DNS/user-count config is seeded into etcd and the real node
   process is started against the e2e controller
 - the node registers with the controller (`nodes/<uuid>` appears in etcd)
-- at least one PPPoE session reaches `Data phase` (projected into `pppoe_status`)
-- the session stays in `Data phase` across an observation window (no flap)
+- at least one PPPoE session reaches the `connected` phase (projected into
+  `pppoe_status` from the node's Kafka events)
+- the session stays `connected` across an observation window (no flap)
 - the node registration stays live afterwards (heartbeats keep `nodes/<uuid>` fresh)
 
 ## Helpers
