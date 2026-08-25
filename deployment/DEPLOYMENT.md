@@ -194,3 +194,13 @@ Controller startup logs tell you which optional subsystems are active:
 `Started config projection (etcd -> PostgreSQL)` and
 `Started Kafka consumer for node events`, or the corresponding
 "not set; running without …" lines.
+
+## 9. Metrics and alerts
+
+Every exported metric, the suggested alert conditions, and the runbook for
+each alert are in [`docs/metrics.md`](../docs/metrics.md). The short version:
+watch `fastrg_kafka_consumer_offset_beyond_log_end`, `fastrg_db_up` and
+`fastrg_pppoe_status_rows`; when one of them fires, check the Kafka broker
+disk and PostgreSQL, then restart the controller. Restarting repairs the
+consumer offsets and asks the nodes to re-send their PPPoE state, which
+refills `pppoe_status`.

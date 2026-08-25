@@ -34,7 +34,7 @@ type configExecer interface {
 // makes it safe against out-of-order delivery: an older revision (e.g. replayed
 // during reconcile) never overwrites a newer one already stored.
 func (d *DB) UpsertCurrent(ctx context.Context, row HSIConfigRow) error {
-	return upsertCurrent(ctx, d.pool, row)
+	return observe("upsert_current", upsertCurrent(ctx, d.pool, row))
 }
 
 func upsertCurrent(ctx context.Context, execer configExecer, row HSIConfigRow) error {
@@ -51,7 +51,7 @@ func (d *DB) DeleteCurrent(ctx context.Context, nodeUUID, userID string) error {
 		`DELETE FROM hsi_config_current WHERE node_uuid = $1 AND user_id = $2`,
 		nodeUUID, userID,
 	)
-	return err
+	return observe("delete_current", err)
 }
 
 // ListCurrentKeys returns the keys of every current-state row, used by the
@@ -59,7 +59,7 @@ func (d *DB) DeleteCurrent(ctx context.Context, nodeUUID, userID string) error {
 func (d *DB) ListCurrentKeys(ctx context.Context) ([]ConfigKey, error) {
 	rows, err := d.pool.Query(ctx, `SELECT node_uuid, user_id FROM hsi_config_current`)
 	if err != nil {
-		return nil, err
+		return nil, observe("list_current_keys", err)
 	}
 	defer rows.Close()
 
@@ -67,11 +67,11 @@ func (d *DB) ListCurrentKeys(ctx context.Context) ([]ConfigKey, error) {
 	for rows.Next() {
 		var k ConfigKey
 		if err := rows.Scan(&k.NodeUUID, &k.UserID); err != nil {
-			return nil, err
+			return nil, observe("list_current_keys", err)
 		}
 		keys = append(keys, k)
 	}
-	return keys, rows.Err()
+	return keys, observe("list_current_keys", rows.Err())
 }
 
 // AppendHistory appends one audit row.
@@ -85,7 +85,7 @@ func (d *DB) AppendHistory(ctx context.Context, row HSIConfigRow) error {
 // retries from creating duplicate history entries.
 // status values: 'pending' (awaiting node apply result), 'success', 'failed'
 func (d *DB) AppendHistoryWithStatus(ctx context.Context, row HSIConfigRow, status string) error {
-	return appendHistoryWithStatus(ctx, d.pool, row, status)
+	return observe("append_history", appendHistoryWithStatus(ctx, d.pool, row, status))
 }
 
 func appendHistoryWithStatus(ctx context.Context, execer configExecer, row HSIConfigRow, status string) error {
@@ -101,19 +101,19 @@ func appendHistoryWithStatus(ctx context.Context, execer configExecer, row HSICo
 func (d *DB) UpsertCurrentWithHistory(ctx context.Context, row HSIConfigRow, status string) error {
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return observe("upsert_current_with_history", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
 
 	if err := upsertCurrent(ctx, tx, row); err != nil {
-		return err
+		return observe("upsert_current_with_history", err)
 	}
 	if err := appendHistoryWithStatus(ctx, tx, row, status); err != nil {
-		return err
+		return observe("upsert_current_with_history", err)
 	}
-	return tx.Commit(ctx)
+	return observe("upsert_current_with_history", tx.Commit(ctx))
 }
 
 // GetWatchProgress returns the last applied revision for a watcher. ok is false
@@ -126,7 +126,7 @@ func (d *DB) GetWatchProgress(ctx context.Context, watcher string) (rev int64, o
 		return 0, false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return 0, false, observe("get_watch_progress", err)
 	}
 	return rev, true, nil
 }
@@ -139,7 +139,7 @@ func (d *DB) SetWatchProgress(ctx context.Context, watcher string, rev int64) er
 		ON CONFLICT (watcher_name) DO UPDATE SET last_revision = EXCLUDED.last_revision`,
 		watcher, rev,
 	)
-	return err
+	return observe("set_watch_progress", err)
 }
 
 // GetLastSuccessfulConfig finds the most recent history row with status='success'
@@ -162,7 +162,7 @@ func (d *DB) GetLastSuccessfulConfig(ctx context.Context, nodeUUID, userID strin
 		return nil, nil // No successful version found
 	}
 	if err != nil {
-		return nil, err
+		return nil, observe("get_last_successful_config", err)
 	}
 	return &row, nil
 }
@@ -180,5 +180,5 @@ func (d *DB) RollbackToLastSuccessful(ctx context.Context, nodeUUID, userID stri
 		VALUES ($1, $2, 'apply-failed', NULL, 'disconnect', 0, '', 'system', now(), 'failed')
 		ON CONFLICT (node_uuid, user_id, mod_revision, status) DO NOTHING
 	`, nodeUUID, userID)
-	return err
+	return observe("rollback_to_last_successful", err)
 }

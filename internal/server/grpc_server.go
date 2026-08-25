@@ -99,17 +99,27 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 	logrus.Infof("Node registered successfully: UUID=%s, IP=%s, Version=%s, GrpcPort=%d",
 		req.NodeUuid, req.Ip, req.Version, req.GetGrpcPort())
 
-	// Start monitoring the node; always fetch NIC model since the node itself restarted.
-	if err := s.nodeMonitorMgr.StartMonitoring(req.NodeUuid, req.Ip, req.GetGrpcPort()); err != nil {
-		logrus.WithError(err).Warnf("Failed to start monitoring node %s", req.NodeUuid)
-	} else {
-		go s.nodeMonitorMgr.FetchInitialNicModel(req.NodeUuid, s.etcd)
-	}
+	s.afterNodeRegistered(req.NodeUuid, req.Ip, req.GetGrpcPort())
 
 	return &controllerpb.NodeRegisterReply{
 		Success: true,
 		Message: "Node registered successfully",
 	}, nil
+}
+
+// afterNodeRegistered starts monitoring a freshly registered node and kicks off
+// the two follow-ups that registration implies: the node restarted, so its NIC
+// models are fetched again, and its PPPoE state is republished so pppoe_status
+// matches the node even if the controller missed events while the node was away.
+// Both run in the background so registration is not blocked, and with their own
+// context because the registration call's context ends with the reply.
+func (s *GrpcServer) afterNodeRegistered(nodeUUID, nodeIP string, grpcPort uint32) {
+	if err := s.nodeMonitorMgr.StartMonitoring(nodeUUID, nodeIP, grpcPort); err != nil {
+		logrus.WithError(err).Warnf("Failed to start monitoring node %s", nodeUUID)
+		return
+	}
+	go s.nodeMonitorMgr.FetchInitialNicModel(nodeUUID, s.etcd)
+	go s.nodeMonitorMgr.RepublishPPPoEStatus(context.Background(), nodeUUID)
 }
 
 func (s *GrpcServer) UnregisterNode(ctx context.Context, req *controllerpb.NodeRegisterRequest) (*emptypb.Empty, error) {
