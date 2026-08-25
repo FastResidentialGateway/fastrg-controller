@@ -76,7 +76,7 @@ func (d *DB) UpsertPPPoEStatus(ctx context.Context, row PPPoEStatusRow) error {
 		nullStr(row.HSIIPv4GW), nullStr(row.HSIIPv6), nullStr(row.HSIIPv6PDPrefix),
 		nullStr(row.HSIIPv6DNS), nullStr(row.ErrorMessage), row.EventTime,
 	)
-	return err
+	return observe("upsert_pppoe_status", err)
 }
 
 // GetPPPoEStatus returns the latest PPPoE state for a (node, user). ok is false
@@ -95,9 +95,30 @@ func (d *DB) GetPPPoEStatus(ctx context.Context, nodeUUID, userID string) (row P
 		return PPPoEStatusRow{}, false, nil
 	}
 	if err != nil {
-		return PPPoEStatusRow{}, false, err
+		return PPPoEStatusRow{}, false, observe("get_pppoe_status", err)
 	}
 	return row, true, nil
+}
+
+// CountPPPoEStatusByNode returns how many pppoe_status rows each node has, which
+// is what makes a wiped or half-filled table visible in the metrics.
+func (d *DB) CountPPPoEStatusByNode(ctx context.Context) (map[string]int64, error) {
+	rows, err := d.pool.Query(ctx, `SELECT node_uuid, count(*) FROM pppoe_status GROUP BY node_uuid`)
+	if err != nil {
+		return nil, observe("count_pppoe_status_by_node", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int64{}
+	for rows.Next() {
+		var nodeUUID string
+		var n int64
+		if err := rows.Scan(&nodeUUID, &n); err != nil {
+			return nil, observe("count_pppoe_status_by_node", err)
+		}
+		counts[nodeUUID] = n
+	}
+	return counts, observe("count_pppoe_status_by_node", rows.Err())
 }
 
 // SendToDLQ records a failed Kafka message for human investigation.
@@ -116,7 +137,7 @@ func (d *DB) SendToDLQ(ctx context.Context, topic string, partition int, offset 
 		RETURNING id`,
 		topic, partition, offset, messageValue, errorMessage,
 	).Scan(&id)
-	return id, err
+	return id, observe("send_to_dlq", err)
 }
 
 // InsertNodeEvent appends a node event, ignoring duplicates (same node, user,
@@ -133,7 +154,7 @@ func (d *DB) InsertNodeEvent(ctx context.Context, row NodeEventRow) (inserted bo
 		nullStr(row.Context), row.CorrelationID, row.EventTime,
 	)
 	if err != nil {
-		return false, err
+		return false, observe("insert_node_event", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
@@ -156,7 +177,7 @@ func (d *DB) ListNodeEvents(ctx context.Context, nodeUUID, eventType string, lim
 		nodeUUID, eventType, limit,
 	)
 	if err != nil {
-		return nil, err
+		return nil, observe("list_node_events", err)
 	}
 	defer rows.Close()
 
@@ -166,11 +187,11 @@ func (d *DB) ListNodeEvents(ctx context.Context, nodeUUID, eventType string, lim
 		if err := rows.Scan(&e.ID, &e.NodeUUID, &e.UserID, &e.EventType, &e.Action,
 			&e.Success, &e.Module, &e.ErrorCode, &e.ErrorMessage, &e.Context,
 			&e.CorrelationID, &e.EventTime); err != nil {
-			return nil, err
+			return nil, observe("list_node_events", err)
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, observe("list_node_events", rows.Err())
 }
 
 // DeleteNodeEvents deletes node events by id. Returns the number removed.
@@ -180,7 +201,7 @@ func (d *DB) DeleteNodeEvents(ctx context.Context, ids []int64) (int64, error) {
 	}
 	tag, err := d.pool.Exec(ctx, `DELETE FROM node_events WHERE id = ANY($1)`, ids)
 	if err != nil {
-		return 0, err
+		return 0, observe("delete_node_events", err)
 	}
 	return tag.RowsAffected(), nil
 }

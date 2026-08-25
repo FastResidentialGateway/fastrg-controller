@@ -129,11 +129,23 @@ func main() {
 			nmm.SetDatabase(database)
 			rest.SetDatabase(database)
 
+			// Database health and pppoe_status row counts are exported for
+			// alerting; nothing acts on them automatically.
+			go database.RunMetricsSampler(ctx)
+
 			// The Kafka consumer runs on every replica: a single consumer group
 			// (KAFKA_GROUP) balances partitions across them, so this is safe and
 			// HA without leader election.
 			if brokers := kafka.Brokers(); brokers != nil {
-				go kafka.NewConsumer(brokers, database, etcd).Run(ctx)
+				consumer := kafka.NewConsumer(brokers, database, etcd)
+				// Once per start, ask the nodes to re-send their PPPoE state so
+				// pppoe_status is rebuilt after a truncated Kafka log or a
+				// rebuilt database. Restarting the controller is therefore the
+				// operator's recovery action for both.
+				consumer.SetRepublishAll(func(republishCtx context.Context) {
+					nmm.RepublishAll(republishCtx, etcd)
+				})
+				go consumer.Run(ctx)
 			} else {
 				logrus.Info("KAFKA_BROKERS not set; running without Kafka consumer")
 			}
