@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ import (
 	fastrgnodepb "fastrg-controller/proto/fastrgnodepb"
 
 	"github.com/pkg/errors"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -574,4 +576,110 @@ func (nmm *NodeMonitorManager) GetNodeDhcpConfig(ctx context.Context, nodeUUID, 
 
 	// User not found
 	return nil, true, nil
+}
+
+// nodeKeyPrefix is the etcd prefix under which registered nodes are stored.
+const nodeKeyPrefix = "nodes/"
+
+// republishRPCTimeout bounds one RepublishPPPoEStatus call. A node that cannot
+// answer within it is treated as a failed republish.
+const republishRPCTimeout = 10 * time.Second
+
+// errNodeNotMonitored says the node has no gRPC connection on this replica, so
+// there is nothing to ask.
+var errNodeNotMonitored = errors.New("node is not being monitored")
+
+// RepublishPPPoEStatus asks one node to re-emit the current PPPoE state of every
+// subscriber as Kafka events. That is how pppoe_status rows come back after the
+// Kafka log or the table itself lost them: the events travel the normal consumer
+// path, so there is still exactly one writer of the table.
+//
+// Failures are logged and dropped, never retried — a node too old to know the
+// RPC answers Unimplemented, and the next trigger (controller restart or node
+// re-registration) covers whatever this attempt missed.
+func (nmm *NodeMonitorManager) RepublishPPPoEStatus(ctx context.Context, nodeUUID string) error {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		logrus.Warnf("RepublishPPPoEStatus: node %s is not being monitored", nodeUUID)
+		return errNodeNotMonitored
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, republishRPCTimeout)
+	defer cancel()
+
+	reply, err := monitor.fastrgClient.RepublishPPPoEStatus(callCtx, &emptypb.Empty{})
+	if err != nil {
+		logrus.WithError(err).Warnf("RepublishPPPoEStatus: node %s did not republish its PPPoE status", nodeUUID)
+		return err
+	}
+
+	logrus.Infof("Node %s republished %d PPPoE status event(s)", nodeUUID, reply.GetEventCount())
+	return nil
+}
+
+// RepublishAll asks every active registered node to re-emit its PPPoE state.
+// The Kafka consumer runs it once at startup, so restarting the controller is
+// the operator's single recovery action after the Kafka log was truncated or
+// the PostgreSQL read model was rebuilt.
+func (nmm *NodeMonitorManager) RepublishAll(ctx context.Context, etcd *storage.EtcdClient) {
+	if etcd == nil {
+		return
+	}
+
+	resp, err := etcd.Client().Get(ctx, nodeKeyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		logrus.WithError(err).Warn("RepublishAll: failed to list registered nodes")
+		return
+	}
+
+	for _, kv := range resp.Kvs {
+		target, ok := parseRepublishTarget(kv.Key, kv.Value)
+		if !ok {
+			continue
+		}
+		// A freshly started controller has no monitors yet, so the connection
+		// this call needs is created here rather than waited for.
+		if err := nmm.StartMonitoring(target.nodeUUID, target.nodeIP, target.grpcPort); err != nil {
+			logrus.WithError(err).Warnf("RepublishAll: cannot connect to node %s", target.nodeUUID)
+			continue
+		}
+		_ = nmm.RepublishPPPoEStatus(ctx, target.nodeUUID)
+	}
+}
+
+// republishTarget is one node RepublishAll calls.
+type republishTarget struct {
+	nodeUUID string
+	nodeIP   string
+	grpcPort uint32
+}
+
+// parseRepublishTarget reads one etcd nodes/ entry. ok is false for entries that
+// are not an active node with an address to dial, which cannot be called at all.
+func parseRepublishTarget(key, value []byte) (republishTarget, bool) {
+	nodeUUID := strings.TrimPrefix(string(key), nodeKeyPrefix)
+	if nodeUUID == "" {
+		return republishTarget{}, false
+	}
+
+	var nodeData map[string]interface{}
+	if err := json.Unmarshal(value, &nodeData); err != nil {
+		return republishTarget{}, false
+	}
+	if status, _ := nodeData["status"].(string); status != "active" {
+		return republishTarget{}, false
+	}
+	nodeIP, _ := nodeData["node_ip"].(string)
+	if nodeIP == "" {
+		return republishTarget{}, false
+	}
+
+	// JSON numbers decode as float64; anything else means "not reported".
+	var grpcPort uint32
+	if port, ok := nodeData["grpc_port"].(float64); ok && port > 0 {
+		grpcPort = uint32(port)
+	}
+	return republishTarget{nodeUUID: nodeUUID, nodeIP: nodeIP, grpcPort: grpcPort}, true
 }

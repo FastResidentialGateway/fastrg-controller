@@ -24,7 +24,7 @@ PHASE="Phase 4: Node Failure & Recovery"
 NODE_UUID=""
 
 # Seed the node's HSI/DNS/user-count config into the (freshly wiped) e2e etcd so
-# the real node can dial PPPoE and reach the "Data phase". The stack starts from
+# the real node can dial PPPoE and reach the connected phase. The stack starts from
 # clean volumes each run, so without this seed user 2 stays "not configured".
 # Values mirror a known-good working config for the test environment's BNG
 # (account "the" / password "admin" / vlan 3).
@@ -152,13 +152,13 @@ test_node_failure() {
     fi
     log_success "Node registered with controller (nodes/$NODE_UUID)"
 
-    # Step 6: Wait for PPPoE sessions to come up and stabilise. The controller
-    # polls each node session over gRPC and records the raw PPPoE status string
-    # into pppoe_status; "Data phase" is the established, data-passing state.
-    log_info "Step 6: Waiting for PPPoE connection to stabilise (phase='Data phase')"
+    # Step 6: Wait for PPPoE sessions to come up and stabilise. The node reports
+    # each transition as a Kafka event and the consumer projects it into
+    # pppoe_status; "connected" is the established, data-passing state.
+    log_info "Step 6: Waiting for PPPoE connection to stabilise (phase='connected')"
     local connected_count=0
     for _attempt in $(seq 1 60); do
-        connected_count=$(pppoe_connected_count "$NODE_UUID" "Data phase")
+        connected_count=$(pppoe_connected_count "$NODE_UUID" "connected")
         connected_count=${connected_count:-0}
         if [ "$connected_count" -gt 0 ]; then
             break
@@ -166,23 +166,23 @@ test_node_failure() {
         sleep 2
     done
     if [ "$connected_count" -le 0 ]; then
-        log_error "No PPPoE session reached 'Data phase' within timeout"
+        log_error "No PPPoE session reached the 'connected' phase within timeout"
         ssh_node "tail -30 '$NODE_LOG' 2>/dev/null"
         return 1
     fi
-    log_success "PPPoE connection stabilised ($connected_count session(s) in Data phase)"
+    log_success "PPPoE connection stabilised ($connected_count session(s) connected)"
 
     # Step 7: Confirm the connected state is stable across a short observation
-    # window (sessions stay in Data phase, no drop back to an earlier phase).
+    # window (sessions stay connected, no drop back to an earlier phase).
     log_info "Step 7: Confirming PPPoE state stability"
     sleep 5
-    local stable_count=$(pppoe_connected_count "$NODE_UUID" "Data phase")
+    local stable_count=$(pppoe_connected_count "$NODE_UUID" "connected")
     stable_count=${stable_count:-0}
     if [ "$stable_count" -lt "$connected_count" ]; then
         log_error "PPPoE sessions dropped after stabilising (was $connected_count, now $stable_count)"
         return 1
     fi
-    log_success "PPPoE connection is stable ($stable_count session(s) in Data phase)"
+    log_success "PPPoE connection is stable ($stable_count session(s) connected)"
 
     # Step 8: Verify the node registration is still live in etcd after the
     # session has been up for a while (heartbeats keep nodes/<uuid> fresh).

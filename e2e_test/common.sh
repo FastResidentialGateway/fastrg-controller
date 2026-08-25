@@ -209,8 +209,13 @@ kafka_produce_base64() {
     # on newlines, which corrupts protobuf payloads that contain 0x0A bytes.
     # Use the kafka_produce Go tool on the controller host instead; it writes the
     # full binary payload in a single Kafka message without any line-splitting.
+    # The tool comes from the same checkout the stack is built from, which is the
+    # parent of COMPOSE_DIR, so a staged tree under test uses its own copy.
     local kafka_brokers="${KAFKA_BROKERS:-localhost:29092}"
-    ssh_controller "cd /root/fastrg-controller && KAFKA_BROKERS='$kafka_brokers' KAFKA_TOPIC='$topic' /usr/local/go/bin/go run ./tools/kafka_produce/main.go '$payload_base64'"
+    local repo_dir quoted_repo
+    repo_dir=$(dirname "${COMPOSE_DIR:-/root/fastrg-controller/e2e_test}")
+    printf -v quoted_repo '%q' "$repo_dir"
+    ssh_controller "cd ${quoted_repo} && KAFKA_BROKERS='$kafka_brokers' KAFKA_TOPIC='$topic' /usr/local/go/bin/go run ./tools/kafka_produce/main.go '$payload_base64'"
 }
 
 # Get config from etcd
@@ -357,12 +362,13 @@ node_is_running() {
     ssh_node "pgrep -x fastrg >/dev/null && echo up || echo down" | grep -q up
 }
 
-# Count PPPoE rows in the given phase for a node. The controller records the raw
-# per-session PPPoE status it polls from the node; "Data phase" is the
-# established/data-passing state. Default matches that established state.
+# Count PPPoE rows in the given phase for a node. pppoe_status is written only by
+# the Kafka consumer, so the phase vocabulary is connecting / connected /
+# disconnecting / disconnected / unspecified; "connected" is the established,
+# data-passing state and is the default here.
 pppoe_connected_count() {
     local node_uuid=$1
-    local phase=${2:-Data phase}
+    local phase=${2:-connected}
     db_query "SELECT COUNT(*) FROM pppoe_status WHERE node_uuid='$node_uuid' AND phase='$phase';" 2>/dev/null | xargs
 }
 

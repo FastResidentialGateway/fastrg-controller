@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fastrg-controller/internal/db"
@@ -576,6 +577,20 @@ type Consumer struct {
 	reader *kafka.Reader
 	db     *db.DB
 	etcd   *storage.EtcdClient
+	// lastFetch is the Unix nanosecond time of the most recent successful
+	// fetch, read by the metrics sampler from its own goroutine.
+	lastFetch atomic.Int64
+	// republishAll, when set, asks every registered node to re-emit its PPPoE
+	// state. Run calls it once, after the offsets are healthy.
+	republishAll func(context.Context)
+}
+
+// SetRepublishAll registers the callback Run invokes once per start, so a
+// controller restart refills pppoe_status from what the nodes currently see.
+// Without it the consumer only projects the events nodes send on their own.
+// Call it before Run.
+func (c *Consumer) SetRepublishAll(fn func(context.Context)) {
+	c.republishAll = fn
 }
 
 // Brokers returns the configured Kafka broker list, or nil when Kafka is not
@@ -635,6 +650,8 @@ func (c *Consumer) Run(ctx context.Context) {
 	c.reader = kafka.NewReader(cfg)
 	defer c.reader.Close()
 
+	c.beginSession(ctx, cfg, time.Now())
+
 	for ctx.Err() == nil {
 		m, err := c.reader.FetchMessage(ctx)
 		if err != nil {
@@ -645,6 +662,7 @@ func (c *Consumer) Run(ctx context.Context) {
 			c.sleep(ctx)
 			continue
 		}
+		c.markFetch(time.Now())
 
 		// Retry the same message with exponential backoff. If the DB or etcd is
 		// unavailable, keep retrying this message without committing the offset.
@@ -723,6 +741,23 @@ func (c *Consumer) Run(ctx context.Context) {
 		if err := c.reader.CommitMessages(ctx, m); err != nil {
 			logrus.WithError(err).Error("kafka: commit failed")
 		}
+	}
+}
+
+// beginSession starts the background work that belongs to one consuming
+// session: the health metrics sampler, and the single request that asks every
+// node to re-send its PPPoE state. The republish is the automatic repair for
+// the two losses that survive a delivery acknowledgement — a truncated Kafka
+// log and a rebuilt read model — and runs in the background so an unreachable
+// node cannot hold up consuming.
+func (c *Consumer) beginSession(ctx context.Context, cfg kafka.ReaderConfig, now time.Time) {
+	// The fetch age counts from here, so a consumer that never receives its
+	// first message is still measured.
+	c.markFetch(now)
+	go c.sampleOffsetMetrics(ctx, cfg)
+
+	if c.republishAll != nil {
+		go c.republishAll(ctx)
 	}
 }
 
@@ -864,67 +899,12 @@ func (c *Consumer) negativeLagGuard(ctx context.Context, cfg kafka.ReaderConfig)
 	}
 	client := &kafka.Client{Addr: kafka.TCP(cfg.Brokers...)}
 
-	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{cfg.Topic}})
+	offsets, err := readNegativeLag(ctx, client, cfg.Topic, cfg.GroupID)
 	if err != nil {
-		logrus.WithError(err).Warn("kafka: negative-lag guard: metadata lookup failed, skipping")
+		logrus.WithError(err).Warn("kafka: negative-lag guard: offset lookup failed, skipping")
 		return
 	}
-	var partitions []int
-	for _, t := range meta.Topics {
-		if t.Name != cfg.Topic || t.Error != nil {
-			continue
-		}
-		for _, part := range t.Partitions {
-			partitions = append(partitions, part.ID)
-		}
-	}
-	if len(partitions) == 0 {
-		return
-	}
-
-	offReqs := make([]kafka.OffsetRequest, 0, len(partitions)*2)
-	for _, part := range partitions {
-		offReqs = append(offReqs, kafka.FirstOffsetOf(part), kafka.LastOffsetOf(part))
-	}
-	ranges, err := client.ListOffsets(ctx, &kafka.ListOffsetsRequest{
-		Topics: map[string][]kafka.OffsetRequest{cfg.Topic: offReqs},
-	})
-	if err != nil {
-		logrus.WithError(err).Warn("kafka: negative-lag guard: list offsets failed, skipping")
-		return
-	}
-	firstLast := map[int][2]int64{}
-	for _, po := range ranges.Topics[cfg.Topic] {
-		if po.Error != nil {
-			continue
-		}
-		firstLast[po.Partition] = [2]int64{po.FirstOffset, po.LastOffset}
-	}
-
-	fetched, err := client.OffsetFetch(ctx, &kafka.OffsetFetchRequest{
-		GroupID: cfg.GroupID,
-		Topics:  map[string][]int{cfg.Topic: partitions},
-	})
-	if err != nil {
-		logrus.WithError(err).Warn("kafka: negative-lag guard: offset fetch failed, skipping")
-		return
-	}
-
-	var resets []kafka.OffsetCommit
-	for _, of := range fetched.Topics[cfg.Topic] {
-		if of.Error != nil || of.CommittedOffset < 0 {
-			continue // no committed offset for this partition: nothing to guard
-		}
-		fl, ok := firstLast[of.Partition]
-		if !ok {
-			continue
-		}
-		if of.CommittedOffset > fl[1] {
-			logrus.Warnf("kafka: negative-lag guard: group %q partition %d committed offset %d is beyond log end %d (broker data loss); resetting to first offset %d and replaying",
-				cfg.GroupID, of.Partition, of.CommittedOffset, fl[1], fl[0])
-			resets = append(resets, kafka.OffsetCommit{Partition: of.Partition, Offset: fl[0]})
-		}
-	}
+	resets := partitionsToReset(offsets)
 	if len(resets) == 0 {
 		return
 	}
