@@ -60,7 +60,8 @@ services:
       - kafka-data:/var/lib/kafka/data
 
   controller:
-    build: ..
+    image: fastrg-controller:latest
+    pull_policy: never
     depends_on:
       etcd:
         condition: service_healthy
