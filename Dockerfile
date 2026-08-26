@@ -44,7 +44,7 @@ COPY . .
 RUN go clean -cache
 
 # Generate protobuf code
-RUN cd proto && go generate ./... || true
+RUN cd proto && go generate ./...
 
 # Generate OpenAPI code
 RUN swag init --parseDependency --parseInternal
