@@ -260,7 +260,8 @@ wait_for() {
 NODE_CONFIG="/etc/fastrg/config.cfg"
 NODE_CONFIG_BACKUP="/etc/fastrg/config.cfg.e2e-bak"
 NODE_LOG="/tmp/fastrg-e2e-node.log"
-NODE_BIN="/root/fastrg-node/fastrg"
+NODE_REPO="/root/fastrg/fastrg-node"
+NODE_BIN="${NODE_REPO}/fastrg"
 NODE_ARGS="-l 1-8 -n 4 -a 0000:07:00.0 -a 0000:08:00.0"
 
 # ---- BRAS (PPPoE server) lifecycle -------------------------------------
@@ -347,7 +348,7 @@ node_stop() {
 # then verify it is running with a separate ssh call.
 node_start() {
     timeout 10 ssh $SSH_OPTS "root@${NODE_HOST}" \
-        "cd /root/fastrg-node && setsid $NODE_BIN $NODE_ARGS < /dev/null > '$NODE_LOG' 2>&1" \
+        "cd $NODE_REPO && setsid $NODE_BIN $NODE_ARGS < /dev/null > '$NODE_LOG' 2>&1" \
         >/dev/null 2>&1
     sleep 2
     if ssh_node "pgrep -x fastrg >/dev/null && echo up || echo down" | grep -q up; then

@@ -19,7 +19,7 @@
 #   --db-host      IP     PostgreSQL host (default: 192.168.10.212)
 #   --compose-dir  PATH   Docker Compose project directory on controller (default: /root/fastrg-controller/e2e_test)
 #   --ssh-key      PATH   SSH identity file (default: auto-detect)
-#   --phase        N      Run specific phase (1-5) (default: all)
+#   --phase        N      Run specific phase (1-6) (default: all)
 #   --help                Show this help
 #
 # Requirements (local machine):
@@ -261,18 +261,19 @@ stack_is_up() {
     [[ "$defined" -gt 0 && "$running" -ge "$defined" ]]
 }
 
-# Ensure the compose stack is built from the current code and running before
-# the tests start, then wait for all containers to be running.
+# Ensure the compose stack is running before the tests start, then wait for all
+# containers to be running. The controller image is expected to already be on
+# the host (see docker-compose.yml).
 ensure_stack_up() {
     if stack_is_up; then
-        log_info "Docker compose stack already running — rebuilding current code..."
+        log_info "Docker compose stack already running — recreating it..."
     else
         log_info "Docker compose stack not running — starting it..."
         # Clear any leftover volumes from a previous (possibly interrupted) run so the
         # projection checkpoint and etcd revision start consistent (see teardown_stack).
         compose_remote down -v >/dev/null 2>&1 || true
     fi
-    compose_remote up -d --build || { log_error "docker-compose up --build failed"; return 1; }
+    compose_remote up -d || { log_error "docker-compose up failed"; return 1; }
     log_info "Waiting for containers to be up..."
     local attempt
     for attempt in $(seq 1 60); do
@@ -371,7 +372,7 @@ main() {
     if [[ -n "$PHASE_TO_RUN" ]]; then
         run_phase "$PHASE_TO_RUN" || rc=1
     else
-        for phase in 1 2 3 4 5; do
+        for phase in 1 2 3 4 5 6; do
             if ! run_phase "$phase"; then
                 log_error "Phase ${phase} failed"
                 rc=1
