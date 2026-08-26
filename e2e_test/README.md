@@ -80,6 +80,8 @@ bash run_e2e_test.sh --phase 1
 bash run_e2e_test.sh --phase 2
 bash run_e2e_test.sh --phase 3
 bash run_e2e_test.sh --phase 4
+bash run_e2e_test.sh --phase 5
+bash run_e2e_test.sh --phase 6
 ```
 
 Override hosts and compose directory:
@@ -179,6 +181,54 @@ What it verifies:
 - the session stays `connected` across an observation window (no flap)
 - the node registration stays live afterwards (heartbeats keep `nodes/<uuid>` fresh)
 
+### Phase 5: Offline Edit Arbitration
+
+Scenario: a node that was offline reports config edits it made on its own. The
+phase injects three such protobuf events through Kafka and checks how the
+controller arbitrates each one against what etcd already holds. It uses its own
+synthetic node ids, so no real node is involved.
+
+What it verifies:
+
+- the tombstone preconditions really exist first (the HSI key and the DNS key
+  that has to be cascaded)
+- an accepted edit overwrites the etcd payload and gets fresh controller
+  metadata (bumped `resourceVersion`, `updatedBy` rewritten to
+  `node-offline-edit`)
+- an edit that loses arbitration changes nothing in etcd and leaves exactly one
+  `CONFIG_OFFLINE_EDIT` audit row in `node_events`
+- an accepted tombstone deletes the HSI key and cascades to the node's DNS key
+
+### Phase 6: PPPoE Status Republish
+
+Scenario: with a **real** node connected, restart the controller and then the
+node, and verify each restart makes the node re-send its PPPoE state so every
+`pppoe_status` row is written again.
+
+What it verifies:
+
+- a baseline snapshot of the node's `pppoe_status` rows exists (at least one row,
+  at least one `connected`) before anything is restarted
+- after the controller restarts, every recorded row has a newer `event_time` and
+  the connected sessions are still `connected`
+- the controller logs the republish it ran, covering at least as many events as
+  there are known rows
+- after the node restarts, the controller logs another republish (this one
+  triggered by the node registering again)
+- the rows are written again and settle back to `connected`
+- with PostgreSQL stopped, dropping the PPPoE sessions leaves the table claiming
+  `connected` while reality says otherwise; after the controller is restarted and
+  PostgreSQL comes back, every row converges to `disconnected` with a newer
+  `event_time` — this is the recovery the republish exists for
+- bringing the BRAS back restores both sessions to `connected`, so the phase
+  leaves the fixture as it found it
+
+All checks are read-only queries; the phase never deletes or truncates rows.
+
+This phase stops the BRAS on purpose, so it only runs against a `dpdk-bras` it
+started itself. If one is already running it skips, the same way it skips when
+another fastrg process is already on the node.
+
 ## Helpers
 
 Common helpers are in `common.sh`:
@@ -254,8 +304,12 @@ ssh root@192.168.10.212 \
 
 - The all-phases path runs every phase and fails the run (non-zero exit) if any
   phase fails.
-- Phase 4 brings up a real fastrg node and drives a real PPPoE session, so it
-  needs a reachable node host (`NODE_HOST`).
+- Phases 4 and 6 bring up a real fastrg node and drive a real PPPoE session, so
+  they need a reachable node host (`NODE_HOST`). Both skip themselves when a
+  fastrg process is already running there, so another test's node is never
+  touched.
+- Phases 2 and 5 inject Kafka events with the `kafka_produce` tool, which is run
+  from the repo on the controller host, so Go must be installed there.
 - Direct phase execution is useful for local debugging, but the main supported
   remote path is through `run_e2e_test.sh`.
 - The controller image/container on the controller host must be rebuilt before
