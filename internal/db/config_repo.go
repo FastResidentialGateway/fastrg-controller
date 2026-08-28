@@ -74,6 +74,29 @@ func (d *DB) ListCurrentKeys(ctx context.Context) ([]ConfigKey, error) {
 	return keys, observe("list_current_keys", rows.Err())
 }
 
+// ListCurrentModRevisions returns, per (node, user), the etcd ModRevision the
+// node itself attested to running. The config-confirmation sweep compares it
+// with the ModRevision etcd currently holds to find configs the node has not
+// acknowledged yet.
+func (d *DB) ListCurrentModRevisions(ctx context.Context) (map[ConfigKey]int64, error) {
+	rows, err := d.pool.Query(ctx, `SELECT node_uuid, user_id, mod_revision FROM hsi_config_current`)
+	if err != nil {
+		return nil, observe("list_current_mod_revisions", err)
+	}
+	defer rows.Close()
+
+	confirmed := make(map[ConfigKey]int64)
+	for rows.Next() {
+		var k ConfigKey
+		var modRevision int64
+		if err := rows.Scan(&k.NodeUUID, &k.UserID, &modRevision); err != nil {
+			return nil, observe("list_current_mod_revisions", err)
+		}
+		confirmed[k] = modRevision
+	}
+	return confirmed, observe("list_current_mod_revisions", rows.Err())
+}
+
 // AppendHistory appends one audit row.
 func (d *DB) AppendHistory(ctx context.Context, row HSIConfigRow) error {
 	return d.AppendHistoryWithStatus(ctx, row, "pending")

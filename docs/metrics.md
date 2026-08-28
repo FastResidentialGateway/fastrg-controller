@@ -33,6 +33,19 @@ consumer runs.
 | `fastrg_db_errors_total{op}` | counter | Failed database operations, labelled by the repository call that failed (`upsert_pppoe_status`, `insert_node_event`, `upsert_current_with_history`, …). |
 | `fastrg_pppoe_status_rows{node_uuid}` | gauge | Rows in `pppoe_status` per node, sampled every 30 seconds. Compare it with the node's subscriber count. A node whose rows are all gone stops being reported at all, so alert on a drop *or* a disappearing series. |
 
+## Config confirmation
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `fastrg_config_unconfirmed_nodes` | gauge | Active nodes holding at least one HSI config they have not confirmed applying — the controller pushed a config to etcd and never received the node's apply result. Sampled every 30 seconds by the confirmation sweep, and only on the leader replica. |
+
+A short-lived non-zero value is normal: it covers the seconds between pushing a
+config and the node reporting back. What matters is a value that stays up.
+After a minute the sweep starts asking those nodes to restate what they are
+running, at a backoff that doubles up to 15 minutes, so the number should fall
+back to 0 on its own. One that does not is a node that cannot apply the config
+or cannot reach Kafka.
+
 ## Suggested alerts
 
 | Condition | What it means |
@@ -42,6 +55,7 @@ consumer runs.
 | `rate(fastrg_db_errors_total[5m]) > 0` | Writes or queries are failing. The `op` label says which. |
 | `fastrg_pppoe_status_rows` dropped sharply, or a node's series vanished | The table was emptied or rebuilt. |
 | `fastrg_kafka_consumer_stall_seconds > 60` | The consumer has been stuck on one message for over a minute. |
+| `fastrg_config_unconfirmed_nodes > 0` for 20 minutes | A node has stopped confirming the config it was pushed and the sweep's requests are not fixing it. Check that node's Kafka connectivity and its apply errors in `node_events`. |
 
 `fastrg_kafka_consumer_last_fetch_age_seconds` is **not** an alert on its
 own: it also grows on a quiet topic, where no events simply means nothing is
@@ -62,10 +76,19 @@ check cannot see the brokers either) points at a wedged consumer.
    and a rebuilt read model. On startup the controller:
    - snaps the consumer group's committed offsets back into the surviving
      log, so fetching resumes instead of waiting forever, and
-   - asks every registered node to re-send the current PPPoE state of every
-     subscriber as Kafka events, which refills `pppoe_status` through the
-     normal consumer path.
-4. **Confirm recovery.** `fastrg_kafka_consumer_offset_beyond_log_end` back
+   - asks every registered node to re-send the current PPPoE state and the
+     config it is running for every subscriber as Kafka events, which refills
+     DB tables `pppoe_status` and `hsi_config_current` through the normal 
+     consumer path. Nodes are asked 16 at a time; an unresponsive 
+     node costs only its own 10s timeout instead of stalling the rest of the sweep.
+4. **Give it time to catch up.** The events all arrive at once and the
+   consumer works through them in batches. Measured on the e2e-sized stack
+   (one broker, one PostgreSQL, 8 cores), 100 nodes × 1000 subscribers —
+   100,000 events — take about 15 seconds end to end, around 7,000 rows a
+   second. If the rows are still climbing, it is working; if they have
+   stopped short, `fastrg_kafka_consumer_stall_seconds` says whether it is
+   stuck on one message.
+5. **Confirm recovery.** `fastrg_kafka_consumer_offset_beyond_log_end` back
    to 0, `fastrg_pppoe_status_rows` back to the subscriber count per node,
    and `event_time` in `pppoe_status` advanced past the restart:
 

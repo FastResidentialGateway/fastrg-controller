@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 
 	"fastrg-controller/internal/db"
@@ -52,6 +54,11 @@ type NodeMonitorManager struct {
 	// background poll-and-write loop runs only on the leader to avoid 3x node
 	// load and duplicate pppoe_status writes.
 	leader atomic.Bool
+	// confirmMu guards confirmState. It is its own lock rather than mu because
+	// the config-confirmation sweep does its bookkeeping in one short critical
+	// section and then dials nodes with no lock held at all.
+	confirmMu    sync.Mutex
+	confirmState map[string]*configConfirmState
 }
 
 // SetLeader records whether this replica currently holds leadership.
@@ -66,6 +73,7 @@ func NewNodeMonitorManager(database *db.DB) *NodeMonitorManager {
 	nmm := &NodeMonitorManager{
 		monitors:         make(map[string]*NodeMonitor),
 		nicFetchInFlight: make(map[string]struct{}),
+		confirmState:     make(map[string]*configConfirmState),
 	}
 	nmm.SetDatabase(database)
 	return nmm
@@ -581,9 +589,14 @@ func (nmm *NodeMonitorManager) GetNodeDhcpConfig(ctx context.Context, nodeUUID, 
 // nodeKeyPrefix is the etcd prefix under which registered nodes are stored.
 const nodeKeyPrefix = "nodes/"
 
-// republishRPCTimeout bounds one RepublishPPPoEStatus call. A node that cannot
-// answer within it is treated as a failed republish.
+// republishRPCTimeout bounds one republish call. A node that cannot answer
+// within it is treated as a failed republish.
 const republishRPCTimeout = 10 * time.Second
+
+// republishConcurrency bounds how many nodes are asked at once. At the design
+// target of 100 nodes, 16 in flight caps a full sweep at roughly 7 rounds of the
+// 10s timeout instead of the ~1000s a strictly serial sweep would take.
+const republishConcurrency = 16
 
 // errNodeNotMonitored says the node has no gRPC connection on this replica, so
 // there is nothing to ask.
@@ -619,10 +632,48 @@ func (nmm *NodeMonitorManager) RepublishPPPoEStatus(ctx context.Context, nodeUUI
 	return nil
 }
 
-// RepublishAll asks every active registered node to re-emit its PPPoE state.
-// The Kafka consumer runs it once at startup, so restarting the controller is
-// the operator's single recovery action after the Kafka log was truncated or
-// the PostgreSQL read model was rebuilt.
+// RepublishConfigStatus asks one node to restate which config it is running for
+// every subscriber. The node compares etcd against its own copy, re-applies
+// where they differ, and reports each subscriber as a Kafka event — so a
+// config-apply result the controller never received is repaired through the
+// normal consumer path.
+//
+// The reply only says how many subscribers were queued; the results arrive
+// later as Kafka events. Whether the node actually caught up is therefore
+// decided by the next confirmation sweep, not by this call.
+//
+// Failures are logged and dropped, never retried — a node too old to know the
+// RPC answers Unimplemented, and the next sweep covers whatever this missed.
+func (nmm *NodeMonitorManager) RepublishConfigStatus(ctx context.Context, nodeUUID string) error {
+	nmm.mu.RLock()
+	monitor, exists := nmm.monitors[nodeUUID]
+	nmm.mu.RUnlock()
+	if !exists {
+		logrus.Warnf("RepublishConfigStatus: node %s is not being monitored", nodeUUID)
+		return errNodeNotMonitored
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, republishRPCTimeout)
+	defer cancel()
+
+	reply, err := monitor.fastrgClient.RepublishConfigStatus(callCtx, &emptypb.Empty{})
+	if err != nil {
+		logrus.WithError(err).Warnf("RepublishConfigStatus: node %s did not restate its config status", nodeUUID)
+		return err
+	}
+
+	logrus.Infof("Node %s queued %d subscriber(s) for a config status re-check", nodeUUID, reply.GetEventCount())
+	return nil
+}
+
+// RepublishAll asks every active registered node to restate both the PPPoE state
+// and the config status of every subscriber. The Kafka consumer runs it once at
+// startup, so restarting the controller is the operator's single recovery action
+// after the Kafka log was truncated or the PostgreSQL read model was rebuilt.
+//
+// Nodes are asked republishConcurrency at a time: a node that has gone quiet
+// costs a full RPC timeout, and serially that alone would outlast the outage
+// the sweep is meant to repair.
 func (nmm *NodeMonitorManager) RepublishAll(ctx context.Context, etcd *storage.EtcdClient) {
 	if etcd == nil {
 		return
@@ -634,19 +685,52 @@ func (nmm *NodeMonitorManager) RepublishAll(ctx context.Context, etcd *storage.E
 		return
 	}
 
+	var targets []republishTarget
 	for _, kv := range resp.Kvs {
-		target, ok := parseRepublishTarget(kv.Key, kv.Value)
-		if !ok {
-			continue
+		if target, ok := parseRepublishTarget(kv.Key, kv.Value); ok {
+			targets = append(targets, target)
 		}
-		// A freshly started controller has no monitors yet, so the connection
-		// this call needs is created here rather than waited for.
-		if err := nmm.StartMonitoring(target.nodeUUID, target.nodeIP, target.grpcPort); err != nil {
-			logrus.WithError(err).Warnf("RepublishAll: cannot connect to node %s", target.nodeUUID)
-			continue
-		}
-		_ = nmm.RepublishPPPoEStatus(ctx, target.nodeUUID)
 	}
+
+	runBounded(ctx, targets, func(target republishTarget) {
+		nmm.republishNode(ctx, target)
+	})
+}
+
+// republishNode asks one node for everything the controller projects from its
+// events. Each request is warn-only: a node that cannot answer is left to the
+// next trigger rather than holding up the others.
+func (nmm *NodeMonitorManager) republishNode(ctx context.Context, target republishTarget) {
+	// A freshly started controller has no monitors yet, so the connection these
+	// calls need is created here rather than waited for.
+	if err := nmm.StartMonitoring(target.nodeUUID, target.nodeIP, target.grpcPort); err != nil {
+		logrus.WithError(err).Warnf("RepublishAll: cannot connect to node %s", target.nodeUUID)
+		return
+	}
+	_ = nmm.RepublishPPPoEStatus(ctx, target.nodeUUID)
+	_ = nmm.RepublishConfigStatus(ctx, target.nodeUUID)
+}
+
+// runBounded calls fn for every target with at most republishConcurrency calls
+// in flight and returns once they have all finished. A cancelled context stops
+// new calls from starting; the ones already running end on their own timeout.
+func runBounded(ctx context.Context, targets []republishTarget, fn func(republishTarget)) {
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, republishConcurrency)
+
+	for _, target := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			fn(target)
+		}()
+	}
+	wg.Wait()
 }
 
 // republishTarget is one node RepublishAll calls.
@@ -682,4 +766,210 @@ func parseRepublishTarget(key, value []byte) (republishTarget, bool) {
 		grpcPort = uint32(port)
 	}
 	return republishTarget{nodeUUID: nodeUUID, nodeIP: nodeIP, grpcPort: grpcPort}, true
+}
+
+// The config-confirmation sweep closes the one gap a delivery acknowledgement
+// cannot cover: the controller knows which config it pushed (the ModRevision of
+// each configs/<node>/hsi/<user> key) and which config the node itself attested
+// to running (hsi_config_current.mod_revision, taken from the node's own
+// CONFIG_APPLY_OK). A result lost between the node and the consumer leaves those
+// two apart forever, because nothing re-sends it on its own. The sweep spots the
+// gap and asks the node to restate its config status.
+const (
+	// configConfirmTimeout is how long a pushed config may stay unconfirmed
+	// before its node is asked to restate it. It sits well above a normal
+	// apply-and-report round trip so an apply still in flight is left alone.
+	configConfirmTimeout = 60 * time.Second
+
+	// configConfirmSweepInterval is how often the periodic sweep runs.
+	configConfirmSweepInterval = 30 * time.Second
+
+	// configConfirmBackoffMax bounds how rarely a node that never converges is
+	// asked again, so a permanently broken node cannot be nudged every sweep
+	// forever.
+	configConfirmBackoffMax = 15 * time.Minute
+)
+
+// configUnconfirmedNodes reports how many active nodes are running behind the
+// config the controller pushed. It is observation only; the sweep acts on the
+// same data regardless of who is watching.
+var configUnconfirmedNodes = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "fastrg_config_unconfirmed_nodes",
+	Help: "Active nodes with at least one pushed HSI config they have not confirmed applying.",
+})
+
+// configConfirmState is one node's place in the sweep's backoff. It exists only
+// while that node has an unconfirmed config.
+type configConfirmState struct {
+	// unconfirmedSince is when the sweep first saw this node fall behind.
+	unconfirmedSince time.Time
+	// nextNudge is the earliest time this node may be asked again.
+	nextNudge time.Time
+	// backoff is the wait added after the most recent request.
+	backoff time.Duration
+}
+
+// configKeyPrefix is the etcd prefix under which per-subscriber configs live.
+const configKeyPrefix = "configs/"
+
+// parseHSIConfigKey reads a configs/<node>/hsi/<user> key. ok is false for
+// anything else under the prefix — DNS records, for instance — which carries no
+// config-apply confirmation.
+func parseHSIConfigKey(key []byte) (db.ConfigKey, bool) {
+	text := string(key)
+	if !strings.HasPrefix(text, configKeyPrefix) {
+		return db.ConfigKey{}, false
+	}
+	parts := strings.Split(strings.TrimPrefix(text, configKeyPrefix), "/")
+	if len(parts) != 3 || parts[1] != "hsi" || parts[0] == "" || parts[2] == "" {
+		return db.ConfigKey{}, false
+	}
+	return db.ConfigKey{NodeUUID: parts[0], UserID: parts[2]}, true
+}
+
+// RunConfigConfirmationSweep sweeps every configConfirmSweepInterval until ctx
+// is cancelled. It is a singleton background worker: one replica running it is
+// enough, and three would triple the request load on every node.
+func (nmm *NodeMonitorManager) RunConfigConfirmationSweep(ctx context.Context, etcd *storage.EtcdClient) {
+	ticker := time.NewTicker(configConfirmSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			nmm.SweepConfigConfirmations(ctx, etcd)
+		}
+	}
+}
+
+// SweepConfigConfirmations asks every active node whose pushed config has been
+// unconfirmed for longer than configConfirmTimeout to restate its config status.
+// The request only queues work on the node, so convergence is checked by the
+// next sweep rather than by the reply.
+//
+// Nodes that etcd no longer lists as active are skipped: heartbeat eviction has
+// already decided they are gone, and dialling them would only burn RPC timeouts.
+func (nmm *NodeMonitorManager) SweepConfigConfirmations(ctx context.Context, etcd *storage.EtcdClient) {
+	database := nmm.Database()
+	if etcd == nil || database == nil {
+		return
+	}
+
+	pending, err := unconfirmedNodes(ctx, etcd, database)
+	if err != nil {
+		logrus.WithError(err).Warn("config confirmation sweep: cannot compare pushed config against confirmed config")
+		return
+	}
+	configUnconfirmedNodes.Set(float64(len(pending)))
+
+	due := nmm.dueForNudge(pending, time.Now())
+	if len(due) == 0 {
+		return
+	}
+
+	runBounded(ctx, due, func(target republishTarget) {
+		if err := nmm.StartMonitoring(target.nodeUUID, target.nodeIP, target.grpcPort); err != nil {
+			logrus.WithError(err).Warnf("config confirmation sweep: cannot connect to node %s", target.nodeUUID)
+			return
+		}
+		_ = nmm.RepublishConfigStatus(ctx, target.nodeUUID)
+	})
+}
+
+// unconfirmedNodes returns the active nodes holding at least one HSI config
+// whose etcd ModRevision is newer than the one the node has confirmed.
+func unconfirmedNodes(ctx context.Context, etcd *storage.EtcdClient, database *db.DB) (map[string]republishTarget, error) {
+	nodesResp, err := etcd.Client().Get(ctx, nodeKeyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, errors.Wrap(err, "list registered nodes")
+	}
+	active := make(map[string]republishTarget)
+	for _, kv := range nodesResp.Kvs {
+		if target, ok := parseRepublishTarget(kv.Key, kv.Value); ok {
+			active[target.nodeUUID] = target
+		}
+	}
+	if len(active) == 0 {
+		return nil, nil
+	}
+
+	confirmed, err := database.ListCurrentModRevisions(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "read confirmed config revisions")
+	}
+
+	configsResp, err := etcd.Client().Get(ctx, configKeyPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, errors.Wrap(err, "list pushed configs")
+	}
+
+	pushed := make(map[db.ConfigKey]int64)
+	for _, kv := range configsResp.Kvs {
+		if configKey, ok := parseHSIConfigKey(kv.Key); ok {
+			pushed[configKey] = kv.ModRevision
+		}
+	}
+	return unconfirmedFromRevisions(active, confirmed, pushed), nil
+}
+
+// unconfirmedFromRevisions picks the active nodes holding at least one config
+// whose pushed revision is newer than the revision the node confirmed applying.
+func unconfirmedFromRevisions(
+	active map[string]republishTarget,
+	confirmed map[db.ConfigKey]int64,
+	pushed map[db.ConfigKey]int64,
+) map[string]republishTarget {
+	pending := make(map[string]republishTarget)
+	for configKey, pushedRevision := range pushed {
+		target, isActive := active[configKey.NodeUUID]
+		if !isActive {
+			continue
+		}
+		// A config the node never confirmed has no row, which reads as revision
+		// 0 and is therefore behind any real config.
+		if confirmed[configKey] >= pushedRevision {
+			continue
+		}
+		pending[configKey.NodeUUID] = target
+	}
+	return pending
+}
+
+// dueForNudge advances the per-node backoff and returns the nodes to ask now.
+// A node is asked once its config has been unconfirmed for configConfirmTimeout
+// and then only as often as its growing backoff allows. A node that catches up
+// loses its state, so its next lag starts over from the full timeout.
+func (nmm *NodeMonitorManager) dueForNudge(pending map[string]republishTarget, now time.Time) []republishTarget {
+	nmm.confirmMu.Lock()
+	defer nmm.confirmMu.Unlock()
+
+	for nodeUUID := range nmm.confirmState {
+		if _, stillPending := pending[nodeUUID]; !stillPending {
+			delete(nmm.confirmState, nodeUUID)
+		}
+	}
+
+	var due []republishTarget
+	for nodeUUID, target := range pending {
+		state, tracked := nmm.confirmState[nodeUUID]
+		if !tracked {
+			nmm.confirmState[nodeUUID] = &configConfirmState{
+				unconfirmedSince: now,
+				nextNudge:        now.Add(configConfirmTimeout),
+				backoff:          configConfirmTimeout,
+			}
+			continue
+		}
+		if now.Before(state.nextNudge) {
+			continue
+		}
+		state.backoff = min(state.backoff*2, configConfirmBackoffMax)
+		state.nextNudge = now.Add(state.backoff)
+		logrus.Infof("config confirmation sweep: node %s has been unconfirmed for %s, asking it to restate its config status",
+			nodeUUID, now.Sub(state.unconfirmedSince).Round(time.Second))
+		due = append(due, target)
+	}
+	return due
 }

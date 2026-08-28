@@ -109,17 +109,22 @@ func (s *GrpcServer) RegisterNode(ctx context.Context, req *controllerpb.NodeReg
 
 // afterNodeRegistered starts monitoring a freshly registered node and kicks off
 // the two follow-ups that registration implies: the node restarted, so its NIC
-// models are fetched again, and its PPPoE state is republished so pppoe_status
-// matches the node even if the controller missed events while the node was away.
-// Both run in the background so registration is not blocked, and with their own
-// context because the registration call's context ends with the reply.
+// models are fetched again, and it is asked to restate which config it is
+// running, so a config-apply result lost while it was away is re-sent.
+//
+// PPPoE state is deliberately not requested here. A node that has just
+// registered has no sessions yet, so the answer would always be "nothing to
+// report"; the node reports each session itself as it comes up.
+//
+// Both follow-ups run in the background so registration is not blocked, and with
+// their own context because the registration call's context ends with the reply.
 func (s *GrpcServer) afterNodeRegistered(nodeUUID, nodeIP string, grpcPort uint32) {
 	if err := s.nodeMonitorMgr.StartMonitoring(nodeUUID, nodeIP, grpcPort); err != nil {
 		logrus.WithError(err).Warnf("Failed to start monitoring node %s", nodeUUID)
 		return
 	}
 	go s.nodeMonitorMgr.FetchInitialNicModel(nodeUUID, s.etcd)
-	go s.nodeMonitorMgr.RepublishPPPoEStatus(context.Background(), nodeUUID)
+	go s.nodeMonitorMgr.RepublishConfigStatus(context.Background(), nodeUUID)
 }
 
 func (s *GrpcServer) UnregisterNode(ctx context.Context, req *controllerpb.NodeRegisterRequest) (*emptypb.Empty, error) {
