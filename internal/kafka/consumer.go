@@ -2,9 +2,11 @@
 // controller's PostgreSQL tables (plan B-6). It is the single writer of
 // pppoe_status and node_events, replacing the old etcd failed_events path.
 //
-// Delivery is at-least-once: an offset is committed only after its event has
+// Delivery is at-least-once: an offset is acknowledged only after its event has
 // been durably written, and the DB writes are idempotent (event_time guards /
-// unique dedup key), so redelivery is safe.
+// unique dedup key), so redelivery is safe. Acknowledged offsets are flushed to
+// the broker in batches, which only ever widens the replay window — never the
+// other way round.
 package kafka
 
 import (
@@ -29,6 +31,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -40,6 +44,14 @@ const (
 	infraRetryInitialBackoff = 2 * time.Second
 	infraRetryMaxBackoff     = 30 * time.Second
 	stallErrorThreshold      = 60 * time.Second
+
+	// commitInterval flushes acknowledged offsets to the broker in batches
+	// rather than paying a synchronous round trip per message, which is what
+	// limited a 100k-event republish burst to roughly 270 messages a second.
+	// An offset is still only handed over after its event has been durably
+	// written, so a crash before the next flush replays messages the projection
+	// already writes idempotently — the delivery guarantee is unchanged.
+	commitInterval = time.Second
 )
 
 var (
@@ -586,9 +598,9 @@ type Consumer struct {
 }
 
 // SetRepublishAll registers the callback Run invokes once per start, so a
-// controller restart refills pppoe_status from what the nodes currently see.
-// Without it the consumer only projects the events nodes send on their own.
-// Call it before Run.
+// controller restart refills pppoe_status and hsi_config_current from what the
+// nodes currently see. Without it the consumer only projects the events nodes
+// send on their own. Call it before Run.
 func (c *Consumer) SetRepublishAll(fn func(context.Context)) {
 	c.republishAll = fn
 }
@@ -618,11 +630,12 @@ func envOr(key, def string) string {
 // fastrg.node.events) in consumer group KAFKA_GROUP (default fastrg-controller).
 func NewConsumer(brokers []string, database *db.DB, etcdClient *storage.EtcdClient) *Consumer {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  brokers,
-		Topic:    envOr("KAFKA_TOPIC", defaultTopic),
-		GroupID:  envOr("KAFKA_GROUP", defaultGroupID),
-		MinBytes: 1,
-		MaxBytes: 10e6,
+		Brokers:        brokers,
+		Topic:          envOr("KAFKA_TOPIC", defaultTopic),
+		GroupID:        envOr("KAFKA_GROUP", defaultGroupID),
+		MinBytes:       1,
+		MaxBytes:       10e6,
+		CommitInterval: commitInterval,
 	})
 	return &Consumer{reader: reader, db: database, etcd: etcdClient}
 }
@@ -664,92 +677,216 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 		c.markFetch(time.Now())
 
-		// Retry the same message with exponential backoff. If the DB or etcd is
-		// unavailable, keep retrying this message without committing the offset.
-		// If the failure is eligible for dead-lettering, persist the message to
-		// DLQ before committing the offset.
-		const maxRetries = 5
-		backoff := 100 * time.Millisecond
-		infraBackoff := newInfraRetryBackoff()
-		stall := consumerStall{}
-		failed := false
-		for attempt := 1; ctx.Err() == nil; {
-			// Bound each attempt so clients that wait for an unavailable backend to
-			// reconnect return control to this retry loop. The outer consumer context
-			// still governs shutdown and no offset is committed on a timeout.
-			attemptCtx, cancelAttempt := context.WithTimeout(ctx, messageHandleTimeout)
-			err := c.handle(attemptCtx, m.Value)
-			cancelAttempt()
-			if err != nil {
-				failed = true
+		batch := c.collectBatch(ctx, m)
 
-				if isDatabaseUnavailable(err) || isEtcdUnavailable(err) {
-					source := "etcd"
-					if isDatabaseUnavailable(err) {
-						source = "database"
-					}
-					elapsed := stall.retry(source, time.Now())
-					entry := logrus.WithError(err).WithFields(logrus.Fields{
-						"source":        source,
-						"stall_seconds": elapsed.Seconds(),
-						"topic":         m.Topic,
-						"partition":     m.Partition,
-						"offset":        m.Offset,
-					})
-					if stallLogLevel(elapsed) == logrus.ErrorLevel {
-						entry.Error("kafka: infrastructure unavailable, retrying same message")
-					} else {
-						entry.Warn("kafka: infrastructure unavailable, retrying same message")
-					}
-					c.sleepFor(ctx, infraBackoff.Next())
-					continue
-				}
-
-				stall.reset()
-				infraBackoff.Reset()
-				logrus.WithError(err).Warnf("kafka: handle failed (attempt %d/%d), backing off %v",
-					attempt, maxRetries, backoff)
-				if attempt >= maxRetries {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-					backoff = time.Duration(float64(backoff) * 1.5) // exponential backoff
-					attempt++
-					continue
-				}
+		// A republish burst is thousands of PPPoE state events in a row, and one
+		// database round trip each is what makes it slow. When the whole batch is
+		// that kind of event it becomes a single write.
+		if c.writePPPoEBatch(ctx, batch) {
+			if err := c.reader.CommitMessages(ctx, batch...); err != nil {
+				logrus.WithError(err).Error("kafka: commit failed")
 			}
-			// Success
-			stall.reset()
-			infraBackoff.Reset()
-			failed = false
-			break
+			continue
 		}
 
-		// If still failed after retries, send to DLQ (database persistent queue).
-		if failed && ctx.Err() == nil {
-			logrus.Errorf("kafka: message failed after %d retries, sending to DLQ", maxRetries)
-			c.waitAndSendToDLQ(ctx, m)
-			stall.reset()
-		}
-		if ctx.Err() != nil {
-			return
-		}
-
-		if err := c.reader.CommitMessages(ctx, m); err != nil {
-			logrus.WithError(err).Error("kafka: commit failed")
+		for _, message := range batch {
+			if !c.handleOne(ctx, message) {
+				return
+			}
 		}
 	}
 }
 
+// maxBatchSize and batchLinger bound how much the consumer gathers before
+// writing. The linger only ever delays messages that arrive within it, so a
+// quiet topic still gets each event handled right away.
+const (
+	maxBatchSize = 500
+	batchLinger  = 50 * time.Millisecond
+)
+
+// collectBatch returns first plus whatever else is already waiting, stopping at
+// maxBatchSize messages or batchLinger, whichever comes first. Messages it does
+// not take stay in the reader for the next round.
+func (c *Consumer) collectBatch(ctx context.Context, first kafka.Message) []kafka.Message {
+	batch := make([]kafka.Message, 0, maxBatchSize)
+	batch = append(batch, first)
+
+	lingerCtx, cancel := context.WithTimeout(ctx, batchLinger)
+	defer cancel()
+
+	for len(batch) < maxBatchSize {
+		next, err := c.reader.FetchMessage(lingerCtx)
+		if err != nil {
+			// Nothing more is waiting, or the consumer is shutting down. Either
+			// way, what has been gathered is the batch.
+			return batch
+		}
+		batch = append(batch, next)
+	}
+	return batch
+}
+
+// writePPPoEBatch writes a batch that is nothing but PPPoE state events in one
+// statement, reporting whether it did.
+//
+// A false answer — a batch with any other kind of event in it, or a write that
+// failed — means the caller handles the messages one at a time instead. That
+// fallback is always safe: the batch write is idempotent, so re-handling a
+// message it already wrote settles on the same row.
+func (c *Consumer) writePPPoEBatch(ctx context.Context, batch []kafka.Message) bool {
+	if len(batch) < 2 || c.db == nil {
+		return false
+	}
+	rows, ok := pppoeRowsFromBatch(batch)
+	if !ok {
+		return false
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, messageHandleTimeout)
+	defer cancel()
+	if err := c.db.UpsertPPPoEStatusBatch(writeCtx, rows); err != nil {
+		logrus.WithError(err).Warn("kafka: batched PPPoE write failed, handling the batch one message at a time")
+		return false
+	}
+	return true
+}
+
+// subscriberKey identifies the pppoe_status row an event lands on.
+type subscriberKey struct {
+	nodeUUID string
+	userID   string
+}
+
+// pppoeRowsFromBatch turns a batch into the rows to write. ok is false as soon
+// as any message is not a PPPoE state change, because the rest of the batch then
+// needs the full handler.
+//
+// A burst can carry several transitions for one subscriber, but a single
+// statement may not touch the same row twice. Repeats are collapsed to the state
+// that would have survived one-at-a-time writes: the newest event_time, and
+// among equal timestamps the one that arrived last — the same tie-break the
+// row's event_time guard makes.
+func pppoeRowsFromBatch(batch []kafka.Message) ([]db.PPPoEStatusRow, bool) {
+	position := make(map[subscriberKey]int, len(batch))
+	rows := make([]db.PPPoEStatusRow, 0, len(batch))
+
+	for _, message := range batch {
+		var ev eventsv1.NodeEvent
+		if err := proto.Unmarshal(message.Value, &ev); err != nil {
+			return nil, false
+		}
+		change, ok := ev.GetPayload().(*eventsv1.NodeEvent_PppoeStateChange)
+		if !ok {
+			return nil, false
+		}
+
+		row := pppoeStatusRow(&ev, change.PppoeStateChange)
+		key := subscriberKey{nodeUUID: row.NodeUUID, userID: row.UserID}
+		if i, seen := position[key]; seen {
+			if !row.EventTime.Before(rows[i].EventTime) {
+				rows[i] = row
+			}
+			continue
+		}
+		position[key] = len(rows)
+		rows = append(rows, row)
+	}
+	return rows, true
+}
+
+// handleOne runs the full handler for one message and hands over its offset.
+// It reports false when the consumer is shutting down and the caller should
+// stop.
+func (c *Consumer) handleOne(ctx context.Context, m kafka.Message) bool {
+	// Retry the same message with exponential backoff. If the DB or etcd is
+	// unavailable, keep retrying this message without committing the offset.
+	// If the failure is eligible for dead-lettering, persist the message to
+	// DLQ before committing the offset.
+	const maxRetries = 5
+	backoff := 100 * time.Millisecond
+	infraBackoff := newInfraRetryBackoff()
+	stall := consumerStall{}
+	failed := false
+	for attempt := 1; ctx.Err() == nil; {
+		// Bound each attempt so clients that wait for an unavailable backend to
+		// reconnect return control to this retry loop. The outer consumer context
+		// still governs shutdown and no offset is committed on a timeout.
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, messageHandleTimeout)
+		err := c.handle(attemptCtx, m.Value)
+		cancelAttempt()
+		if err != nil {
+			failed = true
+
+			if isDatabaseUnavailable(err) || isEtcdUnavailable(err) {
+				source := "etcd"
+				if isDatabaseUnavailable(err) {
+					source = "database"
+				}
+				elapsed := stall.retry(source, time.Now())
+				entry := logrus.WithError(err).WithFields(logrus.Fields{
+					"source":        source,
+					"stall_seconds": elapsed.Seconds(),
+					"topic":         m.Topic,
+					"partition":     m.Partition,
+					"offset":        m.Offset,
+				})
+				if stallLogLevel(elapsed) == logrus.ErrorLevel {
+					entry.Error("kafka: infrastructure unavailable, retrying same message")
+				} else {
+					entry.Warn("kafka: infrastructure unavailable, retrying same message")
+				}
+				c.sleepFor(ctx, infraBackoff.Next())
+				continue
+			}
+
+			stall.reset()
+			infraBackoff.Reset()
+			logrus.WithError(err).Warnf("kafka: handle failed (attempt %d/%d), backing off %v",
+				attempt, maxRetries, backoff)
+			if attempt >= maxRetries {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(backoff):
+				backoff = time.Duration(float64(backoff) * 1.5) // exponential backoff
+				attempt++
+				continue
+			}
+		}
+		// Success
+		stall.reset()
+		infraBackoff.Reset()
+		failed = false
+		break
+	}
+
+	// If still failed after retries, send to DLQ (database persistent queue).
+	if failed && ctx.Err() == nil {
+		logrus.Errorf("kafka: message failed after %d retries, sending to DLQ", maxRetries)
+		c.waitAndSendToDLQ(ctx, m)
+		stall.reset()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+
+	// Hands the offset to the reader's commit loop, which flushes it within
+	// commitInterval; the message is already durably written by here.
+	if err := c.reader.CommitMessages(ctx, m); err != nil {
+		logrus.WithError(err).Error("kafka: commit failed")
+	}
+	return true
+}
+
 // beginSession starts the background work that belongs to one consuming
 // session: the health metrics sampler, and the single request that asks every
-// node to re-send its PPPoE state. The republish is the automatic repair for
-// the two losses that survive a delivery acknowledgement — a truncated Kafka
-// log and a rebuilt read model — and runs in the background so an unreachable
-// node cannot hold up consuming.
+// node to re-send its PPPoE state and the config it is running. The republish
+// is the automatic repair for the two losses that survive a delivery
+// acknowledgement — a truncated Kafka log and a rebuilt read model — and runs in
+// the background so an unreachable node cannot hold up consuming.
 func (c *Consumer) beginSession(ctx context.Context, cfg kafka.ReaderConfig, now time.Time) {
 	// The fetch age counts from here, so a consumer that never receives its
 	// first message is still measured.
@@ -956,147 +1093,10 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		return c.handleConfigOfflineEdit(ctx, &ev, p.ConfigOfflineEdit, eventTime)
 
 	case *eventsv1.NodeEvent_PppoeStateChange:
-		return wrapDatabaseError(c.db.UpsertPPPoEStatus(ctx, db.PPPoEStatusRow{
-			NodeUUID:        ev.GetNodeUuid(),
-			UserID:          ev.GetUserId(),
-			Phase:           phaseString(p.PppoeStateChange.GetPhase()),
-			HSIIPv4:         p.PppoeStateChange.GetHsiIpv4(),
-			HSIIPv4GW:       p.PppoeStateChange.GetHsiIpv4Gw(),
-			HSIIPv6:         p.PppoeStateChange.GetHsiIpv6(),
-			HSIIPv6PDPrefix: p.PppoeStateChange.GetHsiIpv6PdPrefix(),
-			HSIIPv6DNS:      p.PppoeStateChange.GetHsiIpv6Dns(),
-			ErrorMessage:    p.PppoeStateChange.GetErrorMessage(),
-			EventTime:       eventTime,
-		}))
+		return wrapDatabaseError(c.db.UpsertPPPoEStatus(ctx, pppoeStatusRow(&ev, p.PppoeStateChange)))
 
 	case *eventsv1.NodeEvent_ConfigApplyResult:
-		success := p.ConfigApplyResult.GetSuccess()
-		inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
-			NodeUUID:      ev.GetNodeUuid(),
-			UserID:        ev.GetUserId(),
-			EventType:     eventTypeString(ev.GetType()),
-			Action:        p.ConfigApplyResult.GetAction(),
-			Success:       &success,
-			ErrorCode:     p.ConfigApplyResult.GetErrorCode(),
-			ErrorMessage:  p.ConfigApplyResult.GetErrorMessage(),
-			CorrelationID: ev.GetCorrelationId(),
-			EventTime:     eventTime,
-		})
-		if err != nil {
-			return wrapDatabaseError(err)
-		}
-		if !inserted {
-			logrus.WithFields(logrus.Fields{
-				"node":           ev.GetNodeUuid(),
-				"user":           ev.GetUserId(),
-				"event_type":     eventTypeString(ev.GetType()),
-				"correlation_id": ev.GetCorrelationId(),
-			}).Info("kafka: duplicate node event ignored")
-		}
-
-		// If config apply succeeded, update hsi_config_current to mark this version
-		// as "node-confirmed-success". hsi_config_current is now the source of truth
-		// for "what config has the node successfully applied", NOT "etcd's latest config".
-		if success {
-			// Update hsi_config_current only when etcd is configured; in unit tests
-			// the client may be nil (etcd not needed for projection-only testing).
-			if c.etcd == nil {
-				logrus.Warnf("kafka: etcd not configured, skipping hsi_config_current update for node=%s user=%s",
-					ev.GetNodeUuid(), ev.GetUserId())
-			} else {
-				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
-				resp, err := c.etcd.Client().Get(ctx, etcdKey)
-				if err != nil {
-					logrus.WithError(err).Error("kafka: failed to read current config from etcd after CONFIG_APPLY_OK")
-					return wrapEtcdError(err)
-				}
-				if len(resp.Kvs) > 0 {
-					kv := resp.Kvs[0]
-					row := db.HSIConfigRow{
-						NodeUUID:        ev.GetNodeUuid(),
-						UserID:          ev.GetUserId(),
-						ConfigJSON:      kv.Value,
-						ModRevision:     kv.ModRevision,
-						ResourceVersion: "",
-						UpdatedBy:       "node",
-						UpdatedAt:       &eventTime,
-						Action:          db.ActionUpsert,
-						DesireStatus:    "",
-					}
-					// Update current state and record success atomically. The operation
-					// remains idempotent when the consumer retries the same event.
-					if err := c.db.UpsertCurrentWithHistory(ctx, row, "success"); err != nil {
-						logrus.WithError(err).Error("kafka: failed to update current config and success history after CONFIG_APPLY_OK")
-						return wrapDatabaseError(err)
-					}
-					logrus.Infof("kafka: config apply succeeded for node=%s user=%s, updated hsi_config_current",
-						ev.GetNodeUuid(), ev.GetUserId())
-				} else {
-					logrus.Warnf("kafka: CONFIG_APPLY_OK for node=%s user=%s but config not found in etcd",
-						ev.GetNodeUuid(), ev.GetUserId())
-				}
-			} // end c.etcd != nil
-		}
-
-		// If config apply failed, automatically rollback to the last successful version
-		// to prevent invalid config from remaining in etcd.
-		if !success {
-			logrus.Warnf("kafka: config apply failed for node=%s user=%s, rolling back to last successful version",
-				ev.GetNodeUuid(), ev.GetUserId())
-
-			// Find the last successful config from DB history
-			prevConfig, err := c.db.GetLastSuccessfulConfig(ctx, ev.GetNodeUuid(), ev.GetUserId())
-			if err != nil {
-				logrus.WithError(err).Error("kafka: failed to query last successful config")
-				return wrapDatabaseError(err)
-			}
-
-			// Skip etcd rollback when etcd is not configured (e.g. unit tests).
-			if c.etcd == nil {
-				logrus.Warnf("kafka: etcd not configured, skipping rollback write for node=%s user=%s",
-					ev.GetNodeUuid(), ev.GetUserId())
-			} else {
-				etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
-				rbErr := c.etcd.CASWithRevision(ctx, etcdKey, func(current []byte, modRevision int64) (storage.CASResult, error) {
-					return guardedRollbackMutation(prevConfig, current, rollbackGuardInputs{
-						currentModRevision: modRevision,
-						appliedRV:          p.ConfigApplyResult.GetAppliedResourceVersion(),
-						correlationID:      ev.GetCorrelationId(),
-					})
-				})
-				if rbErr != nil {
-					if !errors.Is(rbErr, errRollbackSuperseded) {
-						logrus.WithError(rbErr).Error("kafka: failed to roll back config in etcd")
-						return wrapEtcdError(rbErr)
-					}
-
-					entry := logrus.WithError(rbErr).WithFields(logrus.Fields{
-						"node": ev.GetNodeUuid(),
-						"user": ev.GetUserId(),
-					})
-					var skipErr *rollbackSkipError
-					if errors.As(rbErr, &skipErr) && skipErr.warn {
-						entry.Warn("kafka: skipped config rollback because resourceVersion metadata is unusable")
-					}
-					entry.Info("kafka: skipped config rollback because the failed version is no longer current")
-				} else if prevConfig == nil {
-					logrus.Infof("kafka: invalid config deleted from etcd for node=%s user=%s (no successful version)",
-						ev.GetNodeUuid(), ev.GetUserId())
-				} else {
-					logrus.Infof("kafka: config rolled back to last successful version in etcd for node=%s user=%s",
-						ev.GetNodeUuid(), ev.GetUserId())
-				}
-			}
-
-			// Record the failure in DB history
-			if rbErr := c.db.RollbackToLastSuccessful(ctx, ev.GetNodeUuid(), ev.GetUserId(),
-				p.ConfigApplyResult.GetErrorMessage()); rbErr != nil {
-				logrus.WithError(rbErr).Error("kafka: failed to record rollback in DB")
-				return wrapDatabaseError(rbErr)
-			}
-		}
-
-		return nil
+		return c.handleConfigApplyResult(ctx, &ev, p.ConfigApplyResult, eventTime)
 
 	case *eventsv1.NodeEvent_RuntimeError:
 		inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
@@ -1124,6 +1124,216 @@ func (c *Consumer) handle(ctx context.Context, value []byte) error {
 		logrus.WithField("type", ev.GetType()).Warn("kafka: event with no/unknown payload, skipping")
 		return nil
 	}
+}
+
+// handleConfigApplyResult projects one config-apply result.
+//
+// A restated success — a node answering a republish request with the config it
+// was already running — only refreshes hsi_config_current. It writes no audit
+// row, because nothing happened on the node, and a sweep over every subscriber
+// would otherwise fill node_events with transitions that never occurred.
+//
+// Every other result keeps the original behaviour: the audit row is written
+// first, a success also refreshes the current view, and a failure rolls the
+// config in etcd back to the last successful version. A republish that had to
+// re-apply the config reports the real attempt with republished unset, so it
+// takes this ordinary path, rollback included.
+func (c *Consumer) handleConfigApplyResult(
+	ctx context.Context,
+	ev *eventsv1.NodeEvent,
+	res *eventsv1.ConfigApplyResult,
+	eventTime time.Time,
+) error {
+	success := res.GetSuccess()
+	restateOnly := res.GetRepublished() && success
+
+	if !restateOnly {
+		inserted, err := c.db.InsertNodeEvent(ctx, db.NodeEventRow{
+			NodeUUID:      ev.GetNodeUuid(),
+			UserID:        ev.GetUserId(),
+			EventType:     eventTypeString(ev.GetType()),
+			Action:        res.GetAction(),
+			Success:       &success,
+			ErrorCode:     res.GetErrorCode(),
+			ErrorMessage:  res.GetErrorMessage(),
+			CorrelationID: ev.GetCorrelationId(),
+			EventTime:     eventTime,
+		})
+		if err != nil {
+			return wrapDatabaseError(err)
+		}
+		if !inserted {
+			logrus.WithFields(logrus.Fields{
+				"node":           ev.GetNodeUuid(),
+				"user":           ev.GetUserId(),
+				"event_type":     eventTypeString(ev.GetType()),
+				"correlation_id": ev.GetCorrelationId(),
+			}).Info("kafka: duplicate node event ignored")
+		}
+	}
+
+	// If config apply succeeded, update hsi_config_current to mark this version
+	// as "node-confirmed-success". hsi_config_current is now the source of truth
+	// for "what config has the node successfully applied", NOT "etcd's latest config".
+	if success {
+		// Update hsi_config_current only when etcd is configured; in unit tests
+		// the client may be nil (etcd not needed for projection-only testing).
+		if c.etcd == nil {
+			logrus.Warnf("kafka: etcd not configured, skipping hsi_config_current update for node=%s user=%s",
+				ev.GetNodeUuid(), ev.GetUserId())
+		} else {
+			etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+			confirmed, found, err := c.readConfirmedConfig(ctx, etcdKey, res.GetAppliedModRevision())
+			if err != nil {
+				logrus.WithError(err).Error("kafka: failed to read the confirmed config from etcd after CONFIG_APPLY_OK")
+				return err
+			}
+			if found {
+				row := db.HSIConfigRow{
+					NodeUUID:        ev.GetNodeUuid(),
+					UserID:          ev.GetUserId(),
+					ConfigJSON:      confirmed.value,
+					ModRevision:     confirmed.modRevision,
+					ResourceVersion: "",
+					UpdatedBy:       "node",
+					UpdatedAt:       &eventTime,
+					Action:          db.ActionUpsert,
+					DesireStatus:    "",
+				}
+				// Update current state and record success atomically. The operation
+				// remains idempotent when the consumer retries the same event, and
+				// the row's mod_revision guard drops an attestation that arrives
+				// out of order behind a newer one already recorded.
+				if err := c.db.UpsertCurrentWithHistory(ctx, row, "success"); err != nil {
+					logrus.WithError(err).Error("kafka: failed to update current config and success history after CONFIG_APPLY_OK")
+					return wrapDatabaseError(err)
+				}
+				logrus.Infof("kafka: config apply succeeded for node=%s user=%s at revision %d, updated hsi_config_current",
+					ev.GetNodeUuid(), ev.GetUserId(), confirmed.modRevision)
+			} else {
+				logrus.Warnf("kafka: CONFIG_APPLY_OK for node=%s user=%s but config not found in etcd",
+					ev.GetNodeUuid(), ev.GetUserId())
+			}
+		} // end c.etcd != nil
+	}
+
+	// If config apply failed, automatically rollback to the last successful version
+	// to prevent invalid config from remaining in etcd.
+	if !success {
+		logrus.Warnf("kafka: config apply failed for node=%s user=%s, rolling back to last successful version",
+			ev.GetNodeUuid(), ev.GetUserId())
+
+		// Find the last successful config from DB history
+		prevConfig, err := c.db.GetLastSuccessfulConfig(ctx, ev.GetNodeUuid(), ev.GetUserId())
+		if err != nil {
+			logrus.WithError(err).Error("kafka: failed to query last successful config")
+			return wrapDatabaseError(err)
+		}
+
+		// Skip etcd rollback when etcd is not configured (e.g. unit tests).
+		if c.etcd == nil {
+			logrus.Warnf("kafka: etcd not configured, skipping rollback write for node=%s user=%s",
+				ev.GetNodeUuid(), ev.GetUserId())
+		} else {
+			etcdKey := fmt.Sprintf("configs/%s/hsi/%s", ev.GetNodeUuid(), ev.GetUserId())
+			rbErr := c.etcd.CASWithRevision(ctx, etcdKey, func(current []byte, modRevision int64) (storage.CASResult, error) {
+				return guardedRollbackMutation(prevConfig, current, rollbackGuardInputs{
+					currentModRevision: modRevision,
+					appliedRV:          res.GetAppliedResourceVersion(),
+					correlationID:      ev.GetCorrelationId(),
+				})
+			})
+			if rbErr != nil {
+				if !errors.Is(rbErr, errRollbackSuperseded) {
+					logrus.WithError(rbErr).Error("kafka: failed to roll back config in etcd")
+					return wrapEtcdError(rbErr)
+				}
+
+				entry := logrus.WithError(rbErr).WithFields(logrus.Fields{
+					"node": ev.GetNodeUuid(),
+					"user": ev.GetUserId(),
+				})
+				var skipErr *rollbackSkipError
+				if errors.As(rbErr, &skipErr) && skipErr.warn {
+					entry.Warn("kafka: skipped config rollback because resourceVersion metadata is unusable")
+				}
+				entry.Info("kafka: skipped config rollback because the failed version is no longer current")
+			} else if prevConfig == nil {
+				logrus.Infof("kafka: invalid config deleted from etcd for node=%s user=%s (no successful version)",
+					ev.GetNodeUuid(), ev.GetUserId())
+			} else {
+				logrus.Infof("kafka: config rolled back to last successful version in etcd for node=%s user=%s",
+					ev.GetNodeUuid(), ev.GetUserId())
+			}
+		}
+
+		// Record the failure in DB history
+		if rbErr := c.db.RollbackToLastSuccessful(ctx, ev.GetNodeUuid(), ev.GetUserId(),
+			res.GetErrorMessage()); rbErr != nil {
+			logrus.WithError(rbErr).Error("kafka: failed to record rollback in DB")
+			return wrapDatabaseError(rbErr)
+		}
+	}
+
+	return nil
+}
+
+// confirmedConfig is the config version a CONFIG_APPLY_OK confirms, together
+// with that version's content.
+type confirmedConfig struct {
+	value       []byte
+	modRevision int64
+}
+
+// readConfirmedConfig resolves which config version the node confirmed running.
+//
+// A node that attests a ModRevision is the authority on the answer: that exact
+// revision is recorded as confirmed and its content is read back at that
+// revision. The controller therefore never mistakes a config it pushed after
+// the node reported for one the node has actually applied.
+//
+// Compaction is the one thing that can make the attested revision unreadable.
+// The content then comes from whatever etcd currently holds and the mismatch is
+// logged, but the attested revision is still what gets recorded — losing the old
+// content does not put the node's word about which version it runs in doubt.
+//
+// A node that attests nothing sends 0, and the controller reads the current
+// value; that is all an older node makes possible.
+//
+// found is false when etcd holds no config at all for the key.
+func (c *Consumer) readConfirmedConfig(ctx context.Context, key string, attested int64) (confirmedConfig, bool, error) {
+	compacted := false
+
+	if attested > 0 {
+		resp, err := c.etcd.Client().Get(ctx, key, clientv3.WithRev(attested))
+		if err == nil {
+			if len(resp.Kvs) == 0 {
+				return confirmedConfig{}, false, nil
+			}
+			return confirmedConfig{value: resp.Kvs[0].Value, modRevision: attested}, true, nil
+		}
+		if !errors.Is(err, rpctypes.ErrCompacted) {
+			// Anything else is etcd being unavailable, which must be retried
+			// rather than quietly answered with a different revision.
+			return confirmedConfig{}, false, wrapEtcdError(err)
+		}
+		compacted = true
+	}
+
+	resp, err := c.etcd.Client().Get(ctx, key)
+	if err != nil {
+		return confirmedConfig{}, false, wrapEtcdError(err)
+	}
+	if len(resp.Kvs) == 0 {
+		return confirmedConfig{}, false, nil
+	}
+
+	if compacted {
+		logrus.Warnf("kafka: attested config revision %d for %s has been compacted; recording it as confirmed but storing the current content (%d) instead",
+			attested, key, resp.Kvs[0].ModRevision)
+		return confirmedConfig{value: resp.Kvs[0].Value, modRevision: attested}, true, nil
+	}
+	return confirmedConfig{value: resp.Kvs[0].Value, modRevision: resp.Kvs[0].ModRevision}, true, nil
 }
 
 func (c *Consumer) handleConfigOfflineEdit(
@@ -1282,6 +1492,24 @@ func (c *Consumer) sendToDLQ(ctx context.Context, m kafka.Message) error {
 	logrus.Warnf("kafka: message sent to DLQ (dlq_id=%d topic=%s partition=%d offset=%d)",
 		dlqID, m.Topic, m.Partition, m.Offset)
 	return nil
+}
+
+// pppoeStatusRow maps one PPPoE state event onto its pppoe_status row. Both the
+// one-at-a-time and the batched write go through it, so the two cannot drift
+// apart.
+func pppoeStatusRow(ev *eventsv1.NodeEvent, change *eventsv1.PPPoEStateChange) db.PPPoEStatusRow {
+	return db.PPPoEStatusRow{
+		NodeUUID:        ev.GetNodeUuid(),
+		UserID:          ev.GetUserId(),
+		Phase:           phaseString(change.GetPhase()),
+		HSIIPv4:         change.GetHsiIpv4(),
+		HSIIPv4GW:       change.GetHsiIpv4Gw(),
+		HSIIPv6:         change.GetHsiIpv6(),
+		HSIIPv6PDPrefix: change.GetHsiIpv6PdPrefix(),
+		HSIIPv6DNS:      change.GetHsiIpv6Dns(),
+		ErrorMessage:    change.GetErrorMessage(),
+		EventTime:       time.Unix(ev.GetTimestamp(), 0).UTC(),
+	}
 }
 
 // phaseString maps the PPPoEPhase enum to the stored phase string.

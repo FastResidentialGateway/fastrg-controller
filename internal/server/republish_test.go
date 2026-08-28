@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"sync/atomic"
@@ -20,17 +21,73 @@ import (
 // republish requests and can answer like a node too old to know the RPC.
 type republishNodeServer struct {
 	fastrgnodepb.UnimplementedFastrgServiceServer
-	calls      atomic.Int32
-	eventCount uint32
-	fail       bool
+	calls       atomic.Int32
+	configCalls atomic.Int32
+	eventCount  uint32
+	fail        bool
+	// handleDelay is how long each request takes to answer, so a test can tell
+	// concurrent requests from serial ones.
+	handleDelay time.Duration
+	// probe, when set, is shared by every node in a test and records how many
+	// requests were being served across all of them at once.
+	probe *concurrencyProbe
+}
+
+// concurrencyProbe counts requests in flight across a whole set of fake nodes
+// and remembers the highest count reached.
+type concurrencyProbe struct {
+	inFlight atomic.Int32
+	peak     atomic.Int32
+}
+
+func (p *concurrencyProbe) enter() {
+	current := p.inFlight.Add(1)
+	for {
+		peak := p.peak.Load()
+		if current <= peak || p.peak.CompareAndSwap(peak, current) {
+			return
+		}
+	}
+}
+
+func (p *concurrencyProbe) leave() { p.inFlight.Add(-1) }
+
+func (s *republishNodeServer) enter() {
+	if s.probe != nil {
+		s.probe.enter()
+	}
+}
+
+func (s *republishNodeServer) leave() {
+	if s.probe != nil {
+		s.probe.leave()
+	}
 }
 
 func (s *republishNodeServer) RepublishPPPoEStatus(context.Context, *emptypb.Empty) (*fastrgnodepb.RepublishPPPoEStatusReply, error) {
 	s.calls.Add(1)
+	s.enter()
+	defer s.leave()
+	if s.handleDelay > 0 {
+		time.Sleep(s.handleDelay)
+	}
 	if s.fail {
 		return nil, status.Error(codes.Unimplemented, "method RepublishPPPoEStatus not implemented")
 	}
 	return &fastrgnodepb.RepublishPPPoEStatusReply{EventCount: s.eventCount}, nil
+}
+
+func (s *republishNodeServer) RepublishConfigStatus(context.Context, *emptypb.Empty) (*fastrgnodepb.RepublishConfigStatusReply, error) {
+	s.configCalls.Add(1)
+	s.enter()
+	defer s.leave()
+	if s.handleDelay > 0 {
+		time.Sleep(s.handleDelay)
+	}
+	if s.fail {
+		return nil, status.Error(codes.Unimplemented, "method RepublishConfigStatus not implemented")
+	}
+	return &fastrgnodepb.RepublishConfigStatusReply{EventCount: s.eventCount}, nil
 }
 
 // startRepublishNode serves node until the test ends and returns its address.
@@ -73,6 +130,20 @@ func waitForCalls(t *testing.T, node *republishNodeServer, want int32) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("node received %d republish request(s), want %d", node.calls.Load(), want)
+}
+
+// waitForConfigCalls waits briefly for the node to receive want config status
+// requests.
+func waitForConfigCalls(t *testing.T, node *republishNodeServer, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.configCalls.Load() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("node received %d config status request(s), want %d", node.configCalls.Load(), want)
 }
 
 // TestRepublishPPPoEStatusCallsNode: a monitored node is asked once; an
@@ -122,9 +193,57 @@ func TestRepublishPPPoEStatusOldNodeIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestAfterNodeRegisteredRepublishes: a successful registration asks the node
-// to re-send its PPPoE state.
-func TestAfterNodeRegisteredRepublishes(t *testing.T) {
+// TestRepublishConfigStatusCallsNode: a monitored node is asked once; an
+// unmonitored node is reported instead of dialled.
+func TestRepublishConfigStatusCallsNode(t *testing.T) {
+	node := &republishNodeServer{eventCount: 4}
+	host, port := startRepublishNode(t, node)
+
+	manager := NewNodeMonitorManager(nil)
+	const nodeUUID = "config-status-node"
+	if err := manager.StartMonitoring(nodeUUID, host, port); err != nil {
+		t.Fatalf("StartMonitoring: %v", err)
+	}
+	t.Cleanup(func() { manager.StopMonitoring(nodeUUID) })
+
+	if err := manager.RepublishConfigStatus(context.Background(), nodeUUID); err != nil {
+		t.Fatalf("RepublishConfigStatus: %v", err)
+	}
+	if got := node.configCalls.Load(); got != 1 {
+		t.Fatalf("node received %d config status request(s), want 1", got)
+	}
+
+	if err := manager.RepublishConfigStatus(context.Background(), "not-monitored"); err != errNodeNotMonitored {
+		t.Fatalf("RepublishConfigStatus on unmonitored node = %v, want %v", err, errNodeNotMonitored)
+	}
+}
+
+// TestRepublishConfigStatusOldNodeIsNotRetried: a node that does not implement
+// the RPC reports the failure and is asked exactly once.
+func TestRepublishConfigStatusOldNodeIsNotRetried(t *testing.T) {
+	node := &republishNodeServer{fail: true}
+	host, port := startRepublishNode(t, node)
+
+	manager := NewNodeMonitorManager(nil)
+	const nodeUUID = "old-config-node"
+	if err := manager.StartMonitoring(nodeUUID, host, port); err != nil {
+		t.Fatalf("StartMonitoring: %v", err)
+	}
+	t.Cleanup(func() { manager.StopMonitoring(nodeUUID) })
+
+	err := manager.RepublishConfigStatus(context.Background(), nodeUUID)
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("RepublishConfigStatus error = %v, want Unimplemented", err)
+	}
+	if got := node.configCalls.Load(); got != 1 {
+		t.Fatalf("node received %d config status request(s), want exactly 1 (no retry)", got)
+	}
+}
+
+// TestAfterNodeRegisteredAsksForConfigStatus: registration asks the node which
+// config it is running, and does not ask for PPPoE state — a node that has just
+// registered has no sessions to report.
+func TestAfterNodeRegisteredAsksForConfigStatus(t *testing.T) {
 	node := &republishNodeServer{eventCount: 3}
 	host, port := startRepublishNode(t, node)
 
@@ -136,10 +255,60 @@ func TestAfterNodeRegisteredRepublishes(t *testing.T) {
 	gs := &GrpcServer{nodeMonitorMgr: manager}
 	gs.afterNodeRegistered(nodeUUID, host, port)
 
-	waitForCalls(t, node, 1)
+	waitForConfigCalls(t, node, 1)
 	time.Sleep(200 * time.Millisecond)
-	if got := node.calls.Load(); got != 1 {
-		t.Fatalf("node received %d republish request(s), want exactly 1", got)
+	if got := node.configCalls.Load(); got != 1 {
+		t.Fatalf("node received %d config status request(s), want exactly 1", got)
+	}
+	if got := node.calls.Load(); got != 0 {
+		t.Fatalf("node received %d PPPoE republish request(s), want 0", got)
+	}
+}
+
+// TestRepublishAllIsBounded: the per-node work RepublishAll runs covers all 100
+// nodes, keeps at most republishConcurrency requests in flight, and finishes far
+// sooner than asking them one at a time would.
+func TestRepublishAllIsBounded(t *testing.T) {
+	const (
+		nodeCount   = 100
+		handleDelay = 20 * time.Millisecond
+	)
+
+	manager := NewNodeMonitorManager(nil)
+	probe := &concurrencyProbe{}
+	nodes := make([]*republishNodeServer, nodeCount)
+	targets := make([]republishTarget, nodeCount)
+	for i := range nodes {
+		nodes[i] = &republishNodeServer{eventCount: 1, handleDelay: handleDelay, probe: probe}
+		host, port := startRepublishNode(t, nodes[i])
+		uuid := fmt.Sprintf("bounded-node-%03d", i)
+		targets[i] = republishTarget{nodeUUID: uuid, nodeIP: host, grpcPort: port}
+		t.Cleanup(func() { manager.StopMonitoring(uuid) })
+	}
+
+	// Each node answers two requests, so asking them one at a time would take
+	// nodeCount * 2 * handleDelay.
+	serial := time.Duration(nodeCount) * 2 * handleDelay
+	start := time.Now()
+	runBounded(context.Background(), targets, func(target republishTarget) {
+		manager.republishNode(context.Background(), target)
+	})
+	elapsed := time.Since(start)
+
+	for i, node := range nodes {
+		if got := node.calls.Load(); got != 1 {
+			t.Fatalf("node %d received %d PPPoE republish request(s), want 1", i, got)
+		}
+		if got := node.configCalls.Load(); got != 1 {
+			t.Fatalf("node %d received %d config status request(s), want 1", i, got)
+		}
+	}
+
+	if peak := probe.peak.Load(); peak > republishConcurrency {
+		t.Fatalf("%d requests were in flight at once, want at most %d", peak, republishConcurrency)
+	}
+	if elapsed > serial/5 {
+		t.Fatalf("republish of %d nodes took %v, want well under the serial %v", nodeCount, elapsed, serial)
 	}
 }
 

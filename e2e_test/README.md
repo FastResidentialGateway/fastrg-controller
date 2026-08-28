@@ -82,6 +82,7 @@ bash run_e2e_test.sh --phase 3
 bash run_e2e_test.sh --phase 4
 bash run_e2e_test.sh --phase 5
 bash run_e2e_test.sh --phase 6
+bash run_e2e_test.sh --phase 7
 ```
 
 Override hosts and compose directory:
@@ -213,9 +214,10 @@ What it verifies:
   the connected sessions are still `connected`
 - the controller logs the republish it ran, covering at least as many events as
   there are known rows
-- after the node restarts, the controller logs another republish (this one
-  triggered by the node registering again)
-- the rows are written again and settle back to `connected`
+- after the node restarts, its sessions come back and the rows return to
+  `connected`, written by the node's own reports; the controller no longer
+  asks for PPPoE state at registration, and the phase asserts no such
+  republish happened
 - with PostgreSQL stopped, dropping the PPPoE sessions leaves the table claiming
   `connected` while reality says otherwise; after the controller is restarted and
   PostgreSQL comes back, every row converges to `disconnected` with a newer
@@ -228,6 +230,58 @@ All checks are read-only queries; the phase never deletes or truncates rows.
 This phase stops the BRAS on purpose, so it only runs against a `dpdk-bras` it
 started itself. If one is already running it skips, the same way it skips when
 another fastrg process is already on the node.
+
+### Phase 7: Config Apply Confirmation
+
+Scenario: with a **real** node connected, make a HSI config-apply result disappear —
+push a config with Kafka stopped, let the node apply it, then restart the node so
+the undelivered result is gone for good — and verify the controller notices the
+gap on its own and asks the node to restate what it is running.
+
+What it verifies:
+
+- the config the node loaded straight from etcd at boot, a path that reports
+  nothing, still ends up confirmed in `hsi_config_current` DB table
+- after the lost apply, `hsi_config_current` DB table is demonstrably still recording the
+  older `mod_revision` — without this the rest of the phase would prove nothing
+- once Kafka is back, `hsi_config_current` DB table converges to the pushed
+  `mod_revision`
+- `node_events` does not grow: a node restating a config it was already running
+  is not a change, so it must not be audited as one
+
+All checks are read-only queries; the phase never deletes or truncates rows.
+
+It skips when another fastrg process is already on the node, the same way phase 6
+does.
+
+## Tools
+
+`tools/consumer_load` measures how long the Kafka consumer needs to work
+through a fleet-sized burst of PPPoE state events — what a republish of every
+node looks like from the database's side. It drives the real consumer against a
+real Kafka and a real PostgreSQL, so the number it prints is the number the
+controller would get.
+
+```bash
+go run ./e2e_test/tools/consumer_load \
+  -brokers 127.0.0.1:9092 \
+  -dsn 'postgres://fastrg:fastrg@127.0.0.1:5432/fastrg?sslmode=disable' \
+  -nodes 100 -users 1000
+```
+
+Point it at a throwaway stack, never at anything real. It creates its own topic
+and consumer group per run and writes rows under a per-run node prefix, so runs
+never read or rewrite each other — but it does write to whatever database you
+give it, and it never deletes anything it wrote.
+
+The last line is the result, in the form the run should be judged on:
+
+```text
+RESULT OK events=100000 rows=100000 produce_seconds=0.6 consume_seconds=14.1 rows_per_second=7113 peak_fetch_age_seconds=0.0
+```
+
+A run without a `RESULT` line did not finish. `RESULT TIMEOUT` means the
+consumer never caught up within `-timeout`.
 
 ## Helpers
 
