@@ -71,6 +71,13 @@ message ConfigApplyResult {
   // the controller MUST tolerate the empty value and fall back to the
   // transitional guard — a missing field never rejects the event.
   string applied_resource_version = 5;
+
+  // Indicates whether the reply is a republish or not
+  bool republished = 6;
+
+  // etcd ModRevision of the config the node applied. 0 = not reported: fall 
+  // back to reading etcd's current value.
+  int64 applied_mod_revision = 7;
 }
 
 // Offline-edit report (EVENT_TYPE_CONFIG_OFFLINE_EDIT)

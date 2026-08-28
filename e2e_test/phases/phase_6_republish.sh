@@ -2,12 +2,12 @@
 
 # Phase 6: PPPoE status republish
 # Brings a real fastrg node up against the e2e controller and then checks the two
-# triggers that make a node re-send its PPPoE state: restarting the controller
-# (the Kafka consumer asks every registered node once per session) and restarting
-# the node (re-registration asks that one node). A republished event carries a
-# newer event_time, and the upsert only overwrites a row when the incoming
-# event_time is newer — so "every row's event_time moved forward" is the
-# observable proof that the rows were actually rewritten.
+# ways pppoe_status catches up with the node: restarting the controller, whose
+# Kafka consumer asks every registered node once per session, and restarting the
+# node, which reports each session itself as it dials it. Either way the rows are
+# rewritten with a newer event_time, and the upsert only overwrites a row when
+# the incoming event_time is newer — so "every row's event_time moved forward" is
+# the observable proof that the rows were actually rewritten.
 # The last part is the recovery this exists for: with the database down the
 # sessions are dropped, so the table is left claiming "connected" while reality
 # says otherwise; restarting the controller has to bring the table back in line
@@ -314,18 +314,13 @@ test_pppoe_republish() {
     fi
     log_success "fastrg node process restarted"
 
-    # Step 10: The re-registration must produce its own republish, and the table
-    # must converge back to the same rows: newer event_time everywhere and the
-    # sessions connected again (they pass through disconnected while the node is
-    # down, so only the settled state is asserted).
-    log_info "Step 10: Verifying the re-registration republish"
-    if ! wait_for "[ \"\$(republish_log_count)\" -gt $log_count_before ]" 120 3; then
-        log_error "Controller logged no republish for node $NODE_UUID after it re-registered"
-        dump_republish_evidence
-        return 1
-    fi
-    log_success "Controller logged a republish triggered by the node registration"
-
+    # Step 10: A restarted node reports its own sessions as it dials them, so the
+    # table must converge back to the same rows on its own: newer event_time
+    # everywhere and the sessions connected again (they pass through disconnected
+    # while the node is down, so only the settled state is asserted). Nothing on
+    # the controller asks for PPPoE state at registration — a node that has just
+    # registered has no sessions to report — so the republish log must not move.
+    log_info "Step 10: Verifying the node's own reporting after the restart"
     if ! wait_for "rows_republished" 180 3; then
         log_error "pppoe_status did not converge back after the node restart"
         log_error "Baseline rows:"
@@ -334,6 +329,14 @@ test_pppoe_republish() {
         return 1
     fi
     log_success "All $baseline_row_count row(s) rewritten; every session that was connected is connected again"
+
+    log_count_after=$(republish_log_count)
+    if [ "${log_count_after:-0}" -ne "${log_count_before:-0}" ]; then
+        log_error "Controller drove a PPPoE republish for node $NODE_UUID after it re-registered (count $log_count_before -> $log_count_after); the rows should come from the node's own reporting"
+        dump_republish_evidence
+        return 1
+    fi
+    log_success "The rows came from the node's own reporting, with no controller-driven republish"
 
     # Step 11: Drive the table out of sync with reality. With the database down
     # the consumer cannot record anything, so when the sessions drop the rows

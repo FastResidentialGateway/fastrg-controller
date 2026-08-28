@@ -79,6 +79,79 @@ func (d *DB) UpsertPPPoEStatus(ctx context.Context, row PPPoEStatusRow) error {
 	return observe("upsert_pppoe_status", err)
 }
 
+// upsertPPPoEStatusBatchSQL writes many rows in one statement. It is the
+// multi-row form of the query in UpsertPPPoEStatus, down to the same event_time
+// guard, so a batched write and a single write settle out-of-order deliveries
+// identically.
+//
+// PostgreSQL refuses to let one ON CONFLICT statement touch the same row twice,
+// so the caller must hand over at most one row per (node, user) — see
+// UpsertPPPoEStatusBatch.
+const upsertPPPoEStatusBatchSQL = `
+	INSERT INTO pppoe_status
+		(node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, hsi_ipv6,
+		 hsi_ipv6_pd_prefix, hsi_ipv6_dns, error_message, event_time, updated_at)
+	SELECT node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, hsi_ipv6,
+	       hsi_ipv6_pd_prefix, hsi_ipv6_dns, error_message, event_time, now()
+	FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
+	            $6::text[], $7::text[], $8::text[], $9::text[], $10::timestamptz[])
+		AS batch(node_uuid, user_id, phase, hsi_ipv4, hsi_ipv4_gw, hsi_ipv6,
+		         hsi_ipv6_pd_prefix, hsi_ipv6_dns, error_message, event_time)
+	ON CONFLICT (node_uuid, user_id) DO UPDATE SET
+		phase              = EXCLUDED.phase,
+		hsi_ipv4           = EXCLUDED.hsi_ipv4,
+		hsi_ipv4_gw        = EXCLUDED.hsi_ipv4_gw,
+		hsi_ipv6           = EXCLUDED.hsi_ipv6,
+		hsi_ipv6_pd_prefix = EXCLUDED.hsi_ipv6_pd_prefix,
+		hsi_ipv6_dns       = EXCLUDED.hsi_ipv6_dns,
+		error_message      = EXCLUDED.error_message,
+		event_time         = EXCLUDED.event_time,
+		updated_at         = now()
+	WHERE pppoe_status.event_time <= EXCLUDED.event_time`
+
+// UpsertPPPoEStatusBatch stores many PPPoE states in one round trip. Writing a
+// row at a time costs a database round trip and a WAL flush each, which is what
+// held a fleet-wide republish burst to a few hundred rows a second.
+//
+// rows must already hold at most one entry per (node, user); PostgreSQL rejects
+// a statement whose conflict target repeats. Callers collapse duplicates first,
+// keeping the state that would have survived one-at-a-time writes.
+func (d *DB) UpsertPPPoEStatusBatch(ctx context.Context, rows []PPPoEStatusRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	nodeUUIDs := make([]string, len(rows))
+	userIDs := make([]string, len(rows))
+	phases := make([]string, len(rows))
+	ipv4s := make([]*string, len(rows))
+	ipv4GWs := make([]*string, len(rows))
+	ipv6s := make([]*string, len(rows))
+	ipv6Prefixes := make([]*string, len(rows))
+	ipv6DNS := make([]*string, len(rows))
+	errorMessages := make([]*string, len(rows))
+	eventTimes := make([]time.Time, len(rows))
+
+	for i, row := range rows {
+		nodeUUIDs[i] = row.NodeUUID
+		userIDs[i] = row.UserID
+		phases[i] = row.Phase
+		ipv4s[i] = nullStrPtr(row.HSIIPv4)
+		ipv4GWs[i] = nullStrPtr(row.HSIIPv4GW)
+		ipv6s[i] = nullStrPtr(row.HSIIPv6)
+		ipv6Prefixes[i] = nullStrPtr(row.HSIIPv6PDPrefix)
+		ipv6DNS[i] = nullStrPtr(row.HSIIPv6DNS)
+		errorMessages[i] = nullStrPtr(row.ErrorMessage)
+		eventTimes[i] = row.EventTime
+	}
+
+	_, err := d.pool.Exec(ctx, upsertPPPoEStatusBatchSQL,
+		nodeUUIDs, userIDs, phases, ipv4s, ipv4GWs, ipv6s,
+		ipv6Prefixes, ipv6DNS, errorMessages, eventTimes,
+	)
+	return observe("upsert_pppoe_status_batch", err)
+}
+
 // GetPPPoEStatus returns the latest PPPoE state for a (node, user). ok is false
 // when no event has been recorded yet.
 func (d *DB) GetPPPoEStatus(ctx context.Context, nodeUUID, userID string) (row PPPoEStatusRow, ok bool, err error) {
@@ -211,4 +284,13 @@ func nullStr(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// nullStrPtr is nullStr for array parameters, where the element type has to be
+// a concrete *string rather than an untyped nil.
+func nullStrPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

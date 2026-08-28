@@ -138,8 +138,9 @@ func main() {
 			// HA without leader election.
 			if brokers := kafka.Brokers(); brokers != nil {
 				consumer := kafka.NewConsumer(brokers, database, etcd)
-				// Once per start, ask the nodes to re-send their PPPoE state so
-				// pppoe_status is rebuilt after a truncated Kafka log or a
+				// Once per start, ask the nodes to re-send their PPPoE state and
+				// the config they are running, so pppoe_status and hsi_config_current
+				// DB table is rebuilt after a truncated Kafka log or a
 				// rebuilt database. Restarting the controller is therefore the
 				// operator's recovery action for both.
 				consumer.SetRepublishAll(func(republishCtx context.Context) {
@@ -157,12 +158,17 @@ func main() {
 	// Leader election (etcd-based): every replica serves REST/gRPC and runs the
 	// Kafka consumer, but only the leader runs the singleton background workers —
 	// the etcd->PostgreSQL projection (single writer of the config tables),
-	// stale-node eviction, and per-node stats scraping — so they are not
-	// duplicated across replicas. A single instance wins immediately.
+	// stale-node eviction, per-node stats scraping, and the config-confirmation
+	// sweep — so they are not duplicated across replicas. A single instance wins
+	// immediately.
 	go leader.Run(ctx, etcd.Client(), "fastrg-controller/leader", func(leaderCtx context.Context) {
 		logrus.Infof("Became leader (%s): starting node-state workers", leader.Identity())
 		nmm.SetLeader(true)
 		go startProjectionWhenDatabaseReady(leaderCtx, etcd, nmm)
+		// Re-asks nodes whose pushed config stayed unconfirmed, so a config-apply
+		// result lost between the node and the consumer still lands eventually.
+		// It idles until ConnectLoop publishes the database.
+		go nmm.RunConfigConfirmationSweep(leaderCtx, etcd)
 		go func() {
 			<-leaderCtx.Done()
 			nmm.SetLeader(false)
