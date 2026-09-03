@@ -191,7 +191,7 @@ export default function NodeCard({node, onNodeUnregistered}){
       <ul>
         {nodeData.location && <li><strong>{t('nodes.location')}:</strong> {nodeData.location}</li>}
         {nodeData.node_ip && <li><strong>{t('nodes.nodeIp')}:</strong> {nodeData.node_ip}</li>}
-        {nodeData.version && <li><strong>{t('nodes.version')}:</strong> {nodeData.version}</li>}
+        <li><strong>{t('nodes.version')}:</strong> {nodeData.version || t('nodes.unknownVersion')}</li>
         {nodeData.host_os && <li><strong>{t('nodes.hostOs')}:</strong> {nodeData.host_os}</li>}
         {(nodeData.nic_model_wan || nodeData.nic_model_lan) && (
           <li>
