@@ -46,6 +46,10 @@ export default function HSIConfig() {
     desireStatus: ''
   })
 
+  // ipv6_enable as it arrived with the loaded config, null when no config is
+  // loaded (a brand new user).
+  const [loadedIpv6Enable, setLoadedIpv6Enable] = useState(null)
+
   // DHCP server config
   const [dhcpConfig, setDhcpConfig] = useState({
     dhcp_addr_pool: '',
@@ -189,6 +193,7 @@ export default function HSIConfig() {
         // expected PPPoE state lives in the config object now
         desireStatus: configData.desire_status || ''
       })
+      setLoadedIpv6Enable(configData.ipv6_enable !== undefined ? configData.ipv6_enable : false)
       setDhcpConfig({
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
         dhcp_subnet: configData.dhcp_subnet || '',
@@ -263,6 +268,7 @@ export default function HSIConfig() {
         tcp_conntrack_enable: configData.tcp_conntrack_enable !== undefined ? configData.tcp_conntrack_enable : true,
         desireStatus: configData.desire_status || ''
       }))
+      setLoadedIpv6Enable(configData.ipv6_enable !== undefined ? configData.ipv6_enable : false)
       setDhcpConfig({
         dhcp_addr_pool: configData.dhcp_addr_pool || '',
         dhcp_subnet: configData.dhcp_subnet || '',
@@ -272,6 +278,7 @@ export default function HSIConfig() {
       setPppoeIsUpdate(true)
     } catch (_) {
       setPppoeIsUpdate(false)
+      setLoadedIpv6Enable(null)
     } finally {
       setIsCheckingConfig(false)
     }
@@ -457,6 +464,7 @@ export default function HSIConfig() {
       dns_proxy_enable: true,
       tcp_conntrack_enable: true
     })
+    setLoadedIpv6Enable(null)
     setDhcpConfig({
       dhcp_addr_pool: '',
       dhcp_subnet: '',
@@ -535,7 +543,7 @@ export default function HSIConfig() {
       }))
 
       // Check and auto-fill existing config for user_id while creating/updating config
-      if (field === 'user_id' && (action === 'create' || action === 'pppoe')) {
+      if (field === 'user_id' && action === 'pppoe') {
         // Create previous timeout
         if (autoFillTimeout) {
           clearTimeout(autoFillTimeout)
@@ -544,17 +552,14 @@ export default function HSIConfig() {
         // Stop checking if input is cleared
         if (value.trim() === '') {
           setIsCheckingConfig(false)
-          if (action === 'pppoe') setPppoeIsUpdate(false)
+          setLoadedIpv6Enable(null)
+          setPppoeIsUpdate(false)
           return
         }
 
         // Set new timeout (500ms delay)
         const timeoutId = setTimeout(async () => {
-          if (action === 'pppoe') {
-            await silentAutoFillConfig(value.trim())
-          } else {
-            await checkAndAutoFillConfig(value.trim())
-          }
+          await silentAutoFillConfig(value.trim())
         }, 500)
 
         setAutoFillTimeout(timeoutId)
@@ -572,69 +577,6 @@ export default function HSIConfig() {
         ...prev,
         [field]: false
       }))
-    }
-  }
-
-  // Check and auto-fill existing config for given userId
-  const checkAndAutoFillConfig = async (userId) => {
-    if (!userId || userId === '') return
-
-    setIsCheckingConfig(true)
-
-    try {
-      // Try to fetch existing config
-      const response = await getHSIConfig(nodeId, userId)
-      // Handle nested structure
-      const configData = response.config || response
-
-      // If successfully retrieved settings, ask the user whether to auto-fill
-      const autoTitle = t('hsi.autofillDetected').replace('{userId}', userId)
-      const autoBodyLines = []
-      autoBodyLines.push(t('hsi.autofillNoticePrefix'))
-      autoBodyLines.push(`${t('hsi.vlanLabel')}: ${configData.vlan_id || t('common.notSet')}`)
-      autoBodyLines.push(`${t('hsi.accountNameLabel')}: ${configData.account_name || t('common.notSet')}`)
-      autoBodyLines.push(`${t('hsi.dhcpAddrPoolLabel')}: ${configData.dhcp_addr_pool || t('common.notSet')}`)
-      autoBodyLines.push(`${t('hsi.subnetLabel')}: ${configData.dhcp_subnet || t('common.notSet')}`)
-      autoBodyLines.push(`${t('hsi.gatewayLabel')}: ${configData.dhcp_gateway || t('common.notSet')}`)
-
-      const shouldAutoFill = window.confirm(autoTitle + '\n\n' + autoBodyLines.join('\n'))
-
-      if (shouldAutoFill) {
-        // Auto-fill PPPoE settings (keep existing user_id)
-        setPppoeConfig(prev => ({
-          ...prev,
-          vlan_id: configData.vlan_id || '',
-          account_name: configData.account_name || '',
-          password: configData.password || ''
-        }))
-
-        // Auto-fill DHCP settings
-        setDhcpConfig({
-          dhcp_addr_pool: configData.dhcp_addr_pool || '',
-          dhcp_subnet: configData.dhcp_subnet || '',
-          dhcp_gateway: configData.dhcp_gateway || ''
-        })
-
-        // Auto-fill port mappings
-        setPortMappings(Array.isArray(configData['port-mapping']) ? configData['port-mapping'] : [])
-
-        // Show success message (list filled fields)
-        const filledFields = []
-        if (configData.vlan_id) filledFields.push(t('hsi.vlanLabel'))
-        if (configData.account_name) filledFields.push(t('hsi.accountNameLabel'))
-        if (configData.dhcp_addr_pool) filledFields.push(t('hsi.dhcpAddrPoolLabel'))
-        if (configData.dhcp_subnet) filledFields.push(t('hsi.subnetLabel'))
-        if (configData.dhcp_gateway) filledFields.push(t('hsi.gatewayLabel'))
-
-        if (filledFields.length > 0) {
-          alert(t('hsi.autofillNoticePrefix') + ' ' + filledFields.join(', '))
-        }
-      }
-    } catch (err) {
-      // If the fetch fails, it means the user_id does not exist, which is normal.
-      // Suppress debug logging in production.
-    } finally {
-      setIsCheckingConfig(false)
     }
   }
 
@@ -832,6 +774,23 @@ export default function HSIConfig() {
     setFieldErrors({})
   }
 
+  // The node redials PPPoE when ipv6_enable changes on a live session, so ask
+  // before cutting a connected subscriber off. A status that cannot be read
+  // asks too, but with wording that does not claim a session exists. Returns
+  // true when the subscriber is idle or the user agrees, false when the user
+  // cancels.
+  const confirmIpv6RedialIfNeeded = async (nodeId, userId) => {
+    let confirmKey = ''
+    try {
+      const status = await getPPPoEStatus(nodeId, userId)
+      if (status?.phase === 'connected') confirmKey = 'hsi.confirmIpv6Redial'
+    } catch (_) {
+      confirmKey = 'hsi.confirmIpv6RedialUnknown'
+    }
+    if (!confirmKey) return true
+    return window.confirm(t(confirmKey).replace('{userId}', userId))
+  }
+
   const handleCreateOrUpdate = async () => {
     if (currentStep === 1) {
       // Step 1: Validate PPPoE config and go to next step
@@ -849,6 +808,13 @@ export default function HSIConfig() {
     setLoading(true)
     setError(null)
     try {
+      // Saving rewrites ipv6_enable, so ask only when the form flips the value
+      // the config was loaded with.
+      if (loadedIpv6Enable !== null && pppoeConfig.ipv6_enable !== loadedIpv6Enable) {
+        const confirmed = await confirmIpv6RedialIfNeeded(nodeId, pppoeConfig.user_id)
+        if (!confirmed) return
+      }
+
       // Check if config already exists
       let exists = false
       try {
@@ -893,6 +859,7 @@ export default function HSIConfig() {
         dns_proxy_enable: true,
         tcp_conntrack_enable: true
       })
+      setLoadedIpv6Enable(null)
       setDhcpConfig({
         dhcp_addr_pool: '',
         dhcp_subnet: '',
@@ -1256,6 +1223,9 @@ export default function HSIConfig() {
     if (!selectedUserId || ipv6Enable === null) return
     setSwitchesLoading(true)
     try {
+      const confirmed = await confirmIpv6RedialIfNeeded(nodeId, selectedUserId)
+      if (!confirmed) return
+
       const response = await getHSIConfig(nodeId, selectedUserId)
       const configData = response.config || response
       const newValue = !ipv6Enable
