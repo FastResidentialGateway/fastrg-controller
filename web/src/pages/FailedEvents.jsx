@@ -1,11 +1,56 @@
-import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import React, { useCallback, useEffect, useState } from 'react'
+import Alert from '@mui/material/Alert'
+import Box from '@mui/material/Box'
+import Button from '@mui/material/Button'
+import Checkbox from '@mui/material/Checkbox'
+import FormControlLabel from '@mui/material/FormControlLabel'
+import MenuItem from '@mui/material/MenuItem'
+import Skeleton from '@mui/material/Skeleton'
+import Stack from '@mui/material/Stack'
+import Switch from '@mui/material/Switch'
+import Table from '@mui/material/Table'
+import TableBody from '@mui/material/TableBody'
+import TableCell from '@mui/material/TableCell'
+import TableContainer from '@mui/material/TableContainer'
+import TableHead from '@mui/material/TableHead'
+import TableRow from '@mui/material/TableRow'
+import TextField from '@mui/material/TextField'
+import Typography from '@mui/material/Typography'
 import { getAllFailedEvents, deleteFailedEvents } from '../api'
+import { PageActions } from '../components/AppShell'
+import { useConfirm } from '../components/ConfirmProvider'
+import LabeledField from '../components/LabeledField'
+import { useNotify } from '../components/NotifyProvider'
 import { useI18n } from '../i18n/I18nContext'
 
+const REFRESH_INTERVAL_MS = 10000
+const MONO_STACK = '"JetBrains Mono", ui-monospace, monospace'
+
+const EVENT_TYPES = [
+  { value: 'CONFIG_APPLY_FAIL', label: 'CONFIG_APPLY_FAIL' },
+  { value: 'CONFIG_APPLY_OK', label: 'CONFIG_APPLY_OK' },
+  { value: 'RUNTIME_ERROR', label: 'RUNTIME_ERROR' },
+]
+
+// Severity drives the 2px bar on the left edge of a row and the type color.
+const SEVERITY = {
+  CONFIG_APPLY_OK: 'success',
+  CONFIG_APPLY_FAIL: 'error',
+  RUNTIME_ERROR: 'error',
+}
+
+function formatTimestamp(eventTime) {
+  if (!eventTime) return ''
+  const date = new Date(eventTime)
+  if (isNaN(date.getTime())) return eventTime
+  const pad = n => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 export default function FailedEvents() {
-  const navigate = useNavigate()
   const { t } = useI18n()
+  const confirm = useConfirm()
+  const { notify } = useNotify()
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -14,20 +59,7 @@ export default function FailedEvents() {
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
 
-  useEffect(() => {
-    fetchEvents()
-
-    let interval
-    if (autoRefresh) {
-      interval = setInterval(fetchEvents, 10000)
-    }
-
-    return () => {
-      if (interval) clearInterval(interval)
-    }
-  }, [autoRefresh, eventTypeFilter])
-
-  const fetchEvents = async () => {
+  const fetchEvents = useCallback(async () => {
     try {
       const data = await getAllFailedEvents(eventTypeFilter || null)
       setEvents(data)
@@ -42,44 +74,34 @@ export default function FailedEvents() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [eventTypeFilter])
 
-  const formatTimestamp = (eventTime) => {
-    if (!eventTime) return ''
-    const date = new Date(eventTime)
-    return isNaN(date.getTime()) ? eventTime : date.toLocaleString()
-  }
+  useEffect(() => {
+    fetchEvents()
 
-  const getEventTypeColor = (eventType) => {
-    const colors = {
-      'CONFIG_APPLY_OK': '#28a745',
-      'CONFIG_APPLY_FAIL': '#dc3545',
-      'RUNTIME_ERROR': '#dc3545',
-      'default': '#6c757d'
+    let interval
+    if (autoRefresh) {
+      interval = setInterval(fetchEvents, REFRESH_INTERVAL_MS)
     }
-    return colors[eventType] || colors.default
-  }
+
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [autoRefresh, fetchEvents])
 
   const allIds = events.map(e => e.id)
   const allSelected = allIds.length > 0 && allIds.every(id => selectedIds.has(id))
   const someSelected = allIds.some(id => selectedIds.has(id))
 
   const toggleSelectAll = () => {
-    if (allSelected) {
-      setSelectedIds(new Set())
-    } else {
-      setSelectedIds(new Set(allIds))
-    }
+    setSelectedIds(allSelected ? new Set() : new Set(allIds))
   }
 
   const toggleSelect = (id) => {
     setSelectedIds(prev => {
       const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
       return next
     })
   }
@@ -88,253 +110,137 @@ export default function FailedEvents() {
     const ids = [...selectedIds]
     if (ids.length === 0) return
 
-    const confirmMsg = t('events.confirmDelete').replace('{count}', ids.length)
-    if (!window.confirm(confirmMsg)) return
+    const accepted = await confirm({
+      title: t('events.deleteSelected'),
+      message: t('events.confirmDelete').replace('{count}', ids.length),
+      confirmText: t('common.delete'),
+      destructive: true,
+    })
+    if (!accepted) return
 
     setDeleting(true)
     try {
       const result = await deleteFailedEvents(ids)
       const deleted = result.deleted ?? ids.length
-      alert(t('events.deleteSuccess').replace('{count}', deleted))
+      notify(t('events.deleteSuccess').replace('{count}', deleted), { severity: 'success' })
       setSelectedIds(new Set())
       await fetchEvents()
     } catch (err) {
-      alert(t('events.deleteFailed') + ': ' + (err.message || ''))
+      notify(`${t('events.deleteFailed')}: ${err.message || ''}`, { severity: 'error', duration: 6000 })
     } finally {
       setDeleting(false)
     }
   }
 
   return (
-    <div style={{ padding: '20px' }}>
-      <div style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <button
-            onClick={() => navigate('/nodes')}
-            style={{
-              backgroundColor: '#6c757d',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 12px',
-              cursor: 'pointer'
-            }}
-          >
-            {t('hsi.back')}
-          </button>
-          <h2>{t('events.title')}</h2>
-        </div>
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-            {t('events.filterByType')}:
-            <select
+    <Stack spacing={2}>
+      <PageActions>
+        <Typography variant="caption" color="text.secondary">
+          {t('events.count').replace('{count}', events.length)}
+        </Typography>
+      </PageActions>
+
+      <Stack direction="row" spacing={1.5} sx={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <LabeledField label={t('events.filterByType')} width={220}>
+          {({ id, labelId }) => (
+            <TextField
+              id={id}
+              select
               value={eventTypeFilter}
               onChange={(e) => setEventTypeFilter(e.target.value)}
-              style={{
-                padding: '6px 10px',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                backgroundColor: 'white'
-              }}
+              slotProps={{ select: { displayEmpty: true, labelId } }}
+              fullWidth
             >
-              <option value="">{t('events.allTypes')}</option>
-              <option value="CONFIG_APPLY_FAIL">Config Apply Fail</option>
-              <option value="CONFIG_APPLY_OK">Config Apply OK</option>
-              <option value="RUNTIME_ERROR">Runtime Error</option>
-            </select>
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-            />
-            {t('common.refresh')} (10s)
-          </label>
-          <button
-            onClick={fetchEvents}
-            disabled={loading}
-            style={{
-              backgroundColor: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '8px 16px',
-              cursor: loading ? 'not-allowed' : 'pointer'
-            }}
-          >
-            {loading ? t('common.loading') : '🔄 ' + t('common.refresh')}
-          </button>
-          {someSelected && (
-            <button
-              onClick={handleDeleteSelected}
-              disabled={deleting}
-              style={{
-                backgroundColor: '#dc3545',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                padding: '8px 16px',
-                cursor: deleting ? 'not-allowed' : 'pointer'
-              }}
-            >
-              {deleting ? t('common.processing') : `🗑 ${t('events.deleteSelected')} (${selectedIds.size})`}
-            </button>
+              <MenuItem value="">{t('events.allTypes')}</MenuItem>
+              {EVENT_TYPES.map(type => (
+                <MenuItem key={type.value} value={type.value} sx={{ fontFamily: MONO_STACK, fontSize: 12.5 }}>
+                  {type.label}
+                </MenuItem>
+              ))}
+            </TextField>
           )}
-        </div>
-      </div>
+        </LabeledField>
+        <FormControlLabel
+          sx={{ mt: 2 }}
+          control={<Switch checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />}
+          label={<Typography variant="caption">{t('events.autoRefresh')} 10s</Typography>}
+        />
+        <Button variant="outlined" sx={{ mt: 2 }} onClick={fetchEvents} disabled={loading}>
+          {t('common.refresh')}
+        </Button>
+        <Box sx={{ width: '1px', height: 20, mt: 2, bgcolor: 'divider' }} />
+        <Button color="error" sx={{ mt: 2 }} onClick={handleDeleteSelected} disabled={!someSelected || deleting}>
+          {deleting ? t('common.processing') : `${t('events.deleteSelected')} (${selectedIds.size})`}
+        </Button>
+      </Stack>
 
-      {error && (
-        <div style={{
-          backgroundColor: '#f8d7da',
-          color: '#721c24',
-          padding: '10px',
-          borderRadius: '4px',
-          marginBottom: '20px'
-        }}>
-          {t('common.error')}: {error}
-        </div>
-      )}
+      {error && <Alert severity="error">{t('common.error')}: {error}</Alert>}
 
       {loading && events.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '20px' }}>
-          {t('common.loading')}
-        </div>
+        <Skeleton variant="rectangular" height={240} />
       ) : events.length === 0 ? (
-        <div style={{
-          backgroundColor: '#d1ecf1',
-          color: '#0c5460',
-          padding: '15px',
-          borderRadius: '4px'
-        }}>
-          {t('events.noEvents')}
-        </div>
+        <Box sx={{ py: 8, textAlign: 'center' }}>
+          <Typography variant="body2" color="text.secondary">{t('events.noEvents')}</Typography>
+        </Box>
       ) : (
-        <div>
-          <div style={{ marginBottom: '10px', color: '#666' }}>
-            {events.length} {t('events.noEvents')}
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-              backgroundColor: 'white',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-            }}>
-              <thead>
-                <tr style={{ backgroundColor: '#f8f9fa' }}>
-                  <th style={{ ...tableHeaderStyle, width: '40px', textAlign: 'center' }}>
-                    <input
-                      type="checkbox"
+        <Box sx={{ borderTop: 1, borderColor: 'divider' }}>
+          <TableContainer sx={{ maxHeight: '70vh' }}>
+            <Table stickyHeader sx={{ minWidth: 1000 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell padding="checkbox">
+                    <Checkbox
                       checked={allSelected}
-                      ref={el => { if (el) el.indeterminate = someSelected && !allSelected }}
+                      indeterminate={someSelected && !allSelected}
                       onChange={toggleSelectAll}
-                      title={t('events.selectAll')}
+                      inputProps={{ 'aria-label': t('events.selectAll') }}
                     />
-                  </th>
-                  <th style={tableHeaderStyle}>Time</th>
-                  <th style={tableHeaderStyle}>Event type</th>
-                  <th style={tableHeaderStyle}>Node ID</th>
-                  <th style={tableHeaderStyle}>User ID</th>
-                  <th style={tableHeaderStyle}>Module / Action</th>
-                  <th style={tableHeaderStyle}>Error Code</th>
-                  <th style={tableHeaderStyle}>Error Message</th>
-                </tr>
-              </thead>
-              <tbody>
+                  </TableCell>
+                  <TableCell>{t('events.timestamp')}</TableCell>
+                  <TableCell>{t('events.type')}</TableCell>
+                  <TableCell>{t('events.node')}</TableCell>
+                  <TableCell>{t('events.userId')}</TableCell>
+                  <TableCell>{t('events.moduleAction')}</TableCell>
+                  <TableCell>{t('events.errorCode')}</TableCell>
+                  <TableCell>{t('events.errorMessage')}</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
                 {events.map((event, index) => {
                   const isSelected = selectedIds.has(event.id)
+                  const severity = SEVERITY[event.event_type]
+                  const severityColor = severity ? `${severity}.main` : 'text.disabled'
                   return (
-                    <tr
-                      key={event.id ?? index}
-                      style={{
-                        borderBottom: '1px solid #dee2e6',
-                        backgroundColor: isSelected
-                          ? '#fff3cd'
-                          : index % 2 === 0 ? 'white' : '#f8f9fa'
-                      }}
-                    >
-                      <td style={{ ...tableCellStyle, textAlign: 'center' }}>
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelect(event.id)}
-                        />
-                      </td>
-                      <td style={tableCellStyle}>
-                        {formatTimestamp(event.event_time)}
-                      </td>
-                      <td style={tableCellStyle}>
-                        <span style={{
-                          backgroundColor: getEventTypeColor(event.event_type),
-                          color: 'white',
-                          padding: '4px 8px',
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          fontWeight: 'bold'
-                        }}>
-                          {event.event_type}
-                        </span>
-                      </td>
-                      <td style={tableCellStyle}>
-                        <code style={{
-                          backgroundColor: '#f1f1f1',
-                          padding: '2px 6px',
-                          borderRadius: '3px'
-                        }}>
-                          {event.node_uuid}
-                        </code>
-                      </td>
-                      <td style={tableCellStyle}>
-                        <code style={{
-                          backgroundColor: '#f1f1f1',
-                          padding: '2px 6px',
-                          borderRadius: '3px'
-                        }}>
-                          {event.user_id}
-                        </code>
-                      </td>
-                      <td style={tableCellStyle}>
-                        {event.module || event.action || '-'}
-                      </td>
-                      <td style={tableCellStyle}>
-                        {event.error_code ? (
-                          <span style={{
-                            backgroundColor: '#dc3545',
-                            color: 'white',
-                            padding: '4px 8px',
-                            borderRadius: '4px',
-                            fontSize: '12px',
-                            fontWeight: 'bold'
-                          }}>
-                            {event.error_code}
-                          </span>
-                        ) : '-'}
-                      </td>
-                      <td style={{ ...tableCellStyle, maxWidth: '320px' }}>
-                        {event.error_message || '-'}
-                      </td>
-                    </tr>
+                    <TableRow key={event.id ?? index} hover selected={isSelected}>
+                      <TableCell
+                        padding="checkbox"
+                        sx={{
+                          boxShadow: (theme) => `inset 2px 0 0 ${severity ? theme.palette[severity].main : theme.palette.text.disabled}`,
+                        }}
+                      >
+                        <Checkbox checked={isSelected} onChange={() => toggleSelect(event.id)} />
+                      </TableCell>
+                      <TableCell><Box component="code" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>{formatTimestamp(event.event_time)}</Box></TableCell>
+                      <TableCell><Box component="code" sx={{ color: severityColor }}>{event.event_type}</Box></TableCell>
+                      <TableCell><Box component="code">{event.node_uuid}</Box></TableCell>
+                      <TableCell><Box component="code">{event.user_id}</Box></TableCell>
+                      <TableCell sx={{ color: 'text.secondary' }}>{event.module || event.action || '—'}</TableCell>
+                      <TableCell>
+                        {event.error_code
+                          ? <Box component="code" sx={{ color: 'error.main' }}>{event.error_code}</Box>
+                          : <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>}
+                      </TableCell>
+                      <TableCell sx={{ maxWidth: 420, color: 'text.secondary', overflowWrap: 'anywhere' }}>
+                        {event.error_message || '—'}
+                      </TableCell>
+                    </TableRow>
                   )
                 })}
-              </tbody>
-            </table>
-          </div>
-        </div>
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Box>
       )}
-    </div>
+    </Stack>
   )
-}
-
-const tableHeaderStyle = {
-  padding: '12px',
-  textAlign: 'left',
-  borderBottom: '2px solid #dee2e6',
-  fontWeight: 'bold',
-  color: '#495057'
-}
-
-const tableCellStyle = {
-  padding: '12px',
-  textAlign: 'left'
 }

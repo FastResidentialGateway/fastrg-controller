@@ -1,26 +1,45 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
-import { translations, detectLanguage } from './translations'
+import React, { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import { DEFAULT_LANGUAGE, LANGUAGES, detectLanguage, isSupportedLanguage, translations } from './translations'
 
 const I18nContext = createContext()
 
-export function I18nProvider({ children }) {
-  const [language, setLanguage] = useState('en')
+const STORAGE_KEY = 'ui.language'
 
-  useEffect(() => {
-    // Detect language on mount
-    const detectedLang = detectLanguage()
-    setLanguage(detectedLang)
+// A stored choice wins over the browser's preference; anything unknown (or a
+// blocked storage) falls back to detection.
+function initialLanguage() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored && isSupportedLanguage(stored)) return stored
+  } catch (_) {
+    // Storage can be unavailable; detection still works.
+  }
+  return detectLanguage()
+}
+
+export function I18nProvider({ children }) {
+  const [language, setLanguageState] = useState(initialLanguage)
+
+  const setLanguage = useCallback((code) => {
+    if (!isSupportedLanguage(code)) return
+    setLanguageState(code)
+    try {
+      localStorage.setItem(STORAGE_KEY, code)
+    } catch (_) {
+      // The choice still applies to this session.
+    }
   }, [])
 
-  const t = (key) => {
-    return translations[language]?.[key] || translations['en']?.[key] || key
-  }
+  const t = useCallback((key) => (
+    translations[language]?.[key] || translations[DEFAULT_LANGUAGE]?.[key] || key
+  ), [language])
 
-  const value = {
+  const value = useMemo(() => ({
     language,
+    languages: LANGUAGES,
     setLanguage,
     t
-  }
+  }), [language, setLanguage, t])
 
   return (
     <I18nContext.Provider value={value}>

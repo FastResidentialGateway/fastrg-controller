@@ -1,14 +1,15 @@
-body{ font-family: Arial, Helvetica, sans-serif; margin:0; padding:0; }
-.app-header{ background:rgb(0, 75, 187); padding:12px; color:#002; display:flex; align-items:center; justify-content:space-between }
-.app-header h1{ margin:0 }
-.main{ padding:16px }
-.card{ max-width:420px; margin:24px auto; padding:16px; border:1px solid #ddd; border-radius:6px }
-label{ display:block; margin-bottom:8px }
-input{ width:100%; padding:8px; margin-top:4px }
-/* the rule above sizes text fields; a checkbox keeps its own size */
-input[type=checkbox]{ width:auto; margin:0 }
-button{ padding:8px 12px; margin-top:8px }
-.error{ color:#b00; margin-top:8px }
-.nodes-grid{ display:flex; flex-wrap:wrap; gap:12px }
-.node-card{ border:1px solid #ddd; padding:12px; border-radius:6px; width:220px }
-.logout-btn{ background:none; border:none; color:#002; text-decoration:underline; cursor:pointer; padding:0; margin:0; font-size:inherit }
+/* Self-hosted fonts: Inter for UI text, Noto Sans TC for Traditional Chinese,
+   JetBrains Mono for identifiers. */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/noto-sans-tc/chinese-traditional-400.css';
+@import '@fontsource/noto-sans-tc/chinese-traditional-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+html,
+body,
+#root {
+  height: 100%;
+}
