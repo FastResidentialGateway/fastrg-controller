@@ -1,13 +1,6 @@
 import axios from 'axios'
 
-// Set axios to support HTTPS in development environment
 axios.defaults.timeout = 10000
-if (process.env.NODE_ENV === 'development') {
-  // Accept self-signed certificates in development
-  axios.defaults.httpsAgent = new (require('https').Agent)({
-    rejectUnauthorized: false
-  })
-}
 
 // Add response interceptor to handle authentication errors
 axios.interceptors.response.use(
