@@ -1,4 +1,4 @@
-// Translation files for Traditional Chinese and English
+// Translation tables, one per language code listed in LANGUAGES below.
 
 export const translations = {
   'zh-TW': {
@@ -8,6 +8,8 @@ export const translations = {
     'nav.failedEvents': '失敗事件',
     'nav.logout': '登出',
     'nav.login': '登入',
+    'nav.themeLight': '切換為亮色模式',
+    'nav.themeDark': '切換為暗色模式',
 
     // Common
     'common.loading': '載入中...',
@@ -22,6 +24,12 @@ export const translations = {
     'common.back': '返回',
     'common.notSet': '未設定',
     'common.processing': '處理中...',
+    'common.confirm': '確定',
+    'common.close': '關閉',
+    'common.copy': '複製',
+    'common.copied': '已複製',
+    'common.expand': '展開',
+    'common.collapse': '收合',
 
     // Login Page
     'login.title': '登入',
@@ -31,6 +39,7 @@ export const translations = {
     'login.failed': '登入失敗',
     'login.invalidCredentials': '帳號或密碼錯誤，請重新輸入',
     'login.networkError': '登入失敗，請稍後再試',
+    'login.sessionExpired': '您的登入已過期，請重新登入',
 
     // Nodes Page
     'nodes.title': '節點',
@@ -42,6 +51,8 @@ export const translations = {
     'nodes.configHSI': '設定 HSI',
     'nodes.status': '狀態',
     'nodes.statusInactive': '離線',
+    'nodes.statusActive': '上線',
+    'nodes.count': '共 {count} 個節點',
     'nodes.clearInactive': '清除離線節點 ({count})',
     'nodes.confirmClearInactive': '確定要清除 {count} 個離線節點嗎？此動作無法復原。',
     'nodes.clearInactiveSuccess': '已清除 {count} 個離線節點',
@@ -68,6 +79,7 @@ export const translations = {
     'nodes.invalidSubscriberCount': '租戶數量必須是非負整數',
     'nodes.updateSubscriberCountSuccess': '租戶數量更新成功',
     'nodes.updateSubscriberCountFailed': '更新租戶數量失敗',
+    'nodes.getSubscriberCountFailed': '取得租戶數量失敗',
 
     // HSI Config Page
     'hsi.title': 'HSI 設定',
@@ -181,6 +193,7 @@ export const translations = {
     'hsi.showPPPoEInfo': '顯示 PPPoE 資訊',
     'hsi.hidePPPoEInfo': '隱藏 PPPoE 資訊',
     'hsi.pppoeInfoLoading': '查詢中...',
+    'hsi.pppoeInfoNotAvailable': '節點未連線，無法取得 PPPoE Session 資訊',
     'hsi.revealPassword': '顯示撥號密碼',
     'hsi.hidePassword': '隱藏撥號密碼',
     'hsi.revealPasswordModal.title': '驗證管理員身分',
@@ -203,6 +216,7 @@ export const translations = {
     'hsi.dhcpServerHint': '選擇已有的 User ID，查看該用戶的 DHCP Server 設定。',
     'hsi.refreshDhcpConfig': '重新整理 DHCP 設定',
     'hsi.dhcpConfig': 'DHCP Server 設定',
+    'hsi.dhcpConfigNotAvailable': '節點未連線，無法取得 DHCP Server 設定',
     'hsi.dhcpStatus': 'DHCP 狀態',
     'hsi.dhcpLeaseUsage': 'DHCP IP 使用狀況',
     'hsi.user': '用戶',
@@ -320,6 +334,12 @@ export const translations = {
     'events.deleteSuccess': '成功刪除 {count} 筆失敗事件',
     'events.deleteFailed': '刪除失敗事件失敗',
     'events.selectAll': '全選',
+    'events.count': '共 {count} 筆事件',
+    'events.autoRefresh': '自動更新',
+    'events.userId': '使用者 ID',
+    'events.moduleAction': '模組 / 動作',
+    'events.errorCode': '錯誤代碼',
+    'events.errorMessage': '錯誤訊息',
   },
 
   'en': {
@@ -329,6 +349,8 @@ export const translations = {
     'nav.failedEvents': 'Failed Events',
     'nav.logout': 'Logout',
     'nav.login': 'Login',
+    'nav.themeLight': 'Switch to light mode',
+    'nav.themeDark': 'Switch to dark mode',
 
     // Common
     'common.loading': 'Loading...',
@@ -343,6 +365,12 @@ export const translations = {
     'common.back': 'Back',
     'common.notSet': 'Not set',
     'common.processing': 'Processing...',
+    'common.confirm': 'Confirm',
+    'common.close': 'Close',
+    'common.copy': 'Copy',
+    'common.copied': 'Copied',
+    'common.expand': 'Expand',
+    'common.collapse': 'Collapse',
 
     // Login Page
     'login.title': 'Login',
@@ -352,6 +380,7 @@ export const translations = {
     'login.failed': 'Login failed',
     'login.invalidCredentials': 'Invalid username or password, please try again',
     'login.networkError': 'Login failed, please try again later',
+    'login.sessionExpired': 'Your session has expired, please sign in again',
 
     // Nodes Page
     'nodes.title': 'Nodes',
@@ -363,6 +392,8 @@ export const translations = {
     'nodes.configHSI': 'Config HSI',
     'nodes.status': 'Status',
     'nodes.statusInactive': 'Inactive',
+    'nodes.statusActive': 'Active',
+    'nodes.count': '{count} nodes',
     'nodes.clearInactive': 'Clear Inactive Nodes ({count})',
     'nodes.confirmClearInactive': 'Clear {count} inactive node(s)? This cannot be undone.',
     'nodes.clearInactiveSuccess': 'Cleared {count} inactive node(s)',
@@ -389,6 +420,7 @@ export const translations = {
     'nodes.invalidSubscriberCount': 'Subscriber count must be a non-negative integer',
     'nodes.updateSubscriberCountSuccess': 'Subscriber count updated successfully',
     'nodes.updateSubscriberCountFailed': 'Failed to update subscriber count',
+    'nodes.getSubscriberCountFailed': 'Failed to get subscriber count',
 
     // HSI Config Page
     'hsi.title': 'HSI Configuration',
@@ -502,6 +534,7 @@ export const translations = {
     'hsi.showPPPoEInfo': 'Show PPPoE Info',
     'hsi.hidePPPoEInfo': 'Hide PPPoE Info',
     'hsi.pppoeInfoLoading': 'Querying...',
+    'hsi.pppoeInfoNotAvailable': 'Node not connected, PPPoE session info unavailable',
     'hsi.revealPassword': 'Show Dial Password',
     'hsi.hidePassword': 'Hide Dial Password',
     'hsi.revealPasswordModal.title': 'Verify Admin Identity',
@@ -524,6 +557,7 @@ export const translations = {
     'hsi.dhcpServerHint': 'Select an existing User ID to view DHCP server configuration for that user.',
     'hsi.refreshDhcpConfig': 'Refresh DHCP Config',
     'hsi.dhcpConfig': 'DHCP Server Configuration',
+    'hsi.dhcpConfigNotAvailable': 'Node not connected, DHCP server configuration unavailable',
     'hsi.dhcpStatus': 'DHCP Status',
     'hsi.dhcpLeaseUsage': 'DHCP IP Usage',
     'hsi.user': 'User',
@@ -634,19 +668,46 @@ export const translations = {
     'events.deleteSuccess': 'Successfully deleted {count} failed event(s)',
     'events.deleteFailed': 'Failed to delete failed events',
     'events.selectAll': 'Select All',
+    'events.count': '{count} events',
+    'events.autoRefresh': 'Auto refresh',
+    'events.userId': 'User ID',
+    'events.moduleAction': 'Module / Action',
+    'events.errorCode': 'Error code',
+    'events.errorMessage': 'Error message',
   }
 }
 
 // Detect browser/OS language
-export function detectLanguage() {
-  const browserLang = navigator.language || navigator.userLanguage
+// The languages the UI offers, each labelled in its own language. Adding a
+// translation table above means adding one entry here — nothing else knows the
+// set of languages.
+export const LANGUAGES = [
+  { code: 'en', label: 'English' },
+  { code: 'zh-TW', label: '繁體中文' }
+]
 
-  // Check if Traditional Chinese
-  if (browserLang.toLowerCase().includes('zh-tw') || 
-      browserLang.toLowerCase().includes('zh-hant')) {
-    return 'zh-TW'
+export const DEFAULT_LANGUAGE = LANGUAGES[0].code
+
+export function isSupportedLanguage(code) {
+  return LANGUAGES.some(lang => lang.code === code)
+}
+
+// Pick the first browser preference the UI can serve: an exact code first,
+// then a base-language match (zh-Hant-TW -> zh-TW), otherwise the default.
+export function detectLanguage() {
+  const preferred = (navigator.languages && navigator.languages.length > 0)
+    ? navigator.languages
+    : [navigator.language || navigator.userLanguage || '']
+
+  for (const raw of preferred) {
+    const wanted = String(raw).toLowerCase()
+    const exact = LANGUAGES.find(lang => lang.code.toLowerCase() === wanted)
+    if (exact) return exact.code
+
+    const base = wanted.split('-')[0]
+    const partial = LANGUAGES.find(lang => lang.code.toLowerCase().split('-')[0] === base)
+    if (partial) return partial.code
   }
 
-  // Default to English for all other languages
-  return 'en'
+  return DEFAULT_LANGUAGE
 }

@@ -1,4 +1,7 @@
 import React from 'react'
+import Alert from '@mui/material/Alert'
+import AlertTitle from '@mui/material/AlertTitle'
+import Box from '@mui/material/Box'
 
 export default class ErrorBoundary extends React.Component {
   constructor(props){
@@ -12,8 +15,6 @@ export default class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, info){
     this.setState({ error, info })
-    // You can also log to an external service here
-    // ErrorBoundary caught an error; avoid console noise in production.
   }
 
   render(){
@@ -21,13 +22,17 @@ export default class ErrorBoundary extends React.Component {
       const errMsg = (this.state.error && this.state.error.toString()) || 'Unknown error'
       const stack = this.state.info && this.state.info.componentStack
       return (
-        <div style={{ padding: 20 }}>
-          <div style={{ backgroundColor: '#f8d7da', color: '#721c24', padding: 16, borderRadius: 6 }}>
-            <h3>Something went wrong</h3>
-            <div style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 12 }}>{errMsg}</div>
-            {stack && <div style={{ marginTop: 10, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 12 }}>{stack}</div>}
-          </div>
-        </div>
+        <Box sx={{ p: 3 }}>
+          <Alert severity="error">
+            <AlertTitle>Something went wrong</AlertTitle>
+            <Box component="pre" sx={{ m: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>{errMsg}</Box>
+            {stack && (
+              <Box component="pre" sx={{ mt: 1, mb: 0, fontSize: 12, whiteSpace: 'pre-wrap', color: 'text.secondary' }}>
+                {stack}
+              </Box>
+            )}
+          </Alert>
+        </Box>
       )
     }
     return this.props.children

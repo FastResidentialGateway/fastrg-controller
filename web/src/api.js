@@ -1,5 +1,8 @@
 import axios from 'axios'
 
+// sessionStorage flag handed from the auth interceptor to the login page.
+export const SESSION_EXPIRED_NOTICE = 'auth:sessionExpired'
+
 axios.defaults.timeout = 10000
 
 // Add response interceptor to handle authentication errors
@@ -9,8 +12,11 @@ axios.interceptors.response.use(
     return response
   },
   (error) => {
+    // A 401 from the admin-password check means the typed password was wrong,
+    // not that the session expired, so it must not log the user out.
+    const isPasswordCheck = (error.config?.url || '').endsWith('/api/verify-password')
     // Check if the error is due to authentication issues
-    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+    if (error.response && !isPasswordCheck && (error.response.status === 401 || error.response.status === 403)) {
       // Check if the error message indicates token issues
       const errorMessage = error.response.data?.error || ''
       const isTokenError = errorMessage.includes('Invalid token') || 
@@ -25,17 +31,10 @@ axios.interceptors.response.use(
         // Clear the invalid token
         localStorage.removeItem('token')
 
-        // Show a user-friendly message
+        // Reloading the login page drops any in-page message, so leave a note
+        // for the login page to show once it mounts.
         if (window.location.pathname !== '/') {
-          // Only show alert if we're not already on login page
-          setTimeout(() => {
-            alert('您的登入已過期，請重新登入')
-          }, 100)
-        }
-
-        // Redirect to login page
-        // Use window.location to ensure we can redirect from anywhere
-        if (window.location.pathname !== '/') {
+          sessionStorage.setItem(SESSION_EXPIRED_NOTICE, '1')
           window.location.href = '/'
         }
 
