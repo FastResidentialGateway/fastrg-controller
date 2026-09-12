@@ -34,6 +34,9 @@ func TestNodeCASNormalFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("registered node not found")
 	}
+	if _, exists := registered["host_os"]; exists {
+		t.Fatalf("registration without host_os wrote the key: %#v", registered)
+	}
 	registered["nic_model_wan"] = "seed-wan"
 	registeredJSON, err := json.Marshal(registered)
 	if err != nil {
@@ -67,6 +70,42 @@ func TestNodeCASNormalFlow(t *testing.T) {
 	}
 	if node["uptime"] != float64(42) || node["host_os"] != "linux" {
 		t.Fatalf("heartbeat fields not persisted: %#v", node)
+	}
+
+	reply, err = gs.RegisterNode(ctx, &controllerpb.NodeRegisterRequest{
+		NodeUuid: uuid,
+		Ip:       "127.0.0.1",
+		Version:  "v-cas-test",
+		HostOs:   "linux-from-register",
+	})
+	if err != nil || !reply.Success {
+		t.Fatalf("RegisterNode with host_os = (%v, %v), want success", reply, err)
+	}
+	gs.nodeMonitorMgr.StopMonitoring(uuid)
+
+	node, ok = readNode(t, gs, uuid)
+	if !ok {
+		t.Fatal("node missing after re-registration")
+	}
+	if node["host_os"] != "linux-from-register" {
+		t.Fatalf("host_os from registration not persisted: %#v", node)
+	}
+
+	if _, err := gs.Heartbeat(ctx, &controllerpb.NodeHeartbeat{
+		NodeUuid:        uuid,
+		Ip:              "127.0.0.1",
+		UptimeTimestamp: 43,
+		HostOs:          "linux-from-heartbeat",
+	}); err != nil {
+		t.Fatalf("Heartbeat after re-registration: %v", err)
+	}
+
+	node, ok = readNode(t, gs, uuid)
+	if !ok {
+		t.Fatal("node missing after the second heartbeat")
+	}
+	if node["host_os"] != "linux-from-heartbeat" {
+		t.Fatalf("heartbeat did not override the registered host_os: %#v", node)
 	}
 }
 
