@@ -31,6 +31,7 @@ message NodeRegisterRequest {
   // the node actually configured instead of a hard-coded default. A node that
   // does not report it sends 0, and the controller falls back to 50052.
   uint32 grpc_port = 5;
+  string host_os = 6;
 }
 
 message NodeRegisterReply {

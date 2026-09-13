@@ -379,6 +379,12 @@ func registerNodeCASValue(current []byte, req *controllerpb.NodeRegisterRequest,
 		"grpc_port": req.GetGrpcPort(),
 	}
 
+	// Only written when the node reports it; otherwise the first heartbeat
+	// fills it in.
+	if req.GetHostOs() != "" {
+		nodeData["host_os"] = req.GetHostOs()
+	}
+
 	// Reset-on-register is intentional. Only NIC models survive a restart, and
 	// only when the transaction's current value is valid JSON.
 	if current != nil {
