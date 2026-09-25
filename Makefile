@@ -140,11 +140,9 @@ generate-test-certs:
 clean-test-certs:
 	@$(MAKE) clean-dev-certs
 
-# Main Test Target — runs every Go package. Integration tests self-skip when
-# their TEST_* env vars are unset (see internal/{db,server,projection,kafka}),
-# so this stays runnable without etcd/PostgreSQL/Kafka.
-test: test-go
-	@$(MAKE) -C tools test
+# Main Test Target — runs Go tests and the smoke suite with throwaway etcd/PostgreSQL containers (Kafka tests skip).
+test:
+	@tools/test_deps.sh sh -c '$(MAKE) test-go && $(MAKE) -C tools test'
 
 # Go tests only (no tools/ smoke suite) — used by CI, where the smoke suite's
 # self-managed etcd would collide with the job's etcd service container.
