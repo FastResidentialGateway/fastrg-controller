@@ -22,7 +22,9 @@ import (
 	"github.com/pkg/errors"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -314,8 +316,8 @@ type DhcpLeaseResult struct {
 }
 
 // GetNodeDhcpLease fetches real-time DHCP lease info for a given node and user via gRPC.
-// Returns (result, found, err). found is false when the node is not actively monitored or
-// the user has no DHCP info on the node.
+// Returns (result, found, err). found is false only when the node is not actively monitored;
+// result is nil when the node has no such user.
 func (nmm *NodeMonitorManager) GetNodeDhcpLease(ctx context.Context, nodeUUID, userID string) (*DhcpLeaseResult, bool, error) {
 	nmm.mu.RLock()
 	monitor, exists := nmm.monitors[nodeUUID]
@@ -324,13 +326,25 @@ func (nmm *NodeMonitorManager) GetNodeDhcpLease(ctx context.Context, nodeUUID, u
 		return nil, false, nil
 	}
 
-	dhcpInfo, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &emptypb.Empty{})
+	// Parse user ID as uint32
+	uid64, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid user ID: %v", err)
+	}
+	uid := uint32(uid64)
+
+	dhcpInfo, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &fastrgnodepb.DhcpInfoRequest{UserId: uid})
+	// InvalidArgument from the node means it has no such user.
+	if status.Code(err) == codes.InvalidArgument {
+		return nil, true, nil
+	}
 	if err != nil {
 		return nil, false, err
 	}
 
+	// Older nodes ignore user_id and return every subscriber.
 	for _, info := range dhcpInfo.DhcpInfos {
-		if fmt.Sprint(info.UserId) == userID {
+		if info.UserId == uid {
 			curCount := len(info.InuseIps)
 			maxCount := 0
 			if info.IpRange != "" && info.IpRange != "Not configured" {
@@ -352,8 +366,8 @@ func (nmm *NodeMonitorManager) GetNodeDhcpLease(ctx context.Context, nodeUUID, u
 		}
 	}
 
-	// user not found in DHCP info — return zero counts
-	return &DhcpLeaseResult{CurLeaseCount: 0, MaxLeaseCount: 0, InuseIps: nil, Status: ""}, true, nil
+	// The node has no DHCP info for this user.
+	return nil, true, nil
 }
 
 // ArpTableEntry holds a single ARP table entry
@@ -548,7 +562,11 @@ func (nmm *NodeMonitorManager) GetNodeDhcpConfig(ctx context.Context, nodeUUID, 
 	}
 	uid := uint32(uid64)
 
-	dhcpReply, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &emptypb.Empty{})
+	dhcpReply, err := monitor.fastrgClient.GetFastrgDhcpInfo(ctx, &fastrgnodepb.DhcpInfoRequest{UserId: uid})
+	// InvalidArgument from the node means it has no such user.
+	if status.Code(err) == codes.InvalidArgument {
+		return nil, true, nil
+	}
 	if err != nil {
 		return nil, false, err
 	}
