@@ -68,8 +68,9 @@ func TestGetUserFromTokenRejectsWrongSecret(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareBlacklist exercises the four middleware outcomes: missing
-// header, invalid token, valid token, and blacklisted token.
+// TestAuthMiddlewareBlacklist exercises the middleware outcomes: missing
+// header, invalid token, valid token, blacklisted token, and a "Bearer "
+// prefix sharing the raw token's blacklist entry.
 func TestAuthMiddlewareBlacklist(t *testing.T) {
 	etcd := serverTestEtcd(t)
 	rs := &RestServer{etcd: etcd, jwtSecret: []byte("mw-test-secret-1234567890abcdef")}
@@ -114,5 +115,63 @@ func TestAuthMiddlewareBlacklist(t *testing.T) {
 	t.Cleanup(func() { etcd.Client().Delete(ctx, blacklistKey) })
 	if code := do(tok); code != http.StatusUnauthorized {
 		t.Errorf("blacklisted token: got %d, want 401", code)
+	}
+
+	// A "Bearer " prefix is accepted and shares the raw token's blacklist entry.
+	bearerTok, err := rs.generateToken("dave")
+	if err != nil {
+		t.Fatalf("generateToken: %v", err)
+	}
+	if code := do("Bearer " + bearerTok); code != http.StatusOK {
+		t.Errorf("Bearer token: got %d, want 200", code)
+	}
+	if code := do("bearer " + bearerTok); code != http.StatusOK {
+		t.Errorf("lowercase bearer token: got %d, want 200", code)
+	}
+	if code := do("Bearer " + tok); code != http.StatusUnauthorized {
+		t.Errorf("raw-blacklisted token sent with Bearer: got %d, want 401", code)
+	}
+
+	// Logout with a "Bearer " prefix revokes both spellings of the token.
+	logoutRouter := gin.New()
+	logoutRouter.POST("/logout", rs.Logout)
+	logoutReq := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	logoutReq.Header.Set("Authorization", "Bearer "+bearerTok)
+	logoutResp := httptest.NewRecorder()
+	logoutRouter.ServeHTTP(logoutResp, logoutReq)
+	t.Cleanup(func() { etcd.Client().Delete(ctx, fmt.Sprintf("token_blacklist/%s", bearerTok)) })
+	if logoutResp.Code != http.StatusOK {
+		t.Fatalf("logout with Bearer: got %d (%s), want 200", logoutResp.Code, logoutResp.Body.String())
+	}
+	if code := do(bearerTok); code != http.StatusUnauthorized {
+		t.Errorf("raw token after Bearer logout: got %d, want 401", code)
+	}
+	if code := do("Bearer " + bearerTok); code != http.StatusUnauthorized {
+		t.Errorf("Bearer token after Bearer logout: got %d, want 401", code)
+	}
+}
+
+// TestBearerToken: the "Bearer " scheme is stripped case-insensitively and
+// anything else is returned unchanged.
+func TestBearerToken(t *testing.T) {
+	cases := []struct {
+		header string
+		want   string
+	}{
+		{"abc.def.ghi", "abc.def.ghi"},
+		{"Bearer abc.def.ghi", "abc.def.ghi"},
+		{"bearer abc.def.ghi", "abc.def.ghi"},
+		{"BEARER abc.def.ghi", "abc.def.ghi"},
+		{"Bearer   abc.def.ghi  ", "abc.def.ghi"},
+		{"Bearer ", ""},
+		{"Bearer", "Bearer"},
+		{"Bearerabc.def.ghi", "Bearerabc.def.ghi"},
+		{"Basic abc.def.ghi", "Basic abc.def.ghi"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := bearerToken(tc.header); got != tc.want {
+			t.Errorf("bearerToken(%q) = %q, want %q", tc.header, got, tc.want)
+		}
 	}
 }

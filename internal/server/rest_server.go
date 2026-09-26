@@ -303,6 +303,15 @@ func (r *RestServer) generateToken(username string) (string, error) {
 	return token.SignedString(r.jwtSecret)
 }
 
+// bearerToken strips a case-insensitive "Bearer " prefix from an Authorization value.
+func bearerToken(header string) string {
+	const prefix = "bearer "
+	if len(header) >= len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {
+		return strings.TrimSpace(header[len(prefix):])
+	}
+	return header
+}
+
 func (r *RestServer) validateToken(tokenString string) (*jwt.Token, error) {
 	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return r.jwtSecret, nil
@@ -452,7 +461,8 @@ func (r *RestServer) AuthMiddlewareWithBlacklist() gin.HandlerFunc {
 			return
 		}
 
-		token, err := r.validateToken(authHeader)
+		tokenString := bearerToken(authHeader)
+		token, err := r.validateToken(tokenString)
 		if err != nil || !token.Valid {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 			c.Abort()
@@ -460,7 +470,7 @@ func (r *RestServer) AuthMiddlewareWithBlacklist() gin.HandlerFunc {
 		}
 
 		// Check if token is blacklisted
-		blacklistKey := fmt.Sprintf("token_blacklist/%s", authHeader)
+		blacklistKey := fmt.Sprintf("token_blacklist/%s", tokenString)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
@@ -595,7 +605,7 @@ func (r *RestServer) VerifyPassword(c *gin.Context) {
 	}
 
 	authHeader := c.GetHeader("Authorization")
-	username, err := r.getUserFromToken(authHeader)
+	username, err := r.getUserFromToken(bearerToken(authHeader))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 		return
@@ -640,14 +650,15 @@ func (r *RestServer) Logout(c *gin.Context) {
 	}
 
 	// Parse and validate token
-	token, err := r.validateToken(authHeader)
+	tokenString := bearerToken(authHeader)
+	token, err := r.validateToken(tokenString)
 	if err != nil || !token.Valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 		return
 	}
 
 	// Add token to blacklist in etcd
-	blacklistKey := fmt.Sprintf("token_blacklist/%s", authHeader)
+	blacklistKey := fmt.Sprintf("token_blacklist/%s", tokenString)
 
 	// Calculate remaining TTL for token
 	claims, ok := token.Claims.(jwt.MapClaims)
@@ -1172,7 +1183,7 @@ func (r *RestServer) CreateHSIConfig(c *gin.Context) {
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
-	username, err := r.getUserFromToken(authHeader)
+	username, err := r.getUserFromToken(bearerToken(authHeader))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -1286,7 +1297,7 @@ func (r *RestServer) UpdateHSIConfig(c *gin.Context) {
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
-	username, err := r.getUserFromToken(authHeader)
+	username, err := r.getUserFromToken(bearerToken(authHeader))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -1483,7 +1494,7 @@ func (r *RestServer) DialPPPoE(c *gin.Context) {
 		return
 	}
 
-	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	username, err := r.getUserFromToken(bearerToken(c.GetHeader("Authorization")))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -1539,7 +1550,7 @@ func (r *RestServer) HangupPPPoE(c *gin.Context) {
 		return
 	}
 
-	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	username, err := r.getUserFromToken(bearerToken(c.GetHeader("Authorization")))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -1831,7 +1842,7 @@ func (r *RestServer) UpdateNodeSubscriberCount(c *gin.Context) {
 
 	// Get current username
 	authHeader := c.GetHeader("Authorization")
-	username, err := r.getUserFromToken(authHeader)
+	username, err := r.getUserFromToken(bearerToken(authHeader))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -2165,7 +2176,7 @@ func (r *RestServer) AddOrUpdateDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	username, err := r.getUserFromToken(bearerToken(c.GetHeader("Authorization")))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
@@ -2241,7 +2252,7 @@ func (r *RestServer) DeleteDnsRecord(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	username, err := r.getUserFromToken(c.GetHeader("Authorization"))
+	username, err := r.getUserFromToken(bearerToken(c.GetHeader("Authorization")))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Failed to get user from token"})
 		return
