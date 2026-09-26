@@ -1591,6 +1591,10 @@ func (r *RestServer) GetDhcpLeaseCount(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found or not connected"})
 		return
 	}
+	if result == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "DHCP lease not found for user"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"cur_lease_count": result.CurLeaseCount,

@@ -29,7 +29,19 @@ func (emptyNodeInfoServer) GetFastrgHsiInfo(context.Context, *emptypb.Empty) (*f
 	return &fastrgnodepb.FastrgHsiInfo{HsiInfos: []*fastrgnodepb.HsiInfo{}}, nil
 }
 
-func (emptyNodeInfoServer) GetFastrgDhcpInfo(context.Context, *emptypb.Empty) (*fastrgnodepb.FastrgDhcpInfo, error) {
+func (emptyNodeInfoServer) GetFastrgDhcpInfo(context.Context, *fastrgnodepb.DhcpInfoRequest) (*fastrgnodepb.FastrgDhcpInfo, error) {
+	return &fastrgnodepb.FastrgDhcpInfo{DhcpInfos: []*fastrgnodepb.DhcpInfo{}}, nil
+}
+
+// rangeCheckedNodeInfoServer rejects a DHCP user id past 2, as a real node does.
+type rangeCheckedNodeInfoServer struct {
+	emptyNodeInfoServer
+}
+
+func (rangeCheckedNodeInfoServer) GetFastrgDhcpInfo(_ context.Context, req *fastrgnodepb.DhcpInfoRequest) (*fastrgnodepb.FastrgDhcpInfo, error) {
+	if req.GetUserId() > 2 {
+		return nil, status.Errorf(codes.InvalidArgument, "Error! User %d is not exist", req.GetUserId())
+	}
 	return &fastrgnodepb.FastrgDhcpInfo{DhcpInfos: []*fastrgnodepb.DhcpInfo{}}, nil
 }
 
@@ -95,11 +107,44 @@ func TestLiveNodeInfoMissingUserReturnsNotFound(t *testing.T) {
 		manager.StopMonitoring(nodeID)
 	})
 
+	rangeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for range-checking FastRG node: %v", err)
+	}
+	rangeServer := grpc.NewServer()
+	fastrgnodepb.RegisterFastrgServiceServer(rangeServer, rangeCheckedNodeInfoServer{})
+	go func() {
+		_ = rangeServer.Serve(rangeListener)
+	}()
+	t.Cleanup(func() {
+		rangeServer.Stop()
+		_ = rangeListener.Close()
+	})
+	const rangeNodeID = "response-hygiene-range-node"
+	rangeCtx, cancelRange := context.WithCancel(context.Background())
+	rangeConn, err := grpc.NewClient(rangeListener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		cancelRange()
+		t.Fatalf("create range-checking FastRG node client: %v", err)
+	}
+	manager.monitors[rangeNodeID] = &NodeMonitor{
+		nodeUUID:     rangeNodeID,
+		ctx:          rangeCtx,
+		cancel:       cancelRange,
+		grpcConn:     rangeConn,
+		fastrgClient: fastrgnodepb.NewFastrgServiceClient(rangeConn),
+		mgr:          manager,
+	}
+	t.Cleanup(func() {
+		manager.StopMonitoring(rangeNodeID)
+	})
+
 	rs := &RestServer{nodeMonitorMgr: manager}
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.GET("/api/config/:nodeId/pppoe/:userId", rs.GetPPPoEInfo)
 	router.GET("/api/config/:nodeId/dhcp/:userId", rs.GetDhcpConfig)
+	router.GET("/api/config/:nodeId/dhcp/lease/:userId", rs.GetDhcpLeaseCount)
 
 	tests := []struct {
 		name        string
@@ -108,6 +153,9 @@ func TestLiveNodeInfoMissingUserReturnsNotFound(t *testing.T) {
 	}{
 		{name: "PPPoE session", path: "/api/config/" + nodeID + "/pppoe/1001", wantMessage: "PPPoE session not found for user"},
 		{name: "DHCP config", path: "/api/config/" + nodeID + "/dhcp/1001", wantMessage: "DHCP config not found for user"},
+		{name: "DHCP config, node rejects user id", path: "/api/config/" + rangeNodeID + "/dhcp/3", wantMessage: "DHCP config not found for user"},
+		{name: "DHCP lease, node rejects user id", path: "/api/config/" + rangeNodeID + "/dhcp/lease/3", wantMessage: "DHCP lease not found for user"},
+		{name: "DHCP lease, user not in reply", path: "/api/config/" + nodeID + "/dhcp/lease/1001", wantMessage: "DHCP lease not found for user"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
