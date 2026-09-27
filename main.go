@@ -43,7 +43,7 @@ import (
 // @securityDefinitions.apikey BearerAuth
 // @in header
 // @name Authorization
-// @description JWT token for authentication. Enter your token directly (without Bearer prefix).
+// @description JWT token for authentication, with or without the Bearer prefix.
 
 func main() {
 	// Get ports from environment variables with defaults

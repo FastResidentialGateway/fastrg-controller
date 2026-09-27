@@ -46,14 +46,15 @@ func (s *ConfigGrpcServer) callerFromCtx(ctx context.Context) (string, error) {
 	if len(vals) == 0 {
 		return "", status.Error(codes.Unauthenticated, "authorization token required")
 	}
+	tokenString := bearerToken(vals[0])
 	// Reuse the REST JWT validator (same secret, same claims).
 	rs := &RestServer{jwtSecret: s.jwtSecret}
-	user, err := rs.getUserFromToken(vals[0])
+	user, err := rs.getUserFromToken(tokenString)
 	if err != nil {
 		return "", status.Error(codes.Unauthenticated, "invalid token")
 	}
 
-	blacklistKey := fmt.Sprintf("token_blacklist/%s", vals[0])
+	blacklistKey := fmt.Sprintf("token_blacklist/%s", tokenString)
 	blacklistCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
